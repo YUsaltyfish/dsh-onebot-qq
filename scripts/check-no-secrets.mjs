@@ -78,7 +78,7 @@ function collectFiles() {
     else addFile(abs)
   }
   // README/LICENSE/CHANGELOG 已在 files 里；这里兜底再扫一次顶层说明文件。
-  for (const name of ['README.md', 'README.en.md', 'CHANGELOG.md', 'LICENSE']) addFile(path.join(ROOT, name))
+  for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE']) addFile(path.join(ROOT, name))
   return [...out].sort()
 }
 

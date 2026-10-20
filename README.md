@@ -1,7 +1,5 @@
 # dsh-onebot-qq
 
-> 🌏 [English](README.en.md) · 中文
-
 DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
 微内核 + 可插拔子插件，**Linux / Windows通用**，装完在控制台填几项就能用。
 
@@ -35,10 +33,19 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 
 ## 安装
 
-# ① 装插件（三选一）
-dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq        # GitHub
-dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz   # 本地 tgz（npm pack 产物）
-dsh plugin --profile web add link:/abs/path/dsh-onebot-qq        # 本地目录（改代码立刻生效）
+### ① 装插件（三选一）
+
+```bash
+# GitHub（推荐）
+dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
+
+# 本地 tgz（npm pack 产物）
+dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz
+
+# 本地目录（改代码立刻生效）
+dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
+```
+
 也可以在 DSH 桌面端的「设置 → 插件」里填 GitHub 仓库地址安装。
 
 > **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
@@ -53,8 +60,12 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq        # 本地目录�
 4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 
 > 首次启动缺 `adminQq` 会进入「待配置模式」：控制台和工具可用、不连 NapCat，填完自动连接。
-## 控制台集成在DSH内置设置页，可配置程度高
-## qq人设可以直接让 AI 照随包的 `personas/_模板.md` 写一份。优秀程度看用心程度，推荐ds模型多用示范对话。
+
+## 控制台与人设
+
+- **控制台**集成在 DSH 内置设置页，可配置程度高：16 个页签、热改即生效。
+- **人设**可以直接让 AI 照随包的 `personas/_模板.md` 写一份；优秀程度看用心程度，推荐让模型多用示范对话。
+
 ## 文档
 
 | 文档 | 内容 |
