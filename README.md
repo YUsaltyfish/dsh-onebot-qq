@@ -88,3 +88,7 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 ## License
 
 [MIT](LICENSE)
+
+---
+
+> ⚠️ 本项目目前还在深度测试中，诚邀同好者共同维护。
