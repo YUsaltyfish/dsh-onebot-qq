@@ -54,7 +54,7 @@ const REQUIRED = [
   'icon.svg',
   'cordis.patch.yml',
   'README.md',
-  'README.zh-CN.md',
+  'README.en.md',
   'LICENSE',
   'CHANGELOG.md',
   'docs/使用说明书.md',

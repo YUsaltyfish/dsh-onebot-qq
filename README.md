@@ -1,116 +1,114 @@
 # dsh-onebot-qq
 
-A **QQ bot plugin for [DeepSeek Harness](https://github.com/deepseek-ai) (DSH)**, running in-process and speaking the
-OneBot v11 protocol through [NapCat](https://napcat.napneko.icu/).
-Microkernel + pluggable sub-plugins. Works on **Linux / Windows / macOS**, and is install-and-go once you fill in a few
-fields in the console.
+> 🌏 [English](README.en.md) · 中文
+
+一个**QQ 机器人插件**，跑在 **DeepSeek Harness（DSH）** 进程内，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
+微内核 + 可插拔子插件，**Linux / Windows / macOS 通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
 
-> **Start here**: [docs/使用说明书.md](docs/使用说明书.md) — the user manual (install → connect → feature usage → persona
-> authoring, currently in Chinese). Want DSH to install it for you? hand [docs/安装前准备.md](docs/安装前准备.md)
-> to the agent.
+> **先读**：[`docs/使用说明书.md`](docs/使用说明书.md)（使用说明书：安装 → 连接 → 各功能怎么用 → 人设怎么写）。
+> 想自己装：本文「安装」；只想让 DSH 帮你装：把 [`docs/安装前准备.md`](docs/安装前准备.md) 甩给它。
 
-## Features
+## 特性
 
-| Capability | Details |
+| 能力 | 说明 |
 |---|---|
-| **Native DSH plugin** | ships `dsh.bundle.patch`, one-line mount, fully in-process (no daemon/systemd) |
-| **Microkernel + 9 sub-plugins** | gate/wake, commands, files, persona lines, group welcome, imagegen, link parser, stickers, group memory — auto-discovered, one failure never breaks the rest |
-| **Single outbound path** | text goes through `deliver()`, media through `sendMedia()`: `[AT:]` extraction → six-step redaction → plugin decoration → send + archive |
-| **QQ console** | 16 tabs, hot-reloaded config (atomic write + backup + rollback); one sub-plugin per page; misc config grouped under “Other”, each control with a hover explanation |
-| **Ready-made persona** | built-in “蓝色大肥鱼” persona + `_template.md`, auto-seeded on first start; persona wake words merged with config |
-| **QQ-side features** | images in/out, generation & editing (`openai-images` / `openai-chat`), avatars, sticker library, group welcome, group memory injection, optional link parsing |
-| **Cross-platform** | paths, temp dirs, CQ file refs, atomic writes and persona symlink fallback all live in `platform/` |
-| **No private defaults** | no real QQ numbers, tokens or server paths in the package; pack guard + secret scan |
+| **DSH 原生插件** | `dsh.bundle.patch` 随包声明、一行挂载；纯 in-process，无独立进程 / systemd |
+| **微内核 + 9 个子插件** | 门禁唤醒 / 命令 / 文件 / 人设句池 / 入群欢迎 / 生图 / 链接解析 / 表情包 / 群记忆；目录自动发现，坏一个不影响其他 |
+| **唯一出站口** | 文本只走 `deliver()`、媒体只走 `sendMedia()`；自动抽 `[AT:]` → 六项脱敏 → 插件装饰 → 发送 + 留档 |
+| **QQ 控制台** | 16 个页签、配置热改（原子写 + 备份 + 回滚）；子插件↔页面 1:1；低频配置集中「其他」页，全部带悬停解释 |
+| **开箱人设** | 内置「蓝色大肥鱼」+ `_模板.md`，首次启动自动投递；唤醒词与人设词合并生效，控制台可增删 |
+| **QQ 侧能力** | 收发图片、生图/图生图（`openai-images` / `openai-chat`）、群头像、表情包自动收集、入群欢迎、群记忆注入、可选链接解析 |
+| **跨平台** | 路径 / 临时目录 / CQ 文件引用 / 原子写 / 人设软链降级全在 `platform/` 收口 |
+| **零私有默认值** | 包内没有真实 QQ 号 / 群号 / 密钥 / 服务器路径；打包守卫 + 扫描 |
 
-## Requirements
+## 前置要求
 
-| Component | Requirement |
+| 组件 | 要求 |
 |---|---|
 | Node.js | `>= 22` |
-| DSH | `>= 0.2.1-rc.2 < 0.3.0` (declared in `engines.dsh`) |
-| NapCat | QQNT client + OneBot v11; **forward WebSocket** and **HTTP API** enabled |
-| QQ account | used by NapCat (a spare account is recommended) |
+| DSH | `>= 0.2.1-rc.2 < 0.3.0`（`engines.dsh` 声明） |
+| NapCat | QQNT 客户端 + OneBot v11；需开启**正向 WebSocket** 与 **HTTP API** |
+| QQ 号 | NapCat 登录用（建议小号）；机器人靠它收发消息 |
 
-## Install
+## 安装
 
 ```bash
-# 1) install the plugin (pick one)
-dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
-dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz   # local tgz (npm pack)
-dsh plugin --profile web add link:/abs/path/dsh-onebot-qq         # local dir (live edits)
+# ① 装插件（三选一）
+dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq        # GitHub
+dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz   # 本地 tgz（npm pack 产物）
+dsh plugin --profile web add link:/abs/path/dsh-onebot-qq        # 本地目录（改代码立刻生效）
 
-# 2) create data dir + config template + default persona (first time only)
+# ② 建数据目录 + 配置模板 + 默认人设（只第一次）
 node bin/dsh-onebot-qq.mjs init
 
-# 3) start DSH
+# ③ 启动 DSH
 dsh web
 ```
 
-You can also install from GitHub inside the DSH desktop app: Settings → Plugins.
+也可以在 DSH 桌面端的「设置 → 插件」里填 GitHub 仓库地址安装。
 
-> **Optional**: to hide **global** tools (`ops_*`, agent-team, MCP resources) from QQ sessions as well, install the companion plugin `dsh-onebot-qq-opsgate`:
-> `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate` (must be installed **after** `dsh-onebot-qq`).
-> Everything works without it — QQ sessions just see a larger tool surface. See [`docs/安装与卸载.md`](docs/安装与卸载.md).
+> **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
+> `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
+> 不装也能正常用，只是 QQ 会话的工具面更大。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
 
-## Quick start (4 steps)
+## 快速开始（4 步）
 
-1. Log in to QQ in NapCat, enable WebSocket (default `ws://127.0.0.1:3001`) and HTTP (default `http://127.0.0.1:3000`).
-2. DSH Settings → “QQ console” → “NapCat connection”: fill URL/token → “Test NapCat connection”.
-3. Fill **owner QQ** at the top of the “Groups” tab (required) → it connects automatically.
-4. @ the bot in QQ (or DM it) → you should get a reply.
+1. NapCat 登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（可空）。
+2. DSH 设置 →「QQ 控制台」→「NapCat 连接」填地址/token → 点「测试 NapCat 连接」。
+3. 「群聊」页顶部填**主人 QQ**（必填）→ 保存后自动连接。
+4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 
-> Without `adminQq` the plugin starts in “pending config” mode: console/tools work, NapCat is not connected yet.
-> Upgrading from the old name? The legacy data dir `$DSH_HOME/dsh-qq-bot` is reused automatically — no migration.
+> 首次启动缺 `adminQq` 会进入「待配置模式」：控制台和工具可用、不连 NapCat，填完自动连接。
+> 从旧版本升级：数据目录旧名 `$DSH_HOME/dsh-qq-bot` 会被**自动沿用**，配置不用搬。
 
-## Console at a glance
+## 控制台一页看懂
 
-Overview · Ops · Groups · NapCat connection · Message settings · Proactive replies · Wake · Files & images · Persona
-lines · Group welcome · Imagegen · Link parser · Stickers · Other (permissions/gates/dirs/avatars) · Sub-plugins · Group memory.
-See [docs/使用说明书.md](docs/使用说明书.md) (Chinese) for the details.
+总览（状态/人设）· 运维（测试/诊断）· 群聊（主人 QQ / 每群管理）· NapCat 连接 · 消息设置 · 主动接话 · 唤醒 · 文件与图片 · 句池 · 入群欢迎 · 生图 · 链接解析 · 表情包 · 其他（权限/门禁/目录/头像）· 子插件 · 群记忆。
+每个页签的详细用法见 [`docs/使用说明书.md`](docs/使用说明书.md)。
 
-## Persona (short version)
+## 人设怎么写（简版）
 
-A persona is three files under `<dataDir>/personas/`:
+一套人设 = 三个文件，放在数据目录 `personas/`：
 
-- `<name>.md` — who it is and how it talks
-- `<name>.lines.txt` — canned lines (poke / call ack / imagegen)
-- `<name>.wake.txt` — wake words, one per line
+- `<名字>.md`：是谁、怎么说话（性格/口头禅/示范对话）
+- `<名字>.lines.txt`：句池（被戳/被叫/生图时的短句）
+- `<名字>.wake.txt`：唤醒词，一行一个
 
-Easiest: ask an AI to follow the bundled `personas/_template.md`. Switch with the console overview or:
+最省事：让 AI 照随包的 `personas/_模板.md` 写一份。切换人设：控制台「总览」点人设，或：
 
 ```bash
 node bin/dsh-onebot-qq.mjs persona use 蓝色大肥鱼
 ```
 
-## Documentation
+## 文档
 
-| Doc | Contents |
+| 文档 | 内容 |
 |---|---|
-| [docs/使用说明书.md](docs/使用说明书.md) | **user manual (Chinese)** |
-| [docs/安装前准备.md](docs/安装前准备.md) | the only two external prerequisites + acceptance |
-| [docs/安装与卸载.md](docs/安装与卸载.md) | install / upgrade / uninstall / first configuration |
-| [docs/配置参考.md](docs/配置参考.md) | every instance config key, path rules, credentials |
-| [docs/Windows安装.md](docs/Windows安装.md) | Windows from zero to working |
-| [docs/排错.md](docs/排错.md) | NapCat connection, missing tools, images |
-| [docs/插件开发.md](docs/插件开发.md) | sub-plugin contract, `bot` capabilities, red lines |
-| [docs/架构说明.md](docs/架构说明.md) | implementation contract for contributors |
-| [docs/运维接口.md](docs/运维接口.md) | optional ops provider interface |
+| [`docs/使用说明书.md`](docs/使用说明书.md) | **使用说明书（先看这个）** |
+| [`docs/安装前准备.md`](docs/安装前准备.md) | 装之前：还要另外准备什么（只有 2 项）+ 验收 |
+| [`docs/安装与卸载.md`](docs/安装与卸载.md) | 安装 / 升级 / 卸载 / 首次配置 |
+| [`docs/配置参考.md`](docs/配置参考.md) | 实例配置 v2 全部键、路径规则、凭据、控制台热改 |
+| [`docs/Windows安装.md`](docs/Windows安装.md) | Windows 从零到跑通 + 真机验证清单 |
+| [`docs/排错.md`](docs/排错.md) | 连不上 NapCat、工具不出现、图片发不出 |
+| [`docs/插件开发.md`](docs/插件开发.md) | 子插件契约、`bot` 能力表、五阶段、红线 |
+| [`docs/架构说明.md`](docs/架构说明.md) | 实现契约（贡献者必读） |
+| [`docs/运维接口.md`](docs/运维接口.md) | 可选运维外设接口（自检/清理等不进包） |
 
-## Development
+## 开发与测试
 
 ```bash
-node --test                    # full test suite (includes fake-NapCat e2e)
-npm run check                  # syntax + secret scan + pack manifest guard
-npm run verify                 # all of the above (run before release)
-node bin/dsh-onebot-qq.mjs doctor
+node --test                    # 全部测试（含假 NapCat 端到端）
+npm run check                  # 语法 + 私有信息扫描 + 打包清单守卫
+npm run verify                 # 上面全部（发布前跑）
+node bin/dsh-onebot-qq.mjs doctor   # 环境/配置/端口自检
 ```
 
-## Privacy
+## 隐私
 
-- The package contains **no** real QQ numbers, tokens, API keys or server paths; every example is a placeholder.
-- Runtime data (config, personas, stickers, memory, logs) stays in your own data dir — not in the repo, not in npm.
+- 包内**不含**任何真实 QQ 号、群号、token、API Key 或服务器路径；示例都是占位值。
+- 运行数据（配置、人设、表情库、群记忆、日志）都在你自己的数据目录，不进仓库、不进 npm 包。
 
 ## License
 
