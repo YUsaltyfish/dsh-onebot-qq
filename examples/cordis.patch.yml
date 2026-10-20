@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# dsh-onebot-qq 用户配置示例（profile patch）
+#
+# 用法 A｜推荐：用插件管理器安装（自动挂载）
+#   DSH GUI 侧栏「插件」或 `dsh plugin --profile web add <tgz/目录/git URL>`
+#   本包自带 cordis.patch.yml，安装后 bundle 会被选中并自动插入 `dsh-onebot-qq` 行；
+#   这时**不要**再用文件开头的 insert（会重复插入同一 id），要改配置请用文件末尾的「覆盖」写法。
+#
+# 用法 B｜手动挂载（没有把本包当 bundle 安装、而是自己往 profile patch 里写）：
+#   把下面的 insert 块复制进你的 profile patch（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`）。
+#
+# 所有值均为占位；真实配置放实例 config.json（控制台热改的就是它），不要写进这里。
+# ─────────────────────────────────────────────────────────────────────────────
+- insert:
+    - id: dsh-onebot-qq
+      name: 'dsh-onebot-qq'
+      config:
+        # 数据目录：留空 = $DSH_HOME/dsh-onebot-qq（Linux/macOS 通常是 ~/.dsh/dsh-onebot-qq；
+        # Windows 通常是 %USERPROFILE%\.dsh\dsh-onebot-qq）。也可以写绝对路径。
+        dataDir: ''
+        # 实例配置文件：留空 = <dataDir>/config.json
+        configPath: ''
+        # 启动时自动连接 NapCat；先做静态验证/无 QQ 环境时设为 false
+        autoConnect: true
+        # 可选兼容网关（给旧脚本用的 :3971 HTTP 入口），默认关闭
+        compatServer: false
+        compatPort: 3971
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 覆盖写法（已作为 bundle 安装时改引导项用；config 是整块替换，不是深合并）
+#
+# - id: dsh-onebot-qq
+#   config:
+#     dataDir: 'C:\dsh-data\qq-bot'
+#     autoConnect: true
+#     compatServer: false
+#     compatPort: 3971
+# ─────────────────────────────────────────────────────────────────────────────

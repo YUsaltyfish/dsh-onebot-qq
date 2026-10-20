@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 示例 Agent preset：QQ 聊天线（纯聊天 + 联网，裁掉文件/任务/技能/控制类工具）。
+#
+# ⚠️ 正常安装**不需要**手动复制这个文件：dsh-onebot-qq 的 bundle patch（cordis.patch.yml）
+#    已经随包声明了同名的 `qq-chat` preset，安装插件即注册、默认启用。
+#    只有「插件没有作为 bundle 安装、只手写了一行」时才需要把下面整块复制进 profile patch。
+#
+# 用法（手动场景）：复制进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`，重启 DSH；
+#   然后在实例 config.json 把 `dsh.agentPreset` 填成 `qq-chat`（或控制台切换）。
+#
+# ⚠️ 本示例把 shell 两个平台都裁掉（纯聊天不需要）；name 必须是 DSH 包里存在的插件名。
+# ─────────────────────────────────────────────────────────────────────────────
+- insert:
+    - id: preset-qq-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: qq-chat
+        name: QQ 聊天
+        description: 只保留聊天、联网与上下文压缩；文件/任务/技能/提问卡/插件管理类工具全部裁掉。
+        order: 50
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a QQ chat assistant. Reply naturally and briefly in the language of the incoming message.
+                QQ 线每轮必须调用 MCP 工具（mcp__qq__*）才能让对方收到内容；只写正文等于没有回话。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+
+          # ── shell：两个平台都裁掉（纯聊天不需要；要留一个就按平台写 !!js 条件）──
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: true
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: true
+
+          # ── 裁掉的工具：文件 / 搜索 / 任务 / 技能 / 交互卡片 / 插件管理 ──
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            disabled: true
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            disabled: true
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+            disabled: true
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
+            disabled: true
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            disabled: true
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+            disabled: true
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+            disabled: true
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            disabled: true
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+            disabled: true
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
+          - id: tool-plugin-market
+            name: '@deepseek-ai/dsh-plugin-market/tools'
+            disabled: true
+
+          # ── 联网：搜索/抓取（QQ 线查资料只靠它）──
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+
+          # ── 上下文压缩：QQ 线会话长，压缩阈值调低、保留量调小 ──
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.1
+                  retainTokens: 20000
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

@@ -1,0 +1,7 @@
+test/
+_reference/
+.github/
+*.tgz
+*.bak-*
+config.json
+data/

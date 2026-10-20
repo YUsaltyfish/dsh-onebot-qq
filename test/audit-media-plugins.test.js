@@ -1,0 +1,282 @@
+/**
+ * test/audit-media-plugins.test.js — 生图 / 头像（imagegen）与链接/卡片解析（link-parser）。
+ *
+ * 迁移自旧 `audit-media-plugins.test.js`：保留行为级断言；删除现网 config 继承、旧 admin 写值、
+ * 旧 sidecar 细节用例。上游 HTTP 用临时替换的 globalThis.fetch 打桩（不外网）。
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+import { extractUrls, stripUrls, extractCardUrl, fmtDuration } from '../plugins/link-parser/index.js'
+import { bootKernel, emitRaw, ADMIN_QQ, GROUP_ID, groupAtEvent } from './helpers.mjs'
+
+// 1x1 PNG（最小合法图片字节）
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const PNG = Buffer.from(PNG_B64, 'base64')
+
+function installFetchMock(t, handler) {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts })
+    return handler(String(url), opts, calls.length)
+  }
+  t.after(() => {
+    globalThis.fetch = original
+  })
+  return calls
+}
+
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } })
+}
+
+async function bootImagegen(t, { imagegen = {}, credentials = null } = {}) {
+  const h = await bootKernel({
+    config: {
+      pacing: { merge: { enabled: false } },
+      ...(credentials ? { credentials } : {}),
+      pluginConfig: {
+        'link-parser': { enabled: false },
+        'persona-voice': { splitReplyEnabled: false },
+        'gate-wake': { adminQq: ADMIN_QQ },
+        imagegen: { enabled: true, cooldownMs: 60, ackCooldownMs: 30, ...imagegen },
+      },
+    },
+  })
+  t.after(() => h.dispose())
+  return h
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// link-parser：纯函数（无网络）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('link-parser extractUrls：最多取 2 条、去掉中文标点/尾部半角符号、平台识别', () => {
+  const text = '看这个 https://www.bilibili.com/video/BV1xx411c7mD，还有 https://v.douyin.com/abc123/。第三个 https://example.invalid/x'
+  const urls = extractUrls(text, 2)
+  assert.equal(urls.length, 2, '最多 2 条')
+  assert.ok(urls[0].includes('bilibili.com'), '中文逗号不进链接')
+  assert.ok(urls[1].includes('douyin.com'))
+  assert.equal(urls[1].endsWith('。'), false, '尾部中文标点削掉')
+  const again = extractUrls('同一条 https://b23.tv/abc https://b23.tv/abc', 5)
+  assert.equal(again.length, 1, '去重')
+})
+
+test('link-parser stripUrls：剥链接后剩正文（判断"在跟我说话"用）', () => {
+  assert.equal(stripUrls('看看这个 https://b23.tv/abc 吧').trim(), '看看这个  吧'.replace(/\s+/g, ' ').trim())
+  assert.ok(stripUrls('https://b23.tv/abc').trim() === '', '纯链接剥完为空')
+})
+
+test('link-parser extractCardUrl：detail_1.qqdocurl / miniapp / news 挖真链；图片字段跳过', () => {
+  const segData = (json) => ({ data: JSON.stringify(json) }) // OneBot json 段的 seg.data 形态
+  assert.equal(extractCardUrl(segData({ meta: { detail_1: { qqdocurl: 'https://b23.tv/abc' } } })), 'https://b23.tv/abc')
+  assert.equal(extractCardUrl(segData({ meta: { miniapp: { jumpUrl: 'https://example.invalid/mini' } } })), 'https://example.invalid/mini')
+  assert.equal(extractCardUrl(segData({ meta: { news: { jumpUrl: 'https://example.invalid/news' } } })), 'https://example.invalid/news')
+  assert.equal(extractCardUrl(segData({ meta: { detail_1: { icon: 'https://example.invalid/icon.png' } } })), null)
+})
+
+test('link-parser fmtDuration：分:秒 格式（向下取整）', () => {
+  assert.equal(fmtDuration(59), '0:59')
+  assert.equal(fmtDuration(65), '1:05')
+  assert.equal(fmtDuration(319.9), '5:19')
+  assert.equal(fmtDuration(3725), '62:05')
+})
+
+test('link-parser 默认关闭：带链接的消息不抢答，照常交给模型', async (t) => {
+  const h = await bootKernel({
+    config: {
+      pacing: { merge: { enabled: false } },
+      pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, 'persona-voice': { splitReplyEnabled: false } },
+    },
+  })
+  t.after(() => h.dispose())
+  await emitRaw(h.kernel, groupAtEvent({ text: '看看这个 https://b23.tv/abc', messageId: 201 }))
+  const prompt = await h.ctx._prompts?.[0]
+  assert.ok(prompt, '链接消息应照常进模型（插件默认关）')
+  assert.ok(prompt.content[0].text.includes('b23.tv'), '链接留在正文里')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// imagegen
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('imagegen 总开关关闭：工具明确报"未启用"，不发上游请求', async (t) => {
+  const h = await bootImagegen(t, { imagegen: { enabled: false } })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  assert.ok(tool, '应注册 generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '一只猫' }), /未启用/)
+  assert.equal(calls.length, 0, '关闭时不打上游')
+})
+
+test('imagegen 无凭据：给出可操作的中文错误（环境变量/credentials）', async (t) => {
+  const h = await bootImagegen(t) // baseConfig 的 credentials.gptImage.apiKey 为空
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '一只猫' }), /QQ_IMAGEGEN|凭据/)
+})
+
+test('imagegen 参考图白名单：白名单外的本地图在请求上游前被拒', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-ref-')), 'ref.png')
+  fs.writeFileSync(outside, PNG)
+  await assert.rejects(() => tool.execute({ prompt: '改图', image: outside }), /白名单/)
+  assert.equal(calls.length, 0, '白名单外参考图不打上游')
+})
+
+test('imagegen 成功生成 → 发到会话；冷却内第二次返回 blocked（不生成、不排队、不重试）', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { cooldownMs: 60, ackCooldownMs: 30 },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r1 = await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  assert.equal(r1.ok, true)
+  assert.equal(calls.length, 1, '只打一次上游（成功不重试）')
+  assert.ok(h.sent.some((s) => s.kind === 'media'), '生成后通过唯一媒体出站口发出')
+
+  const r2 = await tool.execute({ prompt: '再来一只', target: `group:${GROUP_ID}` })
+  assert.equal(r2.ok, true)
+  assert.equal(r2.blocked, true, '冷却中返回 blocked')
+  assert.ok(r2.retryAfterMs > 0)
+  assert.ok(String(r2.suggestedText || '').length > 0, '给模型一句可用的回话参考')
+  assert.equal(calls.length, 1, '冷却中不再打上游（不花钱）')
+})
+
+test('imagegen 上游失败：零重试 + 插件自己如实代答一句（不吞错）', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  let calls = 0
+  installFetchMock(t, () => {
+    calls += 1
+    return jsonResponse({ error: { message: 'boom' } }, 500)
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` }), /不要重试|失败/)
+  assert.equal(calls, 1, '失败零重试（只请求一次）')
+  assert.ok(h.sent.some((s) => s.kind === 'msg'), '插件自己发了一句失败说明（不哑火）')
+})
+
+test('imagegen openai-chat 协议：chat/completions 返回 base64 图片 → 落盘并发出', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { protocol: 'openai-chat', baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, (url) => {
+    assert.ok(url.endsWith('/chat/completions'), `chat 协议应请求 /chat/completions，实际 ${url}`)
+    return jsonResponse({
+      choices: [{
+        message: {
+          content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_B64}` } }],
+        },
+      }],
+    })
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+  assert.equal(r.mode, 'generate')
+  assert.equal(r.protocol, 'openai-chat', '返回体应带当前协议')
+  assert.ok(fs.existsSync(r.file), '生成的图片应落盘')
+  assert.ok(fs.statSync(r.file).size > 0)
+  assert.equal(calls.length, 1, '只请求一次 chat 上游')
+  const body = JSON.parse(String(calls[0].opts.body))
+  assert.equal(body.model, 'gpt-image-2')
+  assert.equal(body.stream, false)
+  assert.equal(body.messages[0].role, 'user')
+  assert.ok(JSON.stringify(body.messages[0].content).includes('一只猫'), '提示词进 messages')
+  assert.ok(h.sent.some((s) => s.kind === 'media'), '生成后经唯一媒体出站口发出')
+})
+
+test('imagegen openai-chat 协议：markdown/URL 形态 → 下载后落盘', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { protocol: 'openai-chat', baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  let imageDownloads = 0
+  installFetchMock(t, (url) => {
+    if (url.endsWith('/chat/completions')) {
+      return jsonResponse({ choices: [{ message: { content: '画好了：![cat](https://example.invalid/files/gen.png)' } }] })
+    }
+    if (url === 'https://example.invalid/files/gen.png') {
+      imageDownloads += 1
+      return new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } })
+    }
+    return jsonResponse({ error: 'unexpected url' }, 404)
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '一只狗', target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+  assert.ok(fs.existsSync(r.file), 'URL 形态应下载并落盘')
+  assert.equal(imageDownloads, 1)
+})
+
+test('imagegen openai-chat 协议：参考图以 data URL 放进 messages；上游失败零重试且错误带协议名', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { protocol: 'openai-chat', baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  const ref = path.join(refDir, 'ref.png')
+  fs.writeFileSync(ref, PNG)
+
+  let calls = 0
+  installFetchMock(t, (url) => {
+    calls += 1
+    assert.ok(url.endsWith('/chat/completions'))
+    return jsonResponse({ error: { message: 'chat upstream boom' } }, 500)
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '改成水彩', image: ref, target: `group:${GROUP_ID}` }), /openai-chat/)
+  assert.equal(calls, 1, '失败只请求一次（不重试）')
+  assert.ok(h.sent.some((s) => s.kind === 'msg'), '插件自己如实代答一句失败说明')
+})
+
+test('imagegen openai-chat 参考图请求体：messages 里带 data URL 的 image_url', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { protocol: 'openai-chat', baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  const ref = path.join(refDir, 'ref.png')
+  fs.writeFileSync(ref, PNG)
+  let capturedBody = null
+  installFetchMock(t, (url, opts) => {
+    capturedBody = JSON.parse(String(opts.body))
+    return jsonResponse({ choices: [{ message: { images: [{ url: `data:image/png;base64,${PNG_B64}` }] } }] })
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '改成水彩', image: ref, target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+  assert.equal(r.mode, 'edit')
+  const content = capturedBody.messages[0].content
+  assert.ok(Array.isArray(content), 'content 应是数组')
+  assert.equal(content[0].type, 'text')
+  const imgPart = content.find((c) => c.type === 'image_url')
+  assert.ok(imgPart, '参考图应以 image_url 形式发送')
+  assert.match(imgPart.image_url.url, /^data:image\/png;base64,/, '参考图用 data URL')
+})
+
+test('avatar：QQ 头像下载 → 缓存复用（第二次不再下载）', async (t) => {
+  const h = await bootImagegen(t)
+  let calls = 0
+  installFetchMock(t, () => {
+    calls += 1
+    return new Response(Buffer.concat([PNG, Buffer.alloc(200, 1)]), { status: 200, headers: { 'content-type': 'image/png' } })
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__avatar')
+  assert.ok(tool, '应注册 avatar')
+  const r1 = await tool.execute({ target: `group:${GROUP_ID}`, user: '50001' })
+  assert.ok(String(r1).length > 0)
+  assert.equal(calls, 1)
+  await tool.execute({ target: `group:${GROUP_ID}`, user: '50001' })
+  assert.equal(calls, 1, '缓存命中不重复下载')
+})

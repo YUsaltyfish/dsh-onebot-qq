@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# 二进制/压缩产物：不要把换行符规范化到这些文件上
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.tgz binary
+*.tar.gz binary
+*.zip binary

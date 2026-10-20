@@ -1,0 +1,81 @@
+{
+    "version": 2,
+    "adminQq": 10001,
+    "napcat": {
+        "wsUrl": "ws://127.0.0.1:3001",
+        "wsToken": "",
+        "httpUrl": "http://127.0.0.1:3000",
+        "httpToken": ""
+    },
+    "dsh": {
+        "agentPreset": "qq-chat",
+        "qqWorkspacePath": "workspace",
+        "workspaceTitle": "QQ 聊天",
+        "sessionsFile": "state/sessions.json"
+    },
+    "outbound": {
+        "replyMaxLength": 3000,
+        "longForwardThreshold": 400,
+        "longForwardChunkSize": 800,
+        "quoteAfterMsgs": 3,
+        "groupContextCount": 10
+    },
+    "archive": {
+        "enabled": true,
+        "dir": "logs/qq_chat"
+    },
+    "toolPrefix": "mcp__qq__",
+    "plugins": {},
+    "pluginConfig": {},
+    "pacing": {
+        "merge": {
+            "enabled": true,
+            "windowMs": 2000,
+            "maxWaitMs": 6000,
+            "skipIfSlowMs": 30000,
+            "windowActiveMs": 4000,
+            "activeGapMs": 15000
+        },
+        "reply": {
+            "enabled": false,
+            "hourlyMax": 6,
+            "minGapMs": 480000,
+            "coldSilenceMs": 180000,
+            "topicWindowMs": 600000,
+            "topicMinMsgs": 3,
+            "sensitivity": 0.45,
+            "maxChars": 140,
+            "groups": [],
+            "style": {
+                "splitEnabled": true,
+                "splitProbability": 0.5,
+                "splitMinLen": 12,
+                "splitDelayMs": 1000,
+                "stickerEnabled": true,
+                "stickerProbability": 0.8
+            },
+            "weights": {
+                "intercept": -1.2005,
+                "mentionBot": 1.5852,
+                "atOther": -1.1157,
+                "hasQuestion": 0.4807,
+                "placeholderOnly": -1.0281,
+                "selfRatio": 2.6525,
+                "recentCount": -0.0367,
+                "logSecondsSinceBot": 0.0571,
+                "pendingCount": 0.1012
+            }
+        }
+    },
+    "credentials": {
+        "gptImage": {
+            "protocol": "openai-images",
+            "baseUrl": "",
+            "apiKey": "",
+            "model": "gpt-image-2"
+        }
+    },
+    "compat": {
+        "imageRoots": []
+    }
+}

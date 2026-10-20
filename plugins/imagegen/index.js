@@ -1,0 +1,585 @@
+/**
+ * imagegen.js — 生图 / 图生图 / 头像子插件（id: imagegen，order: 60）
+ *
+ * 生图协议（`credentials.gptImage.protocol`；环境变量 `QQ_IMAGEGEN_PROTOCOL` 优先）：
+ *   · `openai-images`（默认）：`POST {base}/images/generations`（JSON 文生图）+
+ *     `POST {base}/images/edits`（multipart 图生图；重复 `image` 字段 = 多张参考，顺序即传入顺序）。
+ *   · `openai-chat`：`POST {base}/chat/completions`（JSON，messages 里放文本 + 参考图 data URL）。
+ *     适合只提供 chat 出图能力的中转站；响应尽量宽容地解析 URL / base64 / markdown 图 / data URI。
+ *
+ * 凭据纪律：**代码里不写死任何 apiKey / baseUrl** —— 实例配置 `credentials.gptImage`
+ * （`bot.credentials` / `setup(bot, opts)` 的 `opts.credentials`）注入，或环境变量：
+ *   QQ_IMAGEGEN_API_KEY / QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_MODEL。
+ * 没配置时工具报"未配置生图凭据"的友好错误，不抛底层 401。
+ *
+ * 平台边界：生图快照写 `resolveTmpDir('imagegen')`（系统临时目录下专用子目录，Windows 可用）；
+ * 参考图白名单用 `isInsidePath()`（Windows 反斜杠/大小写正确）；发送媒体用 `cqImage()`。
+ *
+ * 四条实测纪律（都对应踩过的坑，改代码前先读）：
+ *   ① **冷却被挡 = 不生成、不排队**：冷却内再调直接返回 `{blocked:true,retryAfterMs,suggestedText}`，
+ *      本插件**不代答**，由模型自己回一句后结束本轮。
+ *   ② **失败 = 到此为止**：工具侧**不重试、不改写提示词再调一次**；失败时本插件自己发一句
+ *      `imageFail` 句池话术（零 token），并在抛回模型的错误里写明"已代答、别补话、别重试"
+ *      —— 一次失败只对应一条消息（旧实现里模型自发改写重试导致用户先看到"画不过来"）。
+ *   ③ **冷却计的是触发次数（含失败）**：从触发那一刻起算，防上游抖动时反复打、反复花钱。
+ *   ④ **「在画了」只在真调工具时发（execute 里）**：绝不按用户文本关键词提前应声。
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { detectImageMediaType, imagePixelSize, pickImageSizeByRatio } from '../../kernel/format.js'
+import { isInsidePath, resolveTmpDir } from '../../platform/paths.js'
+import { cqImage } from '../../platform/cq-file.js'
+import { atomicWriteFileSync } from '../../platform/atomic.js'
+
+// 句池取不到时的兜底话（不带角色口吻，换人设也不会穿帮）
+const FALLBACK_ACK = '在画了，稍等'
+const FALLBACK_BUSY = '画不过来，等会儿再叫'
+const FALLBACK_FAIL = '画失败了…等会儿再试'
+
+const IMG_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
+
+/** 支持的生图协议（与 kernel/config-store.js 的校验口径一致） */
+const PROTOCOLS = ['openai-images', 'openai-chat']
+
+/** 生图错误统一带「当前协议」前缀：控制台/模型都能看出挂在哪条线上 */
+function protocolError(protocol, message) {
+  return new Error(`生图(${protocol}协议)失败：${message}`)
+}
+
+let tmpSeq = 0
+
+/** 生成快照存平台临时目录（用完由内核 best-effort 清理）；按真实文件头定扩展名 */
+function saveBuf(buf, tmp) {
+  const ext = IMG_EXT[detectImageMediaType(buf)] || 'png'
+  const file = tmp?.file
+    ? tmp.file('imagegen', `.${ext}`)
+    : path.join(resolveTmpDir('imagegen'), `qq_imagegen_${Date.now()}_${++tmpSeq}.${ext}`)
+  fs.writeFileSync(file, buf)
+  return file
+}
+
+/** 带超时 fetch：生图/下载都是几十秒级，不限时会把整轮挂死 */
+async function fetchWithTimeout(url, opts, timeoutMs, label) {
+  try {
+    return await fetch(url, { ...opts, signal: AbortSignal.timeout(Math.max(1000, Number(timeoutMs) || 240000)) })
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+      throw new Error(`${label}超时 (${Math.round((Number(timeoutMs) || 240000) / 1000)}s)`)
+    }
+    throw e
+  }
+}
+
+/** 上游失败时把可读原因挖出来（别把整页 HTML 甩给模型） */
+async function throwImagegenError(res) {
+  const raw = await res.text().catch(() => '')
+  let emsg = ''
+  try { emsg = JSON.parse(raw).error?.message || raw } catch { emsg = `HTTP ${res.status}` }
+  throw new Error(String(emsg || `HTTP ${res.status}`).slice(0, 200))
+}
+
+/** 统一解析响应：`data[0].{url|b64_json}` → 本地图片路径（两条线共用） */
+async function imagegenResult(res, what, timeoutMs, tmp) {
+  if (!res.ok) await throwImagegenError(res)
+  const data = await res.json()
+  const item = (data.data || [])[0]
+  if (!item) throw new Error(`${what}响应无 data`)
+  if (item.url) {
+    const rf = await fetchWithTimeout(item.url, { method: 'GET' }, timeoutMs, '图片下载')
+    if (!rf.ok) throw new Error(`图片下载 HTTP ${rf.status}`)
+    return saveBuf(Buffer.from(await rf.arrayBuffer()), tmp)
+  }
+  if (item.b64_json) return saveBuf(Buffer.from(item.b64_json, 'base64'), tmp)
+  throw new Error('无法取得图片内容')
+}
+
+/**
+ * 从一个值里尽量宽容地挖出图片引用：data URI / markdown 图 / 裸 URL / 纯 base64。
+ * 返回 `{kind:'b64', mediaType?, data}` 或 `{kind:'url', url}`；挖不到返回 null。
+ */
+function extractImageRef(value) {
+  if (value == null) return null
+  if (typeof value === 'object') {
+    // 常见形态：{ url } / { image_url: { url } } / { b64_json } / { data } / { image } / { text }
+    for (const key of ['url', 'b64_json', 'data', 'image', 'image_url', 'content', 'text']) {
+      if (!(key in value)) continue
+      const found = extractImageRef(value[key])
+      if (found) return found
+    }
+    return null
+  }
+  const text = String(value || '').trim()
+  if (!text) return null
+  // ① data URI（有些网关直接把图 base64 嵌进 content，甚至整条消息就是 data URI）
+  const dataUri = /data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)/i.exec(text)
+  if (dataUri) return { kind: 'b64', mediaType: dataUri[1].toLowerCase(), data: dataUri[2].replace(/\s+/g, '') }
+  // ② markdown 图 `![alt](url)`
+  const md = /!\[[^\]]*\]\(\s*([^)\s]+)\s*\)/i.exec(text)
+  if (md) return extractImageRef(md[1])
+  // ③ 裸 http(s) URL（chat 出图最常见的返回形态）
+  const url = /https?:\/\/[^\s"'<>()]+/i.exec(text)
+  if (url) return { kind: 'url', url: url[0] }
+  // ④ 纯 base64 大块（没有 data URI 前缀的网关）
+  if (/^[A-Za-z0-9+/=\r\n]{256,}$/.test(text)) return { kind: 'b64', data: text.replace(/\s+/g, '') }
+  return null
+}
+
+/** 解析 chat/completions 响应里的图片：按宽容优先级逐个字段试 */
+function extractChatImage(data) {
+  if (!data || typeof data !== 'object') return null
+  const choice = (Array.isArray(data.choices) ? data.choices[0] : null) || {}
+  const message = choice.message && typeof choice.message === 'object' ? choice.message : {}
+  // ① message.images[]（部分兼容层这么返回）
+  for (const item of Array.isArray(message.images) ? message.images : []) {
+    const found = extractImageRef(item)
+    if (found) return found
+  }
+  // ② message.content：字符串（含 markdown/URL/data URI）或数组（image_url / image 项与文本片段）
+  const content = message.content
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      const found = extractImageRef(part)
+      if (found) return found
+    }
+  } else if (content != null) {
+    const found = extractImageRef(content)
+    if (found) return found
+  }
+  // ③ 有些网关直接回 data[0].{url,b64_json}（与 /images 同形）
+  const fromData = extractImageRef(Array.isArray(data.data) ? data.data[0] : null)
+  if (fromData) return fromData
+  // ④ 兜底扫整个响应（极少见；已按上面优先级排除常见形态）
+  return extractImageRef(data)
+}
+
+/** 把解析出来的图片引用落成本地快照（下载 URL / 解码 base64） */
+async function materializeChatImage(found, timeoutMs, tmp, protocol) {
+  if (found?.kind === 'b64') {
+    const buf = Buffer.from(found.data, 'base64')
+    if (!buf.length) throw protocolError(protocol, '响应里的 base64 图片为空')
+    return saveBuf(buf, tmp)
+  }
+  if (!found?.url) throw protocolError(protocol, '响应里没有可下载的图片地址')
+  const res = await fetchWithTimeout(found.url, { method: 'GET' }, timeoutMs, '生图(chat协议)图片下载')
+  if (!res.ok) throw protocolError(protocol, `图片下载 HTTP ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const head = buf.subarray(0, 64).toString('utf8').trimStart().toLowerCase()
+  if (!buf.length || head.startsWith('<')) throw protocolError(protocol, '下载到的内容不是图片（可能是 HTML/错误页）')
+  return saveBuf(buf, tmp)
+}
+
+/**
+ * openai-chat 协议：`POST {base}/chat/completions`，参考图以 data URL 放进 user 消息。
+ * 为什么需要：部分中转站只暴露 chat/completions 出图（models 里给的是 image 模型但走 chat 接口）。
+ * 失败一律抛 `生图(openai-chat协议)失败：…`（调用方统一代答 + 禁止重试）。
+ */
+async function chatGenerate({ prompt, refs, timeoutMs, creds, tmp }) {
+  const protocol = 'openai-chat'
+  const base = String(creds.baseUrl || '').replace(/\/+$/, '')
+  if (!base) throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
+  const content = [{ type: 'text', text: prompt }]
+  for (const real of refs) {
+    const buf = fs.readFileSync(real)
+    const mediaType = detectImageMediaType(buf)
+    content.push({ type: 'image_url', image_url: { url: `data:${mediaType};base64,${buf.toString('base64')}` } })
+  }
+  const body = { model: creds.model, stream: false, messages: [{ role: 'user', content }] }
+  const what = refs.length ? `图生图(${refs.length}张参考)` : '生图'
+  let res
+  try {
+    res = await fetchWithTimeout(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${creds.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }, timeoutMs, `${what}(chat协议)`)
+  } catch (e) {
+    throw protocolError(protocol, e.message)
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`
+    try {
+      const raw = await res.text()
+      try { detail = JSON.parse(raw).error?.message || raw || detail } catch { detail = raw || detail }
+    } catch { /* 读不到 body 就用状态码 */ }
+    throw protocolError(protocol, `${what}请求失败：${String(detail).slice(0, 200)}`)
+  }
+  let data
+  try { data = await res.json() } catch { throw protocolError(protocol, `${what}响应不是 JSON（该中转站可能不支持 chat 出图）`) }
+  const found = extractChatImage(data)
+  if (!found) {
+    throw protocolError(protocol, `${what}响应里没找到图片（支持 content 里的 URL/markdown/data URI、message.images[]、data[0].{url,b64_json}）`)
+  }
+  return materializeChatImage(found, timeoutMs, tmp, protocol)
+}
+
+/**
+ * 参考图 / 头像白名单：只允许真实文件，且落在这些根目录下（realpath 解析，软链穿不出去）。
+ * 为什么必须有：图生图会把文件内容发给第三方中转，不能让人拿任意本地文件（配置/凭据）外流。
+ * 根目录 = 配置的参考图/头像目录 + 数据目录 + 平台临时根（内核注入），不写死任何机器路径。
+ */
+function resolveAllowedImage(file, cfg, bot) {
+  const p = path.isAbsolute(file) ? file : path.join(cfg.refDir, file)
+  if (!fs.existsSync(p)) throw new Error(`图片文件不存在: ${file}`)
+  const real = fs.realpathSync(p)
+  const roots = [...new Set([
+    cfg.refDir,
+    cfg.avatarDir,
+    bot?.core?.dataDir,
+    bot?.core?.tmp?.root,
+  ].filter(Boolean).map((r) => path.resolve(String(r))))]
+  if (!roots.some((root) => isInsidePath(root, real))) {
+    throw new Error(`图片路径必须在白名单目录下（当前白名单：${roots.join(' / ')}）: ${file}`)
+  }
+  if (!fs.statSync(real).isFile()) throw new Error(`不是文件: ${file}`)
+  return real
+}
+
+/** 按协议分派；未知协议给可读错误（带上当前值，便于控制台自检） */
+async function gptGenerate(opts) {
+  const protocol = String(opts?.creds?.protocol || 'openai-images')
+  if (!PROTOCOLS.includes(protocol)) {
+    throw new Error(`未知生图协议：${protocol}（可用 ${PROTOCOLS.join(' / ')}；改 credentials.gptImage.protocol 或环境变量 QQ_IMAGEGEN_PROTOCOL）`)
+  }
+  if (protocol === 'openai-chat') return chatGenerate(opts)
+  return imagesGenerate(opts)
+}
+
+/** openai-images 协议：文生图 JSON，图生图 multipart（重复 `image` 字段 = 多张参考，顺序即传入顺序） */
+async function imagesGenerate({ prompt, refs, size, timeoutMs, creds, tmp }) {
+  const base = String(creds.baseUrl || '').replace(/\/+$/, '')
+  if (!base) throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
+  const headers = { authorization: `Bearer ${creds.apiKey}` }
+  if (!refs.length) {
+    const body = { model: creds.model, prompt, n: 1 }
+    if (size) body.size = size
+    const res = await fetchWithTimeout(`${base}/images/generations`, {
+      method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }, timeoutMs, '生图')
+    return imagegenResult(res, '生图', timeoutMs, tmp)
+  }
+  const form = new FormData()
+  form.append('model', creds.model)
+  form.append('prompt', prompt)
+  form.append('n', '1')
+  if (size) form.append('size', size)
+  refs.forEach((real, i) => {
+    const buf = fs.readFileSync(real)
+    const mediaType = detectImageMediaType(buf)
+    form.append('image', new Blob([buf], { type: mediaType }), `ref${i + 1}.${IMG_EXT[mediaType] || 'png'}`)
+  })
+  const what = refs.length > 1 ? `图生图(${refs.length}张参考)` : '图生图'
+  // ⚠️ edits 只吃 multipart，不要给它加 content-type（浏览器/Node 会自己带 boundary）
+  const res = await fetchWithTimeout(`${base}/images/edits`, { method: 'POST', headers, body: form }, timeoutMs, what)
+  return imagegenResult(res, what, timeoutMs, tmp)
+}
+
+/** 凭据解析：实例配置注入优先，其次环境变量；代码里永远没有明文 key / 默认 baseUrl */
+function resolveCreds(injected) {
+  const env = process.env
+  const pick = (...names) => names.map((n) => env[n]).find((v) => v && String(v).trim())
+  const gpt = injected?.gptImage || injected?.['gpt-image'] || injected?.gpt || {}
+  return {
+    // 协议：实例配置 > 环境变量 > 默认 openai-images（config-store 已做配置校验/环境变量覆盖，这里兜底）
+    protocol: String(gpt.protocol || pick('QQ_IMAGEGEN_PROTOCOL') || 'openai-images').trim(),
+    baseUrl: String(gpt.baseUrl || pick('QQ_IMAGEGEN_BASE_URL', 'OPENAI_BASE_URL') || ''),
+    apiKey: String(gpt.apiKey || pick('QQ_IMAGEGEN_API_KEY', 'OPENAI_API_KEY') || ''),
+    model: gpt.model || pick('QQ_IMAGEGEN_MODEL') || 'gpt-image-2',
+  }
+}
+
+export default {
+  id: 'imagegen',
+  title: '生图 / 头像',
+  order: 60,
+
+  configSchema: {
+    info: {
+      type: 'info', group: '生图',
+      text: '生图是可选能力：填好地址 / 模型 / API Key 后，模型就能在聊天里生成或修改图片。\n'
+        + '· 协议怎么选：中转站兼容 /images/generations 与 /images/edits → 选「OpenAI 兼容 /images/*」（默认）；\n'
+        + '  只提供 chat/completions 出图的（部分中转站）→ 选「OpenAI 兼容 chat/completions」。\n'
+        + '· 地址填到 /v1 为止（例：https://relay.example/v1）；模型名以你的中转站为准。\n'
+        + '· API Key 的优先级：环境变量 QQ_IMAGEGEN_API_KEY > 下面这个输入框。\n'
+        + '· 没配置时生图工具会明确提示"未配置生图凭据"，不影响聊天；填完（离开输入框即保存）点「运维」页的「🖼 检查生图配置」验证。',
+    },
+    // 凭据归属「生图」页（属于 imagegen 插件）；存储路径仍是 credentials.gptImage.* → 旧配置 / 环境变量零迁移。
+    protocol: {
+      type: 'enum', group: '生图', label: '生图协议', default: 'openai-images',
+      key: 'credentials.gptImage.protocol', configPath: ['credentials', 'gptImage', 'protocol'],
+      options: [
+        { value: 'openai-images', label: 'OpenAI 兼容 /images/*' },
+        { value: 'openai-chat', label: 'OpenAI 兼容 chat/completions' },
+      ],
+      hint: '默认 openai-images；中转站只支持 chat 出图时选 openai-chat。环境变量 QQ_IMAGEGEN_PROTOCOL 优先于这里。',
+    },
+    baseUrl: {
+      type: 'str', group: '生图', label: 'API 地址（填到 /v1）', default: '',
+      key: 'credentials.gptImage.baseUrl', configPath: ['credentials', 'gptImage', 'baseUrl'],
+      hint: '例：https://relay.example/v1 。环境变量 QQ_IMAGEGEN_BASE_URL 优先于这里。',
+    },
+    model: {
+      type: 'str', group: '生图', label: '模型', default: 'gpt-image-2',
+      key: 'credentials.gptImage.model', configPath: ['credentials', 'gptImage', 'model'],
+      suggestions: ['gpt-image-2', 'gpt-image-1', 'dall-e-3', 'flux-1.1-pro', 'gemini-2.5-flash-image-preview'],
+      hint: '模型名以你的中转站为准；环境变量 QQ_IMAGEGEN_MODEL 优先于这里。',
+    },
+    apiKey: {
+      type: 'str', group: '生图', label: 'API Key', default: '', secret: true,
+      key: 'credentials.gptImage.apiKey', configPath: ['credentials', 'gptImage', 'apiKey'],
+      hint: '保存后只回显占位符；环境变量 QQ_IMAGEGEN_API_KEY 优先于这个输入框。',
+    },
+    enabled: { type: 'bool', default: true, group: '生图', label: '生图', hint: '开：群里叫它画图时调用生图模型出图并发出来；关：完全不出图。' },
+    cooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 60, group: '生图', label: '全局冷却', hint: '两次生图之间至少隔多久（所有群共用），防止连刷烧额度。' },
+    ackCooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 30, group: '生图', label: '「在画了」冷却', hint: '同一会话几秒内只说一次「在画了」，避免每张图都刷这句。' },
+    timeoutMs: { type: 'int', unit: '秒', scale: 1000, default: 240, group: '生图', label: '生图超时', hint: '单次生图最多等多久；超时就放弃并回一句失败说明。' },
+    refDir: { type: 'str', default: 'qq-refs', group: '生图', label: '角色参考图目录', hint: '角色参考图放这个目录（图生图用）；留空 = <数据目录>/qq-refs。' },
+    avatarDir: {
+      type: 'str', default: 'qq_avatars', group: '头像', label: '头像缓存目录',
+      hint: '取群成员头像后的本地缓存目录（相对路径按数据目录解析；留空 = <数据目录>/qq_avatars）。缓存文件按 QQ 号命名，可随时手动删；磁盘紧张就换目录。',
+    },
+    avatarCacheHours: {
+      type: 'int', unit: '小时', default: 24, group: '头像', label: '头像缓存时长',
+      hint: '同一 QQ 的头像缓存多少小时后重新下载：调大 = 更省请求但头像更新慢；调小 = 更勤快但请求多。0 或负数按 24 处理。',
+    },
+  },
+
+  setup(bot, opts = {}) {
+    const cfg = bot.cfg
+    const log = bot.log
+    // 凭据每次调用现取：控制台「生图」页改完协议/地址/Key 后热生效，不用重启。
+    // 优先级：bot.credentials（实例配置 live getter，热重载后指向新值）→ setup 第二参注入（兼容旧装配）→ 环境变量。
+    const credsNow = () => resolveCreds(bot.credentials || opts.credentials || null)
+    const refDirNow = () => String(cfg.refDir || '').trim() || path.join(String(bot.core?.dataDir || '.'), 'qq-refs')
+    const avatarDirNow = () => String(cfg.avatarDir || '').trim() || path.join(String(bot.core?.dataDir || '.'), 'qq_avatars')
+
+    // 全局冷却：跨群 / 跨私聊 / 网页本地共用一个池子（旧 imageGenAt 的 'global' 键）
+    let lastGenAt = 0
+    // 「在画了」按 target 冷却：同一会话 ackCooldownMs 内只应一声（旧 imageAckAt）
+    const ackAt = new Map()
+
+    // 面板单位是「秒」（如 60 / 120 / 240），若传入 <1000 则 ×1000 转为 ms；若已是 ms（≥1000）则原样用
+    const toMs = (v, defMs) => {
+      const n = Number(v)
+      if (!Number.isFinite(n) || n <= 0) return defMs
+      return n >= 1000 ? Math.round(n) : Math.round(n * 1000)
+    }
+    const cdMs = () => toMs(cfg.cooldownMs, 60000)
+    const ackCdMs = () => toMs(cfg.ackCooldownMs, 30000)
+    const timeoutMs = () => toMs(cfg.timeoutMs, 240000)
+    const inCooldown = () => lastGenAt > 0 && Date.now() - lastGenAt < cdMs()
+
+    // 句池取不到时按兜底句发 —— 不能因为句池文件坏了就沉默
+    const pick = (...sections) => {
+      for (const s of sections) {
+        try {
+          const v = bot.linesPool?.pick?.(s)
+          if (v) return String(v)
+        } catch { /* 句池异常不影响生图 */ }
+      }
+      return ''
+    }
+
+    /**
+     * 发一句「在画了」（零 token、零步，免得模型为了说一声多占一步上下文）。
+     * ⚠️ 只在 execute() 真调生图时调用：**不看用户文本** ——
+     *    否则群里聊到「改图/生图」就被误应一声（线上事故，见文件头④）。
+     */
+    async function maybeAck(target) {
+      if (!/^(group|private):\d{1,12}$/.test(String(target || ''))) return
+      const last = ackAt.get(target) || 0
+      if (Date.now() - last < ackCdMs()) return
+      ackAt.set(target, Date.now())
+      const line = pick('imagegenAck', 'imageAck') || FALLBACK_ACK
+      try {
+        await bot.deliver(target, line)
+      } catch (e) {
+        log.warn(`生图应答发送失败 (${target}): ${e.message}`)
+      }
+    }
+
+    /**
+     * 尺寸：显式 size > 按**第一张参考图**比例自动选 1K 档 > 方图 1024x1024。
+     * 为什么不交给上游 auto：实测不传 size / 传 auto 会给 2048 级（超出"一般不大于 1K"的约定）。
+     */
+    function chooseSize(explicit, refs) {
+      const s = String(explicit || '').trim()
+      if (s) {
+        if (!/^\d{2,4}x\d{2,4}$/.test(s)) throw new Error(`size 需形如 1024x1024，收到: "${s}"`)
+        return s
+      }
+      if (refs.length) {
+        try { return pickImageSizeByRatio(fs.readFileSync(refs[0])) } catch (e) {
+          log.warn(`按参考图选尺寸失败(退回 1024x1024): ${e.message}`)
+        }
+      }
+      return '1024x1024'
+    }
+
+    bot.registerTool('generate_image', {
+      description:
+        '按提示词生成或修改图片。不传 image = 文生图；传了 image = 图生图/改图，以那张图为参考，'
+        + 'image 可给多张（数组，按顺序 = 图1、图2）。传了 target 就生成后直接发到该 QQ 会话。'
+        + '⚠️ 画图有全局冷却：冷却中被挡会返回 {blocked:true,retryAfterMs,suggestedText} —— 此时**必须自己**用 '
+        + 'mcp__qq__send_message 回一句（口吻照 suggestedText），然后结束本轮，**不要再调、不要重试**。'
+        + '生成失败时本插件已代答，**不要重试、不要改写提示词再调一次**。',
+      parameters: {
+        prompt: { type: 'string', required: true, description: '画面描述（提示词），越具体越好；末尾按提示词纪律带去噪/去涂抹的话。' },
+        image: {
+          description: '图生图的参考图：本地图片绝对路径（多张可传字符串数组或用英文逗号分隔，按顺序 = 图1、图2）。不传就是文生图',
+          oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        },
+        target: { type: 'string', description: '会话目标 group:123456 或 private:123456；传了就生成后直接发过去，不传只返回本地文件路径' },
+        text: { type: 'string', description: '随图发送的一句说明文字，可选' },
+        size: { type: 'string', description: '一般不用传：不传时按图1比例自动选 1K 档（竖 1024x1536 / 横 1536x1024 / 方 1024x1024）；只有要特定比例才传' },
+      },
+
+      async execute(args = {}) {
+        if (!cfg.enabled) throw new Error('生图功能未启用 (imagegen.enabled=false)')
+        const prompt = String(args.prompt ?? '').trim()
+        if (!prompt) throw new Error('prompt 不能为空')
+        const genTarget = String(args.target || '')
+        const canReply = /^(group|private):\d{1,12}$/.test(genTarget)
+
+        // image 可字符串（含逗号分隔多张）或数组；逐个过白名单（发往第三方中转，不能任意本地文件外流）
+        const asRefList = (v) => {
+          if (Array.isArray(v)) return v
+          const raw = String(v ?? '').trim()
+          if (!raw) return []
+          // Windows 路径本身可能含逗号：整串能落到真实文件时按单张处理，别拆坏
+          try { if (fs.existsSync(raw)) return [raw] } catch { /* ignore */ }
+          return raw.split(/[\r\n,]+/)
+        }
+        const rawImgs = asRefList(args.image)
+        const refs = rawImgs
+          .map((x) => String(x || '').trim()).filter(Boolean)
+          .map((p) => resolveAllowedImage(p, { ...cfg, refDir: refDirNow(), avatarDir: avatarDirNow() }, bot))
+
+        const creds = credsNow()
+        if (!creds.apiKey || !creds.baseUrl) {
+          throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
+        }
+        const size = chooseSize(args.size, refs)
+
+        // ① 全局冷却：被挡的**不生成、不排队、不代答**，只把「被挡 + 还剩多久 + 一句参考话」交回模型
+        if (inCooldown()) {
+          const left = Math.max(0, cdMs() - (Date.now() - lastGenAt))
+          log.info(`[生图] 冷却中(还剩 ${Math.ceil(left / 1000)}s): 本次不生成不入队, 交模型自己回 (${genTarget || '无 target'})`)
+          return {
+            ok: true,
+            blocked: true,
+            replied: false,
+            cooldownMs: cdMs(),
+            retryAfterMs: left,
+            suggestedText: pick('imagegenBusy', 'imageBusy') || FALLBACK_BUSY,
+            note: `画图冷却中（还剩约 ${Math.ceil(left / 1000)} 秒）：本次**没生成、没入队**，本插件**没有**替你回话。`
+              + '请**自己**用 mcp__qq__send_message 回一句（口吻参考 suggestedText，一两句、别解释机制），然后结束本轮；'
+              + '**不要**再调 generate_image，也不要重试。',
+          }
+        }
+        // ② 冷却从**触发那一刻**起算、含失败 —— 防上游抖动时反复打、反复花钱
+        lastGenAt = Date.now()
+        const turn = bot.currentTurn?.()
+        if (turn) turn.imagegenUsed += 1
+        if (canReply) await maybeAck(genTarget)
+
+        const t0 = Date.now()
+        let file
+        try {
+          file = await gptGenerate({ prompt, refs, size, timeoutMs: timeoutMs(), creds, tmp: bot.core?.tmp })
+        } catch (e) {
+          log.error(`[生图] ${refs.length ? '图生图' : '生图'}失败 (${Date.now() - t0}ms, prompt=${prompt.slice(0, 60)}): ${e.message}`)
+          // ③ **失败就到此为止**：本插件自己如实说一句（零 token），并在错误里写明"已代答、别补话、别重试"。
+          //    ⚠️ 这里**没有、也不要加**任何重试逻辑 —— 重试是模型自发行为，靠错误文案三处一起掐。
+          if (canReply) {
+            const failLine = pick('imagegenFail', 'imageFail') || FALLBACK_FAIL
+            bot.deliver(genTarget, failLine).catch((err) => log.warn(`生图失败应答发送失败 (${genTarget}): ${err.message}`))
+          }
+          const rawReason = String(e.message || '')
+          // 错误信息里带上「当前协议」（chat 协议自己已带前缀，别重复拼）
+          const reason = /生图\([^)]*协议\)/.test(rawReason)
+            ? rawReason.slice(0, 140)
+            : `生图(${creds.protocol}协议)失败：${rawReason.slice(0, 140)}`
+          throw new Error(`${reason}${canReply
+            ? '｜已把失败如实告诉用户，本轮不要再发任何消息，也不要重试、不要改提示词再调一次'
+            : '｜不要重试'}`)
+        }
+
+        const buf = fs.readFileSync(file)
+        const px = imagePixelSize(buf)
+        const out = {
+          ok: true,
+          file,
+          bytes: buf.length,
+          ms: Date.now() - t0,
+          mode: refs.length ? 'edit' : 'generate',
+          protocol: creds.protocol,
+          size,
+          refs: refs.length,
+          actualSize: px ? `${px.w}x${px.h}` : null,
+        }
+        log.info(`[生图] (${out.protocol}) ${out.mode === 'edit' ? '图生图' : '生图'}完成 (${out.ms}ms, ${out.bytes}B, `
+          + `请求尺寸=${size}, 实际=${out.actualSize || '?'}${refs.length ? `, ref=${refs.join(' + ')}` : ''}, `
+          + `prompt=${prompt.slice(0, 60)}) → ${file}`)
+        if (!canReply) return out
+
+        const r = await bot.sendMedia(genTarget, cqImage(file), args.text ? String(args.text) : '')
+        log.info(`[生图] 已发送 ${genTarget}`)
+        return { ...out, target: genTarget, message_id: r?.messageId ?? r?.id ?? null }
+      },
+    })
+
+    bot.registerTool('avatar', {
+      description:
+        '取某个群成员（或自己）的 QQ 头像，存到工作区并返回本地路径。'
+        + '拿到的 path 可以直接当 generate_image 的 image 参数做图生图。'
+        + 'user **优先给 QQ 号**；群会话里也可给群名片/昵称（按当前群成员表反查，昵称会变，号码更稳）。',
+      parameters: {
+        target: { type: 'string', required: true, description: '哪个会话：group:<群号> 或 private:<QQ号>（通常填本轮会话，见开头 [QQ会话 …]）' },
+        user: { type: 'string', required: true, description: '看谁：**优先 QQ 号**；群会话里也可给群名片/昵称' },
+      },
+
+      async execute(args = {}) {
+        const target = String(args.target || '')
+        const m = /^(group|private):(\d{1,12})$/.exec(target)
+        if (!m) throw new Error(`target 格式错误: "${target}"，应为 group:<群号> 或 private:<QQ号>`)
+        const kind = m[1]
+        const gid = m[2]
+        const raw = String(args.user || '').trim().replace(/^@/, '')
+        if (!raw) throw new Error('user 不能为空（QQ 号，或群会话里的群名片/昵称）')
+
+        if (!/^\d{5,12}$/.test(raw)) {
+          // 昵称 → QQ 号要读群成员表；这个能力在适配器里（契约：bot.napcat.fetchAvatar），不在这重复实现
+          if (kind !== 'group') throw new Error('私聊里只能按 QQ 号取头像')
+          if (typeof bot.napcat?.fetchAvatar !== 'function') throw new Error(`群里没找到「${raw}」—— 换成 QQ 号再试`)
+          return await bot.napcat.fetchAvatar(target, raw)
+        }
+
+        // QQ 头像是公开 CDN（NapCat 没有可用头像接口，实测 `get_qq_avatar` 回"不支持的Api"）
+        const qq = raw
+        const dir = avatarDirNow()
+        fs.mkdirSync(dir, { recursive: true })
+        const file = path.join(dir, `${qq}.jpg`)
+        const cacheMs = (Number(cfg.avatarCacheHours) > 0 ? Number(cfg.avatarCacheHours) : 24) * 3600 * 1000
+        let cached = false
+        try {
+          const st = fs.statSync(file)
+          if (st.isFile() && st.size > 100 && Date.now() - st.mtimeMs < cacheMs) cached = true
+        } catch { /* 没有或过期 → 重新下载 */ }
+        const url = `https://q1.qlogo.cn/g?b=qq&nk=${qq}&s=640`
+        if (!cached) {
+          const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
+          if (!res.ok) throw new Error(`头像下载失败: HTTP ${res.status}`)
+          const buf = Buffer.from(await res.arrayBuffer())
+          if (buf.length < 100) throw new Error('头像下载失败: 内容过小（可能不是图片）')
+          atomicWriteFileSync(file, buf) // 原子替换（Windows 上 rename 被占用会退避重试）
+        }
+        const real = fs.realpathSync(file)
+        const bytes = fs.statSync(real).size
+        log.info(`[头像] ${qq} → ${real}（${cached ? '用缓存' : '刚下载'} ${bytes} 字节）`)
+        // path 在 workspace 下 → 天然过 generate_image 的参考图白名单，不需要加特例
+        return { ok: true, user_id: qq, name: raw, path: real, url, cached, bytes }
+      },
+    })
+  },
+}

@@ -1,0 +1,79 @@
+{
+  "name": "dsh-onebot-qq",
+  "version": "0.1.0",
+  "description": "DSH OneBot v11 (NapCat) QQ bot plugin — in-process microkernel + pluggable sub-plugins, install-and-go on Linux / Windows / macOS",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "bin": {
+    "dsh-onebot-qq": "./bin/dsh-onebot-qq.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "contracts.js",
+    "kernel",
+    "admin",
+    "ops",
+    "platform",
+    "plugins",
+    "vendor",
+    "bin",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "check:secrets": "node scripts/check-no-secrets.mjs",
+    "check:pack": "node scripts/check-pack.mjs",
+    "check": "node scripts/check-syntax.mjs && node scripts/check-no-secrets.mjs && node scripts/check-pack.mjs",
+    "verify": "node --test && node scripts/check-syntax.mjs && node scripts/check-no-secrets.mjs && node scripts/check-pack.mjs",
+    "prepack": "node scripts/check-no-secrets.mjs && node scripts/check-pack.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "onebot",
+    "onebot-v11",
+    "qq",
+    "qq-bot",
+    "napcat"
+  ],
+  "license": "MIT"
+}

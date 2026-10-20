@@ -1,0 +1,251 @@
+/**
+ * file-transfer — 文件收发子插件（id: 'file-transfer', order: 30）
+ *
+ * ⚠️ **QQ 只收不发文件**：OneBot 的 `upload_private_file` / `upload_group_file` 内核从来没接，
+ *    发文件能力已移除 —— **别加回来**。能发出去的只有文本和图片。
+ *
+ * 两件事：
+ *   ① 入站文件（`ev.files`）落盘到 uploadDir，文件名加时间戳前缀防覆盖，`ev.hint` 里告知路径；
+ *      字节溯源优先本地路径/fileId → 直链下载，拿不到如实写进 hint。
+ *   ② 出站图片工具 `send_image`：**realpath 解析后**做路径白名单校验（软链穿不出去），
+ *      防任意本地文件（含配置/凭据）被当图片发出去；之后走 `bot.sendMedia()`。
+ *
+ * 平台边界：白名单判定只用 `platform/paths.js` 的 `isInsidePath()`（Windows 反斜杠/大小写都正确）；
+ * 媒体码只用 `platform/cq-file.js` 的 `cqImage()`；默认目录由内核按 dataDir 解析成绝对路径。
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { isInsidePath } from '../../platform/paths.js'
+import { cqImage } from '../../platform/cq-file.js'
+
+/** target 只认这两种形态（sendImageTo 的校验口径） */
+const TARGET_RE = /^(group|private):(\d{1,12})$/
+/** 入站文件下载超时：QQ 文件可能几十 MB，给足时间；失败只记日志，不阻塞聊天 */
+const FILE_TIMEOUT_MS = 60000
+
+/**
+ * 校验本地图片路径：必须是白名单目录下的真实**文件**，返回 realpath。
+ * 发图与图生图都是"把本地文件交给外部"（发 QQ / 发第三方中转），所以白名单必须有，
+ * 且必须先 realpath 再比对 —— 否则一个指向系统目录的软链就能把配置/凭据发出去。
+ */
+function resolveAllowedImage(file, roots) {
+  if (!file || !fs.existsSync(file)) throw new Error(`图片文件不存在: ${file}`)
+  const real = fs.realpathSync(file)
+  if (!roots.some((root) => isInsidePath(root, real))) {
+    throw new Error(`图片路径必须在白名单目录下（当前白名单：${roots.join(' / ')}）: ${file}`)
+  }
+  if (!fs.statSync(real).isFile()) throw new Error(`不是文件: ${file}`)
+  return real
+}
+
+/** 文件名加时间戳前缀防覆盖；basename + 过滤控制字符，防路径穿越/奇怪名字 */
+function destName(name) {
+  const base = path.basename(String(name || '').replace(/\\/g, '/')) || 'file'
+  const safe = base.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'file'
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) // yyyymmddhhmmss
+  return `${ts}-${safe}`
+}
+
+/**
+ * 取入站文件字节。`ev.files` 给 `{ name, url, size, fileId }`：
+ *   · url 是服务器本地缓存路径（NapCat 常直接给）→ 直接读；
+ *   · url 是 http 直链 → 下载；
+ *   · 只有 fileId 时回 NapCat 溯源（url 会过期，fileId 才是把手）；
+ *   · 都拿不到 → 抛错（如实把失败写进 hint，比静默吞掉强：模型能看出文件没到）。
+ */
+async function fetchFileBytes(bot, f) {
+  const src = String(f?.url || f?.path || '')
+  if (src && fs.existsSync(src)) return fs.readFileSync(src)
+  if (/^https?:\/\//.test(src)) {
+    const res = await fetch(src, { signal: AbortSignal.timeout(FILE_TIMEOUT_MS) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return Buffer.from(await res.arrayBuffer())
+  }
+  // 溯源 NapCat 本地缓存；适配器把这个能力叫 getFile（只读视图已暴露）
+  if (f?.fileId && typeof bot.napcat?.getFile === 'function') {
+    const info = await bot.napcat.getFile(f.fileId)
+    const local = info?.file
+    if (local && fs.existsSync(local) && fs.statSync(local).isFile()) return fs.readFileSync(local)
+    if (info?.url && /^https?:\/\//.test(info.url)) {
+      const res = await fetch(info.url, { signal: AbortSignal.timeout(FILE_TIMEOUT_MS) })
+      if (!res.ok) throw new Error(`溯源直链 HTTP ${res.status}`)
+      return Buffer.from(await res.arrayBuffer())
+    }
+  }
+  throw new Error(src ? `无法识别的文件地址: ${src.slice(0, 80)}` : '文件段没有可取的地址（缺 url）')
+}
+
+export default {
+  id: 'file-transfer',
+  title: '文件与图片',
+  order: 30,
+  configSchema: {
+    enabled: { type: 'bool', default: true, group: '文件与图片', label: '文件与图片（收文件 + 发图）', hint: '总开关：关 = 不接收入站文件、send_image 拒绝发图（纯文本照常）。' },
+    downloadPolicy: {
+      type: 'enum', default: 'woken', group: '文件与图片', label: '什么时候下载入站文件',
+      options: [{ value: 'woken', label: '被叫到时才下（推荐）' }, { value: 'all', label: '过门禁的消息都下' }],
+      hint: '「被叫到时才下」= 只有真正会回复的消息才落盘（群里没叫它的文件不占磁盘）；「都下」= 任何通过门禁的消息都落盘（旧行为，更占磁盘）。',
+    },
+    uploadDir: {
+      type: 'str', default: 'qq_uploads', group: '文件', label: '入站文件目录',
+      hint: '收到的群文件 / 私聊文件会按「时间戳-原文件名」存到这个目录（相对路径按数据目录解析；留空 = <数据目录>/qq_uploads），'
+        + '模型提示里会给出完整路径。磁盘紧张就换到大盘目录；过期清理在「文件与图片」页设（默认保留 7 天）。',
+    },
+    maxFileMB: {
+      type: 'int', default: 20, unit: 'MB', min: 0, max: 500, group: '文件与图片', label: '单个文件大小上限',
+      hint: '超过就不下载、只在提示里写明「未接收」（0 = 不限）。防大文件吃内存 / 塞满盘。',
+    },
+    maxFilesPerMsg: {
+      type: 'int', default: 5, min: 1, max: 20, group: '文件与图片', label: '单条消息最多处理几个文件',
+      hint: '防一次刷一堆文件；超出的只提示、不下载。',
+    },
+    keepDays: {
+      type: 'int', default: 7, unit: '天', min: 0, max: 365, group: '文件与图片', label: '入站文件保留天数',
+      hint: '插件启动时清理超过 N 天的入站文件（0 = 不清理）。',
+    },
+    imageWhitelist: {
+      type: 'group', default: [], group: '发图', label: '可发图片目录白名单',
+      hint: '允许 send_image / 图生图读取的目录白名单（一项一个目录，相对路径按数据目录解析）。默认由内核注入「数据目录 + 系统临时目录」；'
+        + '自己填了就只认填的目录。校验会先 realpath（软链穿不出去），不是真实文件也发不出去。想让它发某个固定文件夹的图，把那个目录加进来即可。',
+    },
+  },
+
+  setup(bot) {
+    const log = bot.log
+    const cfgNow = () => bot.cfg || {}
+    const enabledNow = () => cfgNow().enabled !== false
+    const fallbackUploadDir = () => path.join(String(bot.core?.dataDir || '.'), 'qq_uploads')
+    const uploadDirNow = () => String(cfgNow().uploadDir || '').trim() || fallbackUploadDir()
+    /** 单文件上限（字节；0 = 不限） */
+    const maxFileBytes = () => {
+      const mb = Number(cfgNow().maxFileMB)
+      return Number.isFinite(mb) && mb > 0 ? Math.round(mb * 1024 * 1024) : 0
+    }
+    /** 单条消息最多处理几个文件（1~20，默认 5） */
+    const maxFilesPerMsg = () => {
+      const n = Number(cfgNow().maxFilesPerMsg)
+      return Number.isFinite(n) && n >= 1 ? Math.min(20, Math.floor(n)) : 5
+    }
+    const whitelist = () => {
+      const v = cfgNow().imageWhitelist
+      const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,，\n]/) : []
+      const roots = list.map((x) => String(x).trim()).filter(Boolean)
+      if (roots.length) return roots
+      // 内核注入缺失时（单测/手工装配）的兜底：数据目录 + 临时根
+      return [String(bot.core?.dataDir || '.'), String(bot.core?.tmp?.root || '')].filter(Boolean)
+    }
+
+    /** 启动时清理过期入站文件（keepDays=0 不清理）；失败只记日志，绝不影响启动。 */
+    function pruneOldUploads() {
+      const days = Number(cfgNow().keepDays)
+      if (!(days > 0)) return
+      const dir = uploadDirNow()
+      let names = []
+      try { names = fs.readdirSync(dir) } catch { return }
+      const cutoff = Date.now() - days * 24 * 3600 * 1000
+      let removed = 0
+      for (const name of names) {
+        const file = path.join(dir, name)
+        try {
+          const st = fs.statSync(file)
+          if (!st.isFile() || st.mtimeMs >= cutoff) continue
+          fs.unlinkSync(file)
+          removed += 1
+        } catch { /* 单个文件清理失败不影响其它 */ }
+      }
+      if (removed) log.info(`已清理 ${removed} 个过期入站文件（保留 ${days} 天，目录 ${dir}）`)
+    }
+    try { pruneOldUploads() } catch (e) { log.warn(`清理过期入站文件失败: ${e.message}`) }
+
+    // ── 入站：文件段落盘 ───────────────────────────────────────
+    // 默认「被叫才下」：挂在 before-turn（wake 之后、prompt 之前）—— 没叫它的群聊文件不落盘；
+    // 想回到旧的"过门禁就下"，把「文件与图片 → 什么时候下载文件」调成「都下」（改挂 passive-tap）。
+    const downloadPolicy = () => String(cfgNow().downloadPolicy || 'woken')
+
+    async function handleFiles(ev) {
+      if (!enabledNow()) return
+      const files = Array.isArray(ev.files) ? ev.files : []
+      if (!files.length) return
+      const scratch = ev._scratch || (ev._scratch = Object.create(null))
+      if (scratch.fileTransferDone) return // 两个阶段都挂着时防重复（热改策略的瞬间）
+      scratch.fileTransferDone = true
+      const cap = maxFilesPerMsg()
+      const picked = files.slice(0, cap)
+      if (files.length > picked.length) {
+        ev.hint.push(`[文件: 本条消息共 ${files.length} 个，只处理前 ${picked.length} 个]`)
+      }
+      const limitBytes = maxFileBytes()
+      const maxMB = Number(cfgNow().maxFileMB) || 0
+      const dir = uploadDirNow()
+      try {
+        fs.mkdirSync(dir, { recursive: true })
+      } catch (e) {
+        log.warn(`建入站文件目录失败 (${dir}): ${e.message}`)
+        return
+      }
+      for (const f of picked) {
+        const label = f?.name || '?'
+        const declared = Number(f?.size) || 0
+        if (limitBytes && declared > limitBytes) {
+          ev.hint.push(`[文件: ${label} 超过上限 ${maxMB}MB（${(declared / 1048576).toFixed(1)}MB），未接收]`)
+          log.info(`跳过超大入站文件 ${label}（声明 ${declared} 字节 > ${limitBytes}）`)
+          continue
+        }
+        try {
+          const buf = await fetchFileBytes(bot, f)
+          if (limitBytes && buf.length > limitBytes) {
+            ev.hint.push(`[文件: ${label} 超过上限 ${maxMB}MB，未接收]`)
+            log.info(`跳过超大入站文件 ${label}（下载后 ${buf.length} 字节 > ${limitBytes}）`)
+            continue
+          }
+          const dest = path.join(dir, destName(label))
+          fs.writeFileSync(dest, buf)
+          // hint 会原样拼进 prompt：让模型知道"用户发了这个文件、在服务器哪儿"
+          ev.hint.push(`[文件: ${dest}]`)
+          log.info(`QQ 文件已保存: ${dest}（${buf.length} 字节，来自 ${label}）`)
+        } catch (e) {
+          // 落盘失败也如实告知；不抛，别让一个坏文件拖垮整条消息
+          log.warn(`QQ 文件接收失败 (${label}): ${e.message}`)
+          ev.hint.push(`[文件: ${label} 保存失败: ${e.message}]`)
+        }
+      }
+    }
+
+    // 策略 all：任何过门禁的消息都落盘（passive-tap 是 fire-and-forget，不阻塞聊天）
+    bot.on('passive-tap', async (ev) => {
+      if (downloadPolicy() !== 'all') return
+      await handleFiles(ev)
+    })
+
+    // 策略 woken（默认）：被叫到、真正要回复时才落盘（wake 已判定；before-turn 阶段一定会跑，所以这里自己看 wake）
+    bot.on('before-turn', async (ev) => {
+      if (!ev.wake) return // 没被叫醒 = 这条不进模型，文件不落盘
+      if (downloadPolicy() !== 'woken') return
+      await handleFiles(ev)
+    })
+
+    // ── 出站：发图工具（引擎会加工具前缀，名字沿用旧工具，人设/指令文件不用改） ──
+    bot.registerTool('send_image', {
+      description: '把服务器上的本地图片发到 QQ 会话（只能发图，不能发文件）。'
+        + '图片路径必须在白名单目录下；caption 里不要写服务器内部信息。',
+      parameters: {
+        target: { type: 'string', required: true, description: '会话目标，形如 group:<群号> 或 private:<QQ号>' },
+        file: { type: 'string', required: true, description: '服务器上的本地图片绝对路径（必须在白名单目录下）' },
+        text: { type: 'string', description: '随图发送的一句说明文字' },
+      },
+      async execute(args) {
+        if (!enabledNow()) throw new Error('文件与发图未启用（file-transfer.enabled=false）：先去控制台「文件与图片」页打开开关')
+        const target = String(args?.target || '')
+        if (!TARGET_RE.test(target)) {
+          throw new Error(`target 格式错误: "${target}"，应为 group:<群号> 或 private:<QQ号>`)
+        }
+        const real = resolveAllowedImage(String(args?.file || ''), whitelist())
+        const r = await bot.sendMedia(target, cqImage(real), String(args?.text ?? '').trim())
+        const messageId = r && typeof r === 'object' ? (r.messageId ?? null) : (r ?? null)
+        log.info(`发出图片 ${target} (${real}, id=${messageId ?? '?'})`)
+        return { ok: true, target, file: real, messageId }
+      },
+    })
+  },
+}

@@ -1,0 +1,17 @@
+node_modules/
+package-lock.json
+_reference/
+*.tgz
+*.tar.gz
+*.log
+.env
+.DS_Store
+Thumbs.db
+config.json
+data/
+coverage/
+.idea/
+.vscode/
+test/fixtures/local-*.json
+*.bak-*
+ops.local.mjs
