@@ -2,7 +2,7 @@
 
 > 🌏 [English](README.en.md) · 中文
 
-一个**QQ 机器人插件**，跑在 **DeepSeek Harness（DSH）** 进程内，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
+DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
 微内核 + 可插拔子插件，**Linux / Windows / macOS 通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
@@ -39,19 +39,11 @@
 dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq        # GitHub
 dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz   # 本地 tgz（npm pack 产物）
 dsh plugin --profile web add link:/abs/path/dsh-onebot-qq        # 本地目录（改代码立刻生效）
-
-# ② 建数据目录 + 配置模板 + 默认人设（只第一次）
-node bin/dsh-onebot-qq.mjs init
-
-# ③ 启动 DSH
-dsh web
-```
-
 也可以在 DSH 桌面端的「设置 → 插件」里填 GitHub 仓库地址安装。
 
 > **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
 > `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
-> 不装也能正常用，只是 QQ 会话的工具面更大。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
+> 不装也能正常用，只是 QQ 会话的工具面更大，token消耗略微增加，可能导致群聊天时调用不该用的工具而产生风险。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
 
 ## 快速开始（4 步）
 
@@ -61,27 +53,8 @@ dsh web
 4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 
 > 首次启动缺 `adminQq` 会进入「待配置模式」：控制台和工具可用、不连 NapCat，填完自动连接。
-> 从旧版本升级：数据目录旧名 `$DSH_HOME/dsh-qq-bot` 会被**自动沿用**，配置不用搬。
-
-## 控制台一页看懂
-
-总览（状态/人设）· 运维（测试/诊断）· 群聊（主人 QQ / 每群管理）· NapCat 连接 · 消息设置 · 主动接话 · 唤醒 · 文件与图片 · 句池 · 入群欢迎 · 生图 · 链接解析 · 表情包 · 其他（权限/门禁/目录/头像）· 子插件 · 群记忆。
-每个页签的详细用法见 [`docs/使用说明书.md`](docs/使用说明书.md)。
-
-## 人设怎么写（简版）
-
-一套人设 = 三个文件，放在数据目录 `personas/`：
-
-- `<名字>.md`：是谁、怎么说话（性格/口头禅/示范对话）
-- `<名字>.lines.txt`：句池（被戳/被叫/生图时的短句）
-- `<名字>.wake.txt`：唤醒词，一行一个
-
-最省事：让 AI 照随包的 `personas/_模板.md` 写一份。切换人设：控制台「总览」点人设，或：
-
-```bash
-node bin/dsh-onebot-qq.mjs persona use 蓝色大肥鱼
-```
-
+## 控制台集成在DSH内置设置页，可配置程度高
+## qq人设可以直接让 AI 照随包的 `personas/_模板.md` 写一份。优秀程度看用心程度，推荐ds模型多用示范对话。
 ## 文档
 
 | 文档 | 内容 |
@@ -95,15 +68,6 @@ node bin/dsh-onebot-qq.mjs persona use 蓝色大肥鱼
 | [`docs/插件开发.md`](docs/插件开发.md) | 子插件契约、`bot` 能力表、五阶段、红线 |
 | [`docs/架构说明.md`](docs/架构说明.md) | 实现契约（贡献者必读） |
 | [`docs/运维接口.md`](docs/运维接口.md) | 可选运维外设接口（自检/清理等不进包） |
-
-## 开发与测试
-
-```bash
-node --test                    # 全部测试（含假 NapCat 端到端）
-npm run check                  # 语法 + 私有信息扫描 + 打包清单守卫
-npm run verify                 # 上面全部（发布前跑）
-node bin/dsh-onebot-qq.mjs doctor   # 环境/配置/端口自检
-```
 
 ## 隐私
 
