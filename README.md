@@ -3,7 +3,7 @@
 > 🌏 [English](README.en.md) · 中文
 
 DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
-微内核 + 可插拔子插件，**Linux / Windows / macOS 通用**，装完在控制台填几项就能用。
+微内核 + 可插拔子插件，**Linux / Windows通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
 
@@ -15,13 +15,14 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 | 能力 | 说明 |
 |---|---|
 | **DSH 原生插件** | `dsh.bundle.patch` 随包声明、一行挂载；纯 in-process，无独立进程 / systemd |
-| **微内核 + 9 个子插件** | 门禁唤醒 / 命令 / 文件 / 人设句池 / 入群欢迎 / 生图 / 链接解析 / 表情包 / 群记忆；目录自动发现，坏一个不影响其他 |
+| **高可塑性** | 想要什么功能自己向DSH许愿 |
+| **微内核 + 自带 9 个子插件** | 门禁唤醒 / 命令 / 文件 / 人设句池 / 入群欢迎 / 生图 / 链接解析 / 表情包 / 简易群记忆；目录自动发现，坏一个不影响其他 |
 | **唯一出站口** | 文本只走 `deliver()`、媒体只走 `sendMedia()`；自动抽 `[AT:]` → 六项脱敏 → 插件装饰 → 发送 + 留档 |
 | **QQ 控制台** | 16 个页签、配置热改（原子写 + 备份 + 回滚）；子插件↔页面 1:1；低频配置集中「其他」页，全部带悬停解释 |
 | **开箱人设** | 内置「蓝色大肥鱼」+ `_模板.md`，首次启动自动投递；唤醒词与人设词合并生效，控制台可增删 |
 | **QQ 侧能力** | 收发图片、生图/图生图（`openai-images` / `openai-chat`）、群头像、表情包自动收集、入群欢迎、群记忆注入、可选链接解析 |
 | **跨平台** | 路径 / 临时目录 / CQ 文件引用 / 原子写 / 人设软链降级全在 `platform/` 收口 |
-| **零私有默认值** | 包内没有真实 QQ 号 / 群号 / 密钥 / 服务器路径；打包守卫 + 扫描 |
+| **高扩展性** | 同“可塑性” |
 
 ## 前置要求
 
@@ -34,7 +35,6 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 
 ## 安装
 
-```bash
 # ① 装插件（三选一）
 dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq        # GitHub
 dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz   # 本地 tgz（npm pack 产物）
