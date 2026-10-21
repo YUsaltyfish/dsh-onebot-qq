@@ -27,8 +27,9 @@ import { createRequire } from 'node:module'
 
 import { CONTRACT_VERSION, STAGES, withDefaults, createEvent, createTurnContext } from './contracts.js'
 import {
-  normalizeEvent, buildPromptText, extractText, senderNameOf, detectImageMediaType, parseKeywordLines,
+  normalizeEvent, buildPromptText, extractText, renderForward, senderNameOf, detectImageMediaType, parseKeywordLines,
 } from './kernel/format.js'
+
 import { NapCatAdapter } from './kernel/napcat-adapter.js'
 import { ChatState, Pipeline, createDeliver, turnStore } from './kernel/state-pipeline.js'
 import { createPacing } from './kernel/pacing.js'
@@ -626,6 +627,7 @@ export async function apply(ctx, bundleConfig = {}) {
         memberInfo: (...a) => napcat.memberInfo(...a),
         msgById: (...a) => napcat.msgById(...a),
         getFile: (...a) => napcat.getFile(...a),
+        getForwardMsg: (...a) => napcat.getForwardMsg(...a),
         poke: (...a) => napcat.poke(...a),
         recall: (...a) => napcat.recall(...a),
         fetchAvatar: (...a) => napcat.fetchAvatar(...a),
@@ -745,6 +747,36 @@ export async function apply(ctx, bundleConfig = {}) {
         }
       } catch { /* 引用反查失败不阻塞本轮 */ }
     }
+    // 2.5 合并转发：正文要在这一步再取一次（get_forward_msg）。
+    // 只在**这条消息真要进模型**（ev.wake 已有）时取，避免给每条消息都打接口。
+    //
+    // ⚠️ 关键：QQ 里「发转发」和「@它」**必然是两条消息**（客户端限制），第二条只能引用第一条。
+    //    before-turn 跑在"@它"那条上，它的 _scratch.forwards 是空的 —— 转发 id 在被引消息里。
+    //    所以这里必须**反查一次被引消息**把 forwards 挖出来。这跟 video-read 拿被引视频同构。
+    let fwdIds = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
+    if (ev.wake && !fwdIds.length && ev.replyToId) {
+      try {
+        const qMsg = await napcat.msgById(ev.replyToId)
+        const qParsed = qMsg ? extractText(qMsg.message ?? qMsg.raw_message ?? '', napcat.selfId) : null
+        if (qParsed?.forwards?.length) fwdIds = qParsed.forwards
+      } catch (e) {
+        log.debug(`反查被引消息失败（不影响本轮）: ${e.message}`)
+      }
+    }
+    if (ev.wake && fwdIds.length) {
+      try {
+        const parts = []
+        for (const fid of fwdIds.slice(0, 2)) {   // 一条消息最多两条转发
+          const fwd = await napcat.getForwardMsg(fid)
+          const rendered = fwd ? renderForward(fwd) : ''
+          parts.push(rendered || '（这条转发的内容取不到）')
+        }
+        if (parts.length) ev.hint.push(`[合并转发内容（原文，按条分隔）]\n${parts.join('\n---\n')}`)
+      } catch (e) {
+        log.warn(`取合并转发失败: ${e.message}`)
+      }
+    }
+
     // 3. 入站图片（含被引图）三级溯源下载 → sharp 缩图(≤8000px) → 填 ev.imageParts & ev.imagePaths
     if (Array.isArray(ev.images) && ev.images.length && !ev.imageParts.length) {
       for (const im of ev.images) {
