@@ -355,6 +355,50 @@ function extractCardUrl(seg) {
  *    —— 旧实现两处判据不一致，采集侧把 sub_type 7/11 的表情静默滤掉过。
  *  · 卡片链接抽出来单独放 cards，**不塞进 text**：保持"卡片不算文字"的旧行为，只有链接解析用它。
  */
+/**
+ * 把一条合并转发（get_forward_msg 的返回）渲染成可读文本。
+ *
+ * 为什么单独一个函数：转发是**嵌套结构**（一条转发里还有发送者、时间、以及任意段），
+ * 内联在 extractText 里会和主流程互相纠缠；而且它是**纯函数**，测试不用起 NapCat。
+ *
+ * 取舍：
+ *   · 每条前缀 `[昵称(QQ:号)]: `（跟群上文格式一致，模型认这个形状）
+ *   · 单条正文 clip 到 `perItemChars`，整体 clip 到 `totalChars` —— 一条 200 条的转发
+ *     全塞进去会把上下文撑爆，而模型只需要"大概聊了啥"
+ *   · 超量时明确告诉模型"后面还有 N 条省略"，别让它以为就这些
+ *
+ * @param {{messages:Array}|null} forward  get_forward_msg 的返回
+ * @param {object} [opts]
+ * @param {number} [opts.maxItems]      最多渲染几条（默认 30）
+ * @param {number} [opts.perItemChars]  单条最多多少字（默认 80）
+ * @param {number} [opts.totalChars]    总字数上限（默认 2000）
+ * @returns {string} 渲染结果；forward 为空时返回 ''（调用方据此降级）
+ */
+export function renderForward(forward, opts = {}) {
+  const list = Array.isArray(forward?.messages) ? forward.messages : []
+  if (!list.length) return ''
+  const maxItems = Number(opts.maxItems) > 0 ? Number(opts.maxItems) : 30
+  const perItem = Number(opts.perItemChars) > 0 ? Number(opts.perItemChars) : 80
+  const total = Number(opts.totalChars) > 0 ? Number(opts.totalChars) : 2000
+
+  const shown = list.slice(0, maxItems)
+  const lines = []
+  for (const it of shown) {
+    const uid = it?.sender?.user_id ?? it?.user_id ?? ''
+    const name = String(it?.sender?.card || it?.sender?.nickname || uid || '?')
+    // 每条内容按段解析（不递归 parse 转发 —— 嵌套转发极罕见，且会被 QQ 折叠）
+    const body = clipChars(extractText(it?.message ?? it?.content ?? '', null).text || '[非文字]', perItem)
+      .replace(/\s+/g, ' ')
+      .trim()
+    lines.push(`[${name}${uid ? `(QQ:${uid})` : ''}]: ${body}`)
+  }
+  let text = lines.join('\n')
+  if (text.length > total) text = `${clipChars(text, total)}…`
+  const rest = list.length - shown.length
+  if (rest > 0) text += `\n…（还有 ${rest} 条未列出）`
+  return text
+}
+
 export function extractText(message, selfId) {
   let segments = []
   if (typeof message === 'string') segments = parseCqString(message)
@@ -367,6 +411,7 @@ export function extractText(message, selfId) {
   const quotes = []
   const images = []
   const cards = []
+  const forwards = []   // 合并转发的 id（可能多条）
   let mentioned = false
   for (const seg of segments) {
     const type = seg?.type || ''
@@ -406,9 +451,15 @@ export function extractText(message, selfId) {
       const url = extractCardUrl(seg)
       if (url) cards.push(url)
       parts.push('')
+    } else if (type === 'forward') {
+      // 合并转发：内容要靠 get_forward_msg 再取一次，纯函数不碰网络 —— 这里只留占位，
+      // 真正的正文由 index.js 在 before-turn 里取来塞进 hint（见 renderForward）。
+      const fid = String(d.id ?? d.resid ?? '')
+      if (fid) forwards.push(fid)
+      parts.push('[合并转发]')
     } else parts.push('') // face / 未知段：忽略
   }
-  return { text: parts.join('').trim(), mentioned, files, quotes, images, cards, rawSegments: segments }
+  return { text: parts.join('').trim(), mentioned, files, quotes, images, cards, forwards, rawSegments: segments }
 }
 
 // ============================================================
@@ -435,7 +486,7 @@ export function normalizeEvent(rawEvent, selfId, adminQq = null) {
   if (uid != null && selfId != null && String(uid) === String(selfId)) return null // 自己发的
   const isGroup = isNotice ? rawEvent.group_id != null : rawEvent.message_type === 'group'
   const x = isNotice
-    ? { text: '', mentioned: false, files: [], quotes: [], images: [], cards: [], rawSegments: [] }
+    ? { text: '', mentioned: false, files: [], quotes: [], images: [], cards: [], forwards: [], rawSegments: [] }
     : extractText(rawEvent.message ?? rawEvent.raw_message ?? '', selfId)
   const ev = createEvent({
     chatKey: isGroup ? `group:${rawEvent.group_id}` : `private:${uid}`,
@@ -457,6 +508,8 @@ export function normalizeEvent(rawEvent, selfId, adminQq = null) {
     files: x.files,
     cards: x.cards,
   })
+  // 合并转发的 id（可能多条）：before-turn 里再取内容（get_forward_msg 要打接口，不在纯函数里做）
+  if (Array.isArray(x.forwards) && x.forwards.length) ev._scratch.forwards = x.forwards
   if (isNotice) {
     ev._scratch.notice = {
       type: rawEvent.notice_type,

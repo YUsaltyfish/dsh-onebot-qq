@@ -626,6 +626,7 @@ export async function apply(ctx, bundleConfig = {}) {
         memberInfo: (...a) => napcat.memberInfo(...a),
         msgById: (...a) => napcat.msgById(...a),
         getFile: (...a) => napcat.getFile(...a),
+        getForwardMsg: (...a) => napcat.getForwardMsg(...a),
         poke: (...a) => napcat.poke(...a),
         recall: (...a) => napcat.recall(...a),
         fetchAvatar: (...a) => napcat.fetchAvatar(...a),
@@ -745,6 +746,22 @@ export async function apply(ctx, bundleConfig = {}) {
         }
       } catch { /* 引用反查失败不阻塞本轮 */ }
     }
+    // 2.5 合并转发：正文要在这一步再取一次（get_forward_msg）。
+    // 只在**这条消息真要进模型**（ev.wake 已有）时取，避免给每条消息都打接口。
+    if (ev.wake && Array.isArray(ev._scratch.forwards) && ev._scratch.forwards.length) {
+      try {
+        const parts = []
+        for (const fid of ev._scratch.forwards.slice(0, 2)) {   // 一条消息最多两条转发
+          const fwd = await napcat.getForwardMsg(fid)
+          const rendered = fwd ? renderForward(fwd) : ''
+          parts.push(rendered || '（这条转发的内容取不到）')
+        }
+        if (parts.length) ev.hint.push(`[合并转发内容（原文，按条分隔）]\n${parts.join('\n---\n')}`)
+      } catch (e) {
+        log.warn(`取合并转发失败: ${e.message}`)
+      }
+    }
+
     // 3. 入站图片（含被引图）三级溯源下载 → sharp 缩图(≤8000px) → 填 ev.imageParts & ev.imagePaths
     if (Array.isArray(ev.images) && ev.images.length && !ev.imageParts.length) {
       for (const im of ev.images) {
