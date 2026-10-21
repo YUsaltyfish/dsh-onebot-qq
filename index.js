@@ -538,6 +538,35 @@ export async function apply(ctx, bundleConfig = {}) {
   })
   kernel.dsh = dsh
 
+  // ── 历史会话归位：升级 / 换数据目录后，旧 session 的 header cwd 可能是旧路径 ──
+  // 旧数据目录名（dsh-qq-bot）现在是指向新目录的兼容软链时，attachSession 会按 header cwd 的
+  // realpath 校验并允许挂到新工作区；不挂的话这些映射里的旧会话会一直停在侧栏「未分组」。
+  async function attachMappedSessionsToQqWorkspace() {
+    try {
+      const info = kernel.qqWorkspace
+      if (!info?.id) return
+      const registry = (() => {
+        try { return typeof ctx?.get === 'function' ? ctx.get('workspaceRegistry') : null } catch { return null }
+      })()
+      const ws = registry?.get?.(info.id)
+      if (!ws || typeof ws.attachSession !== 'function') return
+      let attached = 0
+      for (const [chatKey, sid] of (dsh.sessions || [])) {
+        try {
+          const before = Array.isArray(ws.sessionIds) ? ws.sessionIds.includes(sid) : true
+          await ws.attachSession(sid)
+          if (!before) attached += 1
+        } catch (e) {
+          log.debug(`历史会话挂到 QQ 工作区失败（${chatKey} / ${sid}）：${e.message}`)
+        }
+      }
+      if (attached > 0) log.info(`已把 ${attached} 条历史 QQ 会话挂到「${info.title}」工作区`)
+    } catch (e) {
+      log.debug(`历史会话归位失败：${e.message}`)
+    }
+  }
+  await attachMappedSessionsToQqWorkspace()
+
   // ── 取当前 TurnContext（优先 ALS store → 按 DSH 会话 id → 按 target）──
   // ⚠️ 绝不再"兜底取最后一条活跃线"：两条线并发回合时必然认错线
   //    （实测：表情包/生图在别的线回合期间拿错 TurnContext，图会发错群）。
