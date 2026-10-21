@@ -121,7 +121,7 @@ Write-Step '下一步（推荐：控制台新手向导，不用手改 JSON）'
 Write-Host @"
   1) 安装插件（已安装可跳过；tgz / 目录 / git URL 三选一）：
        dsh plugin --profile web add "$PackageRoot"
-       # 或: dsh plugin --profile web add C:\path\to\dsh-onebot-qq-0.1.0.tgz
+       # 或: dsh plugin --profile web add C:\path\to\dsh-onebot-qq-0.1.1.tgz
        # 或: dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
   2) 启动：
        dsh web

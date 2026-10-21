@@ -14,7 +14,7 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 |---|---|
 | **DSH 原生插件** | `dsh.bundle.patch` 随包声明、一行挂载；纯 in-process，无独立进程 / systemd |
 | **高可塑性** | 想要什么功能自己向DSH许愿 |
-| **微内核 + 自带 9 个子插件** | 门禁唤醒 / 命令 / 文件 / 人设句池 / 入群欢迎 / 生图 / 链接解析 / 表情包 / 简易群记忆；目录自动发现，坏一个不影响其他 |
+| **微内核 + 自带 13 个子插件** | 门禁唤醒 / 命令 / 文件 / 人设句池 / 入群欢迎 / 生图 / 链接解析 / 表情包 / 简易群记忆 + 4 个可选（防刷屏 / 私聊好友门禁 / 看视频 / 看视频链接）；目录自动发现，坏一个不影响其他 |
 | **唯一出站口** | 文本只走 `deliver()`、媒体只走 `sendMedia()`；自动抽 `[AT:]` → 六项脱敏 → 插件装饰 → 发送 + 留档 |
 | **QQ 控制台** | 16 个页签、配置热改（原子写 + 备份 + 回滚）；子插件↔页面 1:1；低频配置集中「其他」页，全部带悬停解释 |
 | **开箱人设** | 内置「蓝色大肥鱼」+ `_模板.md`，首次启动自动投递；唤醒词与人设词合并生效，控制台可增删 |
@@ -40,7 +40,7 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
 
 # 本地 tgz（npm pack 产物）
-dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.0.tgz
+dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.1.tgz
 
 # 本地目录（改代码立刻生效）
 dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
@@ -51,6 +51,8 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 > **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
 > `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
 > 不装也能正常用，只是 QQ 会话的工具面更大，token消耗略微增加，可能导致群聊天时调用不该用的工具而产生风险。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
+
+> **可选**：「看视频 / 看视频链接」需要另跑一个本地解析侧车（ffmpeg 抽帧，独立服务）；不装也完全不影响聊天，只是视频/链接按普通消息处理。
 
 ## 快速开始（4 步）
 

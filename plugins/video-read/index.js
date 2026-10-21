@@ -1,4 +1,4 @@
-﻿/**
+/**
  * video-read — 让模型"看得见"群里直接发的视频文件（id: 'video-read', order: 44）
  *
  * 现状：内核把视频段压成一个字符串 `[视频]`（`kernel/format.js:395`），模型只知道"有人发了个视频"，
@@ -62,6 +62,16 @@ function videoSegOf(ev) {
   return null
 }
 
+/** 按文件头认图片 MIME：侧车通常给 JPEG，但不硬编码（防止协议漂移） */
+function mediaTypeOf(buf) {
+  if (!buf?.length) return 'image/jpeg'
+  if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png'
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
+  if (buf.slice(0, 3).toString('latin1') === 'GIF') return 'image/gif'
+  if (buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp'
+  return 'image/jpeg'
+}
+
 /** 链接正则：中文/全角符号不进链接，尾部半角标点削掉（跟 link-parser 的教训一致） */
 const URL_RE = /https?:\/\/[^\s<>"'`，。；、！？（）【】《》「」]+/gi
 function extractUrls(text) {
@@ -81,7 +91,6 @@ function platformOf(url) {
   return ''
 }
 
-/** 本线额度窗口（一小时滑窗），返回 { ok, used, max } */
 /** 本线额度窗口（一小时滑窗），返回 { ok, used, max } */
 function quotaCheck(bot, chatKey, qq, perUserHour, perGroupHour) {
   const st = bot.state?.get?.(chatKey) ?? {}
@@ -173,6 +182,12 @@ export default {
       hint: '开：拉不到/太长/超额度时如实告诉对方（"这视频我没看成"），免得模型瞎猜画面；'
         + '关：完全不出声。',
     },
+    debugTrace: {
+      type: 'bool', default: false, group: '文件与图片',
+      label: '记录排障日志（一般不用开）',
+      hint: '开：把看视频每一步写进系统临时目录的 qq-video-read-trace.log（超过 512KB 自动停写）；'
+        + '平时关着即可，正常聊天不会写任何日志。',
+    },
   },
 
   setup(bot) {
@@ -181,14 +196,17 @@ export default {
     const SLOT = 'video-read:seg'
 
     /**
-     * 排障轨迹：**插件的 log 走 console.error，宿主不会落盘**（前面查过，翻遍
-     * %TEMP%\dsh-subprocess-* 一条插件日志都没有）。所以"视频到底卡在哪"只能靠写文件。
-     * 位置：%TEMP%\qq-video-read-trace.log（绝对路径，不依赖配置）。
+     * 排障轨迹（可选）：只在真涉及视频/异常时写，且默认关闭 —— 正常聊天一条都不写。
+     * 位置：%TEMP%\qq-video-read-trace.log；超过 512KB 自动停写，避免长期运行把临时盘写满。
      */
+    const TRACE_MAX_BYTES = 512 * 1024
+    const traceOn = () => cfg().debugTrace === true
     function trace(...parts) {
+      if (!traceOn()) return
       try {
-        fs.appendFileSync(path.join(os.tmpdir(), 'qq-video-read-trace.log'),
-          `${new Date().toISOString()} ${parts.join(' ')}\n`)
+        const file = path.join(os.tmpdir(), 'qq-video-read-trace.log')
+        try { if (fs.statSync(file).size > TRACE_MAX_BYTES) return } catch { /* 还没建过 */ }
+        fs.appendFileSync(file, `${new Date().toISOString()} ${parts.join(' ')}\n`)
       } catch { /* 排障不能反过来搞坏主流程 */ }
     }
 
@@ -215,13 +233,9 @@ export default {
     // ── ② before-turn：抽帧 → 塞 imageParts（order 44，必须早于 kernel:context 的 50） ──
     bot.on('before-turn', async (ev) => {
       if (cfg().enabled === false || !urlOf()) return
-      // 每个门都留痕：不然"为什么没看"只能猜（trace 只在这一轮确实提到视频时才写，不刷屏）
       const seg0 = ev._scratch?.[SLOT]
-      if (!seg0 && !ev.replyToId) { trace('before-turn: 既无视频段也非引用事件，跳过'); return }
-      if (!shouldLook(ev, cfg())) {
-        trace('before-turn: 被 onlyWhenAddressed 挡住 wake.kind=' + String(ev.wake?.kind || 'null'))
-        return
-      }
+      if (!seg0 && !ev.replyToId) return
+      if (!shouldLook(ev, cfg())) return
       let seg = ev._scratch?.[SLOT]
       if (!seg) {
         // ── 被引视频：QQ 里"转发视频"只能**先发视频、再引用它说话**（客户端限制，绕不开）。
@@ -231,17 +245,22 @@ export default {
         //    那个阶段内核是 fire-and-forget 的，不等 async 完成，会出现
         //    "before-turn 判定没有视频段 → 0.5 秒后才反查回来"的时序 bug（踩过）。
         if (ev.replyToId && typeof bot.napcat?.msgById === 'function') {
+          // 每条引用都会走到这里：不是视频的结论按 messageId 缓存 100 条，别反复打 NapCat。
+          const noVideo = (ev._scratch['video-read:noVideo'] ||= new Set())
+          if (noVideo.has(String(ev.replyToId))) return
           try {
             const q = await bot.napcat.msgById(ev.replyToId)
             const qSeg = q ? videoSegOf({ rawSegments: q.message ?? q.raw_message ?? [] }) : null
             if (qSeg) {
               seg = qSeg
               ev._scratch[SLOT] = qSeg
-              trace('被引消息里有视频段（replyToId=' + ev.replyToId + '）'
+              trace('被引消息里有视频段（replyId=' + ev.replyToId + '）'
                 + ' file=' + (qSeg.file || '-') + ' fileId=' + (qSeg.fileId || '-')
                 + ' url=' + String(qSeg.url || '-').slice(0, 60))
             } else {
-              trace('被引消息里没有视频段（replyToId=' + ev.replyToId + '）')
+              noVideo.add(String(ev.replyToId))
+              if (noVideo.size > 100) noVideo.delete(noVideo.values().next().value)
+              trace('被引消息里没有视频段（replyId=' + ev.replyToId + '）')
             }
           } catch (e) {
             trace('被引消息反查失败: ' + e.message)
@@ -297,10 +316,10 @@ export default {
       let pushed = 0
       for (const f of Array.isArray(data.frames) ? data.frames : []) {
         try {
-          const buf = fs.readFileSync(String(f.path || ''))
+          const buf = await fs.promises.readFile(String(f.path || ''))
           if (!buf.length) continue
           ev.imageParts.push({
-            mediaType: 'image/jpeg',
+            mediaType: mediaTypeOf(buf),
             data: buf.toString('base64'),
             name: `video-frame@${Number(f.sec) || 0}s`,
           })

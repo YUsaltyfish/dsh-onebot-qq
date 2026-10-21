@@ -67,7 +67,7 @@ dsh web
 1. 浏览器打开 DSH Web → 左侧栏 **Plugins / 插件**；
 2. 安装 bundle，填以下任一：
    - 本地目录：`C:\path\to\dsh-onebot-qq`（开发/内网）
-   - tgz：`C:\path\to\dsh-onebot-qq-0.1.0.tgz`
+   - tgz：`C:\path\to\dsh-onebot-qq-0.1.1.tgz`
    - GitHub：`github:YUsaltyfish/dsh-onebot-qq`
 3. 安装完成后确认列表里 `dsh-onebot-qq` 为启用状态。
 
@@ -78,7 +78,7 @@ dsh web
 dsh plugin --profile web add link:C:\path\to\dsh-onebot-qq
 
 # 本地 tgz
-dsh plugin --profile web add C:\path\to\dsh-onebot-qq-0.1.0.tgz
+dsh plugin --profile web add C:\path\to\dsh-onebot-qq-0.1.1.tgz
 
 # GitHub
 dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq

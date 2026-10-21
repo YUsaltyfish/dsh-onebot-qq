@@ -9,8 +9,9 @@
  *   两个 order 互相咬死，只能拆。
  *
  * 这个插件干的事：消息里有 B 站 / 抖音链接、**并且这条消息是在叫它** →
- *   ① 先问侧车 `/read`，抽几帧塞进 `ev.imageParts`（模型于是"真的看过"这条视频）；
- *   ② `ev.stopped = true` —— 不再让下游 `link-parser` 把整段视频再搬进群里刷屏。
+ *   先问侧车 `/read`，抽几帧塞进 `ev.imageParts`（模型于是"真的看过"这条视频）。
+ *   搬不搬视频由 `link-parser`（intercept 阶段，早于本插件）决定 —— 本插件只负责"让模型看见"，
+ *   不在这一层 stop（before-turn 拦不住已经在 intercept 发出的媒体，stop 只会把模型回话也吞掉）。
  *
  * 三条纪律：
  *   ① **侧车不可用 = 完全让路**（不 stop、不吭声），链接照旧交给下游，
@@ -64,6 +65,16 @@ function urlsFromRawSegments(segs) {
   return out
 }
 
+/** 按文件头认图片 MIME：侧车通常给 JPEG，但不硬编码（防止协议漂移） */
+function mediaTypeOf(buf) {
+  if (!buf?.length) return 'image/jpeg'
+  if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png'
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
+  if (buf.slice(0, 3).toString('latin1') === 'GIF') return 'image/gif'
+  if (buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp'
+  return 'image/jpeg'
+}
+
 function quotaCheck(bot, chatKey, qq, perUserHour, perGroupHour) {
   const st = bot.state?.get?.(chatKey) ?? {}
   const scratch = (st._scratch ||= Object.create(null))
@@ -102,6 +113,11 @@ export default {
       label: '侧车地址',
       hint: '跟看视频共用一个侧车；留空 = 关闭。',
     },
+    onlyWhenAddressed: {
+      type: 'bool', default: true, group: '文件与图片',
+      label: '只在被叫到时点开链接',
+      hint: '建议开：只有 @ 它 / 叫唤醒词 / 引用它时贴的链接才下载抽帧；关：群里任何人贴的链接都看（更费钱）。',
+    },
     platforms: {
       type: 'group', default: ['bilibili', 'douyin'], group: '文件与图片',
       label: '只点开这些平台',
@@ -138,12 +154,6 @@ export default {
       label: '每群每小时最多看几个（0 = 不限）',
       hint: '默认 **0 = 不限制**。',
     },
-    blockParserAfterRead: {
-      type: 'bool', default: false, group: '文件与图片',
-      label: '看过链接后不再把视频搬进群',
-      hint: '默认**关**：链接照旧由「链接解析」把视频搬进群，然后再由模型发评论（"搬视频 + 发评论"）。'
-        + '开：只发评论、不搬视频（省一次下载，群里也不会多一条视频消息）。',
-    },
     tellOnFail: {
       type: 'bool', default: true, group: '文件与图片',
       label: '没看成时说一句',
@@ -158,9 +168,9 @@ export default {
     bot.on('before-turn', async (ev) => {
       if (cfg().enabled === false || !urlOf()) return
       if (!ev.wake) return
-      // 只认"有人在问它"的唤醒方式
+      // 只认"有人在问它"的唤醒方式（可关）
       const kind = String(ev.wake.kind || '')
-      if (cfg().onlyWhenAddressed === false ? false : !['at', 'quote', 'keyword', 'followup', 'private'].includes(kind)) return
+      if (cfg().onlyWhenAddressed !== false && !['at', 'quote', 'keyword', 'followup', 'private'].includes(kind)) return
       // 已经在别处（比如群文件视频）成功塞过帧 = 这一轮已经"看过东西"了，别再看第二段
       if (Array.isArray(ev.imageParts) && ev.imageParts.length) return
 
@@ -224,10 +234,10 @@ export default {
       let pushed = 0
       for (const f of Array.isArray(data.frames) ? data.frames : []) {
         try {
-          const buf = fs.readFileSync(String(f.path || ''))
+          const buf = await fs.promises.readFile(String(f.path || ''))
           if (!buf.length) continue
           ev.imageParts.push({
-            mediaType: 'image/jpeg',
+            mediaType: mediaTypeOf(buf),
             data: buf.toString('base64'),
             name: `link-frame@${Number(f.sec) || 0}s`,
           })
@@ -249,12 +259,8 @@ export default {
       ev.hint.push(`[${plat}视频${title ? `「${title.slice(0, 40)}」` : ''}: 时长 ${mmss}，已抽 ${pushed} 帧（`
         + `${(data.frames || []).map((f) => `${f.sec}s`).join('/')}）。`
         + `这些图就是视频画面（按时间顺序），直接据此回话即可；没看清的地方如实说看不清]`)
-      // 默认**放行**：让 link-parser(70) 照旧把视频搬进群，模型随后发评论（"搬视频 + 发评论"）。
-      // 想省一次下载 / 不想群里多一条视频消息，把 blockParserAfterRead 打开即可。
-      if (cfg().blockParserAfterRead === true) {
-        ev.stopped = true
-        ev.stopReason = 'video-link-read:block-parser'
-      }
+      // 不 stop：视频是否搬进群由 link-parser（intercept 阶段，早于本插件）决定；
+      // 本插件只负责给模型塞画面，stop 在这里拦不住已经发出的媒体，只会把模型回话也吞掉。
       bot.log.info(`[看链接] ${ev.chatKey} ${data.platform} ${mmss} ${pushed} 帧 (${Date.now() - started}ms)`)
 
       function failText(d) {

@@ -2,6 +2,24 @@
 
 所有值得用户知道的变更记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## 0.1.1 — 2026-10-21
+
+新增 4 个可选子插件（来自社区 PR #1），并修掉 review 发现的问题。
+
+### 新增
+
+- `anti-repeat`：同一个人同一句话刷屏冷却（超过次数甩一句 + 整线冷却，零 token）。
+- `private-friend-gate`：私聊只回好友（好友列表缓存；拉取失败时 fail-open，不误伤）。
+- `video-read` / `video-link-read`：群视频 / B 站·抖音链接抽帧给模型看（需要本地解析侧车；没装或没起时自动降级）。
+- 控制台对应开关（「唤醒」页防刷屏、「文件与图片」页看视频、「其他」页私聊门禁）。
+
+### 修复（review）
+
+- `video-read` 的排障 trace 不再每轮回写临时文件（默认关闭、512KB 上限），并给被引消息加负缓存。
+- `video-link-read` 移除 `blockParserAfterRead`：`link-parser` 在 intercept 阶段已经处理，before-turn 拦不住，原选项语义相反。
+- `video-link-read` 补上缺失的 `onlyWhenAddressed` 配置。
+- `bot.napcat` 契约补充 `friendList / msgById / getFile`；README / 说明书 / 架构文档同步为 13 个子插件。
+
 ## 0.1.0 — 2026-10-20
 
 首个公开发布版本：把内部迭代收敛成一个**可安装、开箱即用**的 DSH 插件。

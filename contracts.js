@@ -149,7 +149,7 @@ export function createTurnContext(ev) {
  * | `bot.state` | ChatState 访问器：`{ get(chatKey), turns }` |
  * | `bot.pacing` | 回复节奏（内核级）：`{ config, stats(), submit, noteInbound, interestFor(ev) }` —— 主动接话由内核调度，插件只读状态/配置 |
  * | `bot.currentTurn()` | 取本轮 TurnContext：工具执行时按 **DSH 会话 id** 认线（认不出再按参数 target），**绝不跨线兜底**；拿不到返回 null，请自己报错让模型重试 |
- * | `bot.napcat` | 只读适配器（`groupHistory / memberInfo / recall / fetchAvatar`）；**没有 raw send** |
+ * | `bot.napcat` | 只读适配器（`groupHistory / memberInfo / recall / fetchAvatar / friendList / msgById / getFile`）；**没有 raw send** |
  * | `bot.core` | 只读核心配置快照：`{ adminQq, dataDir, configPath, toolPrefix, outbound, archive, pacing, credentials, dsh, napcat, compat, keywordTable, tmp }` |
  * | `bot.credentials` | 实例配置的凭据段（如 `credentials.gptImage`）；也能从 `bot.core.credentials` 取 |
  * | `bot.dsh` | 会话驱动：`{ ensureSession(chatKey), rename(sessionId,title), cancel(sessionId) }` |
