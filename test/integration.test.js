@@ -52,9 +52,14 @@ after(async () => {
 test('1. 全量装配：9 子插件 + 8 原生工具 + 7 命令 + 单例（重复 apply 返回同一 kernel）', async (t) => {
   const h = await bootKernel({ config: { pacing: { merge: { enabled: false } } } })
   t.after(() => h.dispose())
-  assert.equal(h.kernel.plugins.length, 9, '9 个子插件自动发现并加载')
+  // 不写死数量：新增子插件不该让测试红
+  const wantPlugins = ['gate-wake', 'commands', 'file-transfer', 'persona-voice', 'group-welcome',
+    'imagegen', 'link-parser', 'stickers', 'group-memory']
+  const loadedIds = h.kernel.plugins.map((p) => p.id)
+  for (const id of wantPlugins) assert.ok(loadedIds.includes(id), `子插件 ${id} 应被自动发现并加载`)
+  assert.equal(h.kernel.plugins.length, h.kernel.pluginDefs.length, '发现的插件全部加载（无静默跳过）')
   assert.equal(h.kernel.pluginErrors.size, 0, `零加载错误：${[...h.kernel.pluginErrors.keys()].join(',')}`)
-  assert.equal(h.kernel.pluginDefs.length, 9, 'pluginDefs 含全部插件')
+  assert.ok(h.kernel.pluginDefs.length >= wantPlugins.length, 'pluginDefs 至少含内置插件')
   assert.equal(h.kernel.toolDefs.size, 8, `原生工具 8 个，实际 ${[...h.kernel.toolDefs.keys()].join(',')}`)
   assert.equal(h.kernel.commands.size, 7, `命令 7 个，实际 ${[...h.kernel.commands.keys()].join(',')}`)
   for (const cmd of ['help', 'status', 'reset', 'resetall', 'cancel', 'history', 'quota']) {
@@ -190,7 +195,10 @@ test('5. 插件隔离：plugins[id]=false 完全不加载，其余插件与工�
     },
   })
   t.after(() => h.dispose())
-  assert.equal(h.kernel.plugins.length, 8, '停用 1 个插件 → 加载 8 个')
+  // 基准数：同样的配置但不停用任何插件 → 停用 1 个应当正好少 1 个
+  const base = await bootKernel({ config: { pacing: { merge: { enabled: false } }, pluginConfig: { 'persona-voice': { splitReplyEnabled: false } } } })
+  t.after(() => base.dispose())
+  assert.equal(h.kernel.plugins.length, base.kernel.plugins.length - 1, '停用 1 个插件 → 少加载 1 个')
   assert.equal(h.kernel.pluginErrors.size, 0)
   assert.ok(h.kernel.pluginDefs.find((d) => d.id === 'stickers')?.disabled, 'pluginDefs 标记 disabled')
   assert.ok(h.kernel.toolDefs.has('send_message'), '核心工具仍在')

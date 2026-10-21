@@ -39,7 +39,7 @@ test('collectSchema：控件齐全（核心 + 插件）、9 个模块、动作�
   const schema = collectSchema(h.kernel, h.raw)
   assert.ok(Array.isArray(schema.controls) && schema.controls.length >= 60, `控件数=${schema.controls.length}`)
   assert.ok(Array.isArray(schema.groups) && schema.groups.length > 0)
-  assert.equal(schema.modules.length, 9, '9 个子插件都应在 modules 里')
+  assert.ok(schema.modules.length >= 9, '内置子插件都应在 modules 里')
   assert.ok(Array.isArray(schema.actions), '应有动作列表')
   for (const c of schema.controls) {
     assert.ok(c.key && typeof c.key === 'string')
@@ -58,7 +58,7 @@ test('collectSchema：控件齐全（核心 + 插件）、9 个模块、动作�
 test('collectModules：on 跟随配置；停用插件（plugins[id]=false）仍出现在列表但 loaded=false', async (t) => {
   const h = await boot(t, { config: { plugins: { stickers: false } } })
   const modules = collectModules(h.kernel, h.raw)
-  assert.equal(modules.length, 9)
+  assert.ok(modules.length >= 9)
   const stickers = modules.find((m) => m.id === 'stickers')
   assert.ok(stickers)
   assert.equal(stickers.loaded, false, 'plugins[id]=false → 未加载')

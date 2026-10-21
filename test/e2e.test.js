@@ -88,7 +88,11 @@ test('e2e：假 NapCat 全链路（装配 / 群@入站→模型→工具→出�
   assert.ok(kernel, 'apply 后应有 qqBot 服务（Cordis 语义：apply 不返回对象）')
 
   // ── 1. 装配与注册 ────────────────────────────────────────────
-  assert.equal(kernel.plugins.length, 9, '9 个子插件应全部自动发现并加载')
+  assert.ok(kernel.plugins.length >= 9, '至少 9 个内置子插件全部自动发现并加载')
+    for (const id of ['gate-wake', 'commands', 'file-transfer', 'persona-voice', 'group-welcome',
+      'imagegen', 'link-parser', 'stickers', 'group-memory']) {
+      assert.ok(kernel.plugins.some((p) => p.id === id), `子插件 ${id} 应被加载`)
+    }
   assert.equal(kernel.pluginErrors.size, 0, `插件加载不应有错误：${[...kernel.pluginErrors.keys()].join(',')}`)
   const toolNames = [...ctx._registeredTools.keys()]
   assert.ok(toolNames.includes('mcp__qq__send_message'), `应注册 send_message：${toolNames.join(',')}`)
@@ -183,7 +187,7 @@ test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连 Na
   assert.equal(kernel.configReady, false, '缺 adminQq → configReady=false')
   assert.ok(kernel.version, 'kernel.version 可用')
   assert.ok(kernel.paths?.defaultPersonaDir, 'kernel.paths.defaultPersonaDir 可用')
-  assert.equal(kernel.plugins.length, 9, '插件全部加载')
+  assert.equal(kernel.plugins.length, kernel.pluginDefs.length, '插件全部加载（发现数 == 加载数）')
   assert.equal(kernel.pluginErrors.size, 0)
   assert.ok(ctx._registeredTools.has('mcp__qq__send_message'), '工具已注册（控制台/工具可用）')
   assert.ok(kernel.commands.has('help'), '命令已注册')
