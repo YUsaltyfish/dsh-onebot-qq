@@ -26,8 +26,6 @@
  * 状态（额度窗口）进 `bot.state.get(chatKey)._scratch`，遵守契约：插件不开全局 Map。
  */
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 
 /**
  * 从原始段里挖视频。
@@ -182,33 +180,12 @@ export default {
       hint: '开：拉不到/太长/超额度时如实告诉对方（"这视频我没看成"），免得模型瞎猜画面；'
         + '关：完全不出声。',
     },
-    debugTrace: {
-      type: 'bool', default: false, group: '文件与图片',
-      label: '记录排障日志（一般不用开）',
-      hint: '开：把看视频每一步写进系统临时目录的 qq-video-read-trace.log（超过 512KB 自动停写）；'
-        + '平时关着即可，正常聊天不会写任何日志。',
-    },
   },
 
   setup(bot) {
     const cfg = () => bot.cfg || {}
     const urlOf = () => String(cfg().sidecarUrl || '').trim()
     const SLOT = 'video-read:seg'
-
-    /**
-     * 排障轨迹（可选）：只在真涉及视频/异常时写，且默认关闭 —— 正常聊天一条都不写。
-     * 位置：%TEMP%\qq-video-read-trace.log；超过 512KB 自动停写，避免长期运行把临时盘写满。
-     */
-    const TRACE_MAX_BYTES = 512 * 1024
-    const traceOn = () => cfg().debugTrace === true
-    function trace(...parts) {
-      if (!traceOn()) return
-      try {
-        const file = path.join(os.tmpdir(), 'qq-video-read-trace.log')
-        try { if (fs.statSync(file).size > TRACE_MAX_BYTES) return } catch { /* 还没建过 */ }
-        fs.appendFileSync(file, `${new Date().toISOString()} ${parts.join(' ')}\n`)
-      } catch { /* 排障不能反过来搞坏主流程 */ }
-    }
 
     // ── passive-tap：把视频段记下来（fail-open，绝不阻塞主链） ──
     // ⚠️ 本插件**不负责拉起侧车**（那是运维/部署的事，也不该由插件 spawn 进程）。
@@ -217,17 +194,7 @@ export default {
       if (cfg().enabled === false) return
       if (!urlOf()) return
       const seg = videoSegOf(ev)
-      if (seg) {
-        ev._scratch[SLOT] = seg
-        trace(`收到视频段 file=${seg.file || '-'} fileId=${seg.fileId || '-'} `
-          + `url=${String(seg.url || '-').slice(0, 60)} local=${seg.local || '-'}`)
-      } else {
-        // 有视频段但挖不出字段 —— 这种最难查，必须留痕
-        const hasVideoSeg = (Array.isArray(ev.rawSegments) ? ev.rawSegments : []).some((s) => String(s?.type) === 'video')
-        if (hasVideoSeg) {
-          trace(`!!! 有 video 段但挖不出 file/url，段内容=${JSON.stringify(ev.rawSegments.filter((s) => String(s?.type) === 'video')).slice(0, 400)}`)
-        }
-      }
+      if (seg) ev._scratch[SLOT] = seg
     })
 
     // ── ② before-turn：抽帧 → 塞 imageParts（order 44，必须早于 kernel:context 的 50） ──
@@ -254,21 +221,14 @@ export default {
             if (qSeg) {
               seg = qSeg
               ev._scratch[SLOT] = qSeg
-              trace('被引消息里有视频段（replyId=' + ev.replyToId + '）'
-                + ' file=' + (qSeg.file || '-') + ' fileId=' + (qSeg.fileId || '-')
-                + ' url=' + String(qSeg.url || '-').slice(0, 60))
             } else {
               noVideo.add(String(ev.replyToId))
               if (noVideo.size > 100) noVideo.delete(noVideo.values().next().value)
-              trace('被引消息里没有视频段（replyId=' + ev.replyToId + '）')
             }
-          } catch (e) {
-            trace('被引消息反查失败: ' + e.message)
-          }
+          } catch { /* 反查失败按"没有视频"处理，不影响这一轮 */ }
         }
       }
       if (!seg) return
-      trace('before-turn: 通过门禁 wake.kind=' + String(ev.wake?.kind || '-') + ' 准备请求侧车')
 
       // 额度：先查再发请求（别先下载几百 MB 再说超限）
       const q = quotaCheck(bot, ev.chatKey, ev.sender?.qq,
@@ -285,7 +245,6 @@ export default {
       }
 
       const started = Date.now()
-      trace('请求侧车 url=' + String(req.url).slice(0, 90) + ' platform=' + req.platform)
       let data = null
       try {
         const res = await fetch(`${urlOf().replace(/\/+$/, '')}/read`, {
@@ -307,7 +266,6 @@ export default {
       }
 
       if (!data?.ok) {
-        trace('侧车拒绝: ' + String(data?.code || '-') + ' ' + String(data?.error || '').slice(0, 200))
         bot.log.info(`[看视频] 侧车拒绝: ${data?.code} ${data?.error || ''}`)
         return tell(ev, failText(data))
       }
@@ -383,7 +341,6 @@ export default {
             return { url: u, platform: 'qq' }
           }
         } catch (e) {
-          trace('getFile(' + String(id).slice(0, 20) + ') 抛错: ' + e.message)
           bot.log.debug(`[看视频] getFile(${String(id).slice(0, 20)}) 失败: ${e.message}`)
         }
       }

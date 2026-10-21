@@ -15,7 +15,7 @@
 
 ### 修复（review）
 
-- `video-read` 的排障 trace 不再每轮回写临时文件（默认关闭、512KB 上限），并给被引消息加负缓存。
+- 移除 `video-read` 的排障 trace（不再写临时日志），并给被引消息加负缓存。
 - `video-link-read` 移除 `blockParserAfterRead`：`link-parser` 在 intercept 阶段已经处理，before-turn 拦不住，原选项语义相反。
 - `video-link-read` 补上缺失的 `onlyWhenAddressed` 配置。
 - `bot.napcat` 契约补充 `friendList / msgById / getFile`；README / 说明书 / 架构文档同步为 13 个子插件。

@@ -121,7 +121,7 @@ test('PRIVATE-GATE 主人永远放行（即使好友列表里没有）', async (
 })
 
 // ── video-read ────────────────────────────────────────────────
-test('VIDEO-READ 侧车返回帧 → 塞进 imageParts 和 hint；不写入任何 trace', async (t) => {
+test('VIDEO-READ 侧车返回帧 → 塞进 imageParts 和 hint', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-video-'))
   const frames = [writeJpeg(dir, 'f0.jpg'), writeJpeg(dir, 'f6.jpg')]
   const sidecar = await startSidecar({
@@ -131,8 +131,6 @@ test('VIDEO-READ 侧车返回帧 → 塞进 imageParts 和 hint；不写入任�
   t.after(() => sidecar.close())
   const video = path.join(dir, 'clip.mp4')
   fs.writeFileSync(video, 'fake-video-bytes')
-  const traceFile = path.join(os.tmpdir(), 'qq-video-read-trace.log')
-  fs.rmSync(traceFile, { force: true })
 
   const h = await bootKernel({
     config: { ...mergeOff, pluginConfig: { 'video-read': { sidecarUrl: sidecar.url } } },
@@ -149,7 +147,6 @@ test('VIDEO-READ 侧车返回帧 → 塞进 imageParts 和 hint；不写入任�
   const prompt = h.ctx._prompts[0]
   assert.equal(prompt.content.filter((c) => c.type === 'image').length, 2, 'prompt 里应有两个图片块')
   assert.equal(sidecar.requests.length, 1, '只应请求一次侧车')
-  assert.equal(fs.existsSync(traceFile), false, 'debugTrace 默认关闭时不应写 trace 文件')
 })
 
 test('VIDEO-READ 侧车不在 → 不抛错、如实提示、照常进模型', async (t) => {
