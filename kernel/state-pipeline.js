@@ -69,10 +69,16 @@ export class ChatState {
 
   /** 每开一轮 push 一个锚。**队列不是单槽**：同群两轮交错时后一轮会顶掉前一轮的锚，
    *  前一轮输出就挂到后一条消息上（线上真实踩过）。出站取队首＝最早那轮。 */
-  markTurnAnchor(chatKey, triggerId) {
+  markTurnAnchor(chatKey, triggerId, ownerQq) {
     if (triggerId == null || !chatKey) return
     const q = this.get(chatKey).turnQueue
-    q.push({ triggerId: Number(triggerId), arrived: 0, at: Date.now() })
+    q.push({
+      triggerId: Number(triggerId),
+      ownerQq: ownerQq == null ? '' : String(ownerQq),
+      arrived: 0,
+      at: Date.now(),
+      spokeAgain: false,   // 插话期间触发者有没有再开口（决定该不该挂引用）
+    })
     while (q.length > 5) q.shift() // 异常情况下别让队列无限长
   }
 
@@ -84,18 +90,36 @@ export class ChatState {
   }
 
   /** 唤醒之后、回复之前同群又来了几条（跳过唤醒那条自己；队列里每个未答复的锚各记一笔，不串轮） */
-  countArrival(chatKey, messageId) {
+  countArrival(chatKey, messageId, msg) {
+    const senderQq = String(msg?.sender?.qq ?? '')
     for (const a of this.get(chatKey).turnQueue) {
-      if (messageId != null && Number(messageId) === a.triggerId) continue
+      const isTrigger = messageId != null && Number(messageId) === a.triggerId
+      if (isTrigger) { a.spokeAgain = true; continue }
       a.arrived += 1
+      if (senderQq && a.ownerQq && String(a.ownerQq) === senderQq) a.spokeAgain = true
     }
   }
 
-  /** need = 0 → 永不自动挂（全交给模型显式传 replyTo） */
+  /**
+   * need = 0 → 永不自动挂（全交给模型显式传 replyTo）。
+   *
+   * 除了"中间插了几条 ≥ need"，还要求**触发者在插话过程中仍然说过话**：
+   * 触发者说完那句就再没开口、全靠别人聊 → 这条回复多半不是答他，引用就是引错人。
+   * ⚠️ 判据是「插话期间有没有再开口」（spokeAgain），**不是**「距上次发言多久」——
+   *    后者会随回复延迟误判：回复慢一点，一个一直在聊的人也会被判"不活跃"。
+   */
   quoteNeed(chatKey, need = 1) {
     const n = Number.isFinite(Number(need)) ? Number(need) : 1
     const a = this.anchorFor(chatKey)
-    return { allow: n > 0 && !!a && a.arrived >= n, arrived: a ? a.arrived : 0, need: n, triggerId: a ? a.triggerId : null }
+    // 没记 ownerQq 的锚（老调用方）按旧逻辑放行，保持向后兼容
+    const active = !!a && (!a.ownerQq || a.spokeAgain === true)
+    return {
+      allow: n > 0 && !!a && a.arrived >= n && active,
+      arrived: a ? a.arrived : 0,
+      need: n,
+      triggerId: a ? a.triggerId : null,
+      active,
+    }
   }
 }
 

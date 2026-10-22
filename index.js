@@ -888,7 +888,8 @@ export async function apply(ctx, bundleConfig = {}) {
     turnCtx.quoteAfterMsgs = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     holdActiveTurn(ev.chatKey, turnCtx)
     if (ev.wake.kind !== 'proactive') {
-      state.markTurnAnchor(ev.chatKey, ev.messageId)
+      // 第三个参数 = 触发者 QQ：出站挂引用时要判断"他后来还说不说话"（引错人比不引更糟）
+      state.markTurnAnchor(ev.chatKey, ev.messageId, ev.sender?.qq)
     }
     try {
       let sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
@@ -999,7 +1000,8 @@ export async function apply(ctx, bundleConfig = {}) {
     const isNoticeEvent = Boolean(ev._scratch?.notice)
     if (!isNoticeEvent) {
       pacing.noteInbound(ev)
-      state.countArrival(ev.chatKey, ev.messageId)
+      // 第三个参数传整条 ev：要拿 sender 判断"触发者后来还说不说话"
+      state.countArrival(ev.chatKey, ev.messageId, ev)
       const active = kernel.activeTurns.get(ev.chatKey)
       if (active && ev.messageId !== active.triggerMsgId) active.arrivedDuringTurn += 1
     }
