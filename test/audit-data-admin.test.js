@@ -368,21 +368,17 @@ test('persona 端点：list / switch（投递文件 + 同步配置）', async (t
   assert.ok(String(sw.message || '').includes('tester'), '返回可读提示')
 })
 
-test('ops 未配置：memory refresh 走内置积累器（不再要求 ops）/ action selfcheck 等降级不 throw', async (t) => {
+test('ops 未配置：memory refresh / action selfcheck 等返回 {ok:false,error} 不 throw', async (t) => {
   const h = await boot(t)
   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
-  // 群记忆积累已内置到插件（shared.memoryAccumulate），没有 ops 也能跑：
-  // 未确认 → 返回 needsConfirm；确认后 → 交给内置积累器（本测试只验证路由，不真跑模型）
-  const ask = await endpoints.handle('memory', { op: 'refresh' })
-  assert.equal(ask.ok, true)
-  assert.equal(ask.needsConfirm, true)
   for (const [ep, payload] of [
+    ['memory', { op: 'refresh' }],
     ['action', { id: 'selfcheck' }],
     ['action', { id: 'cleanup-tmp' }],
   ]) {
     // eslint-disable-next-line no-await-in-loop
     const r = await endpoints.handle(ep, payload)
-    assert.equal(r.ok, false, `${ep} ${payload.id} 应降级`)
+    assert.equal(r.ok, false, `${ep} ${payload.op || payload.id} 应降级`)
     assert.match(String(r.error), /未配置/)
   }
 })

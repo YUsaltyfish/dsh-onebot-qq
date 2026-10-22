@@ -226,77 +226,6 @@ export function createDshDriver(opts) {
       + `${kind === 'size' ? '，并请他把图截小一点或压缩后重发' : ''}]`
   }
 
-  /** 读某个会话最后一条 assistant 消息的纯文本（后台任务取返回值用）。 */
-  async function readLastAssistantText(sessionId) {
-    try {
-      const ins = await ctx.sessionController.inspect(sessionId)
-      const events = Array.isArray(ins?.events) ? ins.events : []
-      for (let i = events.length - 1; i >= 0; i -= 1) {
-        const ev = events[i]
-        if (ev?.type !== 'assistant/message') continue
-        const content = ev.message?.content
-        if (!Array.isArray(content)) continue
-        return content
-          .filter((c) => c?.type === 'text')
-          .map((c) => String(c.text ?? ''))
-          .join('\n')
-          .trim()
-      }
-    } catch (e) {
-      log.debug(`读取后台任务输出失败 (${sessionId}): ${e.message}`)
-    }
-    return ''
-  }
-
-  /**
-   * 起一个**独立的一次性后台会话**执行一段提示词，返回模型最终文本，完成后归档。
-   *
-   * 用途：群记忆积累这类"要模型但不要 QQ 线"的任务。
-   *   · 不进 sessions.json（不占用 QQ 线映射）；cwd = 数据目录，不挂 QQ 工作区；
-   *   · 用当前 QQ preset（工具面已裁剪），并且内核会在工具入口拒绝「后台任务会话」调用工具
-   *     （`kernel.maintSessionIds`）—— 双保险，绝不会把积累结果发到群里；
-   *   · 超时/失败都会归档清场，不留在侧栏。
-   * @param {{name?:string, prompt:string, timeoutMs?:number}} opts
-   * @returns {Promise<{ok:boolean, sessionId:string, text:string, reason:string}>}
-   */
-  async function runIsolatedTask({ name = '后台任务', prompt: taskPrompt, timeoutMs = 10 * 60000, cwd = '' } = {}) {
-    const text = String(taskPrompt ?? '').trim()
-    if (!text) throw new Error('runIsolatedTask 需要 prompt')
-    if (typeof ctx.sessionController?.create !== 'function') throw new Error('sessionController 服务不可用，无法执行后台任务')
-    const created = await ctx.sessionController.create({
-      cwd: String(cwd || settings.workspacePath || '').trim() || undefined,
-      ...(settings.agentPreset ? { agentPreset: settings.agentPreset } : {}),
-    })
-    const sessionId = String(created?.sessionId || '')
-    if (!sessionId) throw new Error('创建后台任务会话失败（没有 sessionId）')
-    if (opts.maintSessionIds?.add) opts.maintSessionIds.add(sessionId)
-    let reason = ''
-    const finished = new Promise((resolve, reject) => {
-      let off = null
-      const timer = setTimeout(() => {
-        off?.()
-        reject(new Error(`${name}超时（${Math.round(Number(timeoutMs) / 1000)}s）`))
-      }, Math.max(30000, Number(timeoutMs) || 600000))
-      timer.unref?.()
-      off = onTurnEnd(sessionId, (event) => {
-        clearTimeout(timer)
-        off?.()
-        reason = String(event?.reason || '')
-        resolve(event)
-      })
-    })
-    try {
-      await prompt(sessionId, text)
-      await finished
-      const out = await readLastAssistantText(sessionId)
-      return { ok: Boolean(out), sessionId, text: out, reason }
-    } finally {
-      try { opts.maintSessionIds?.delete?.(sessionId) } catch { /* ignore */ }
-      // 归档：后台会话不该留在侧栏；失败只记 debug
-      try { await archive(sessionId) } catch (e) { log.debug(`归档后台任务会话失败 (${sessionId}): ${e.message}`) }
-    }
-  }
-
   /** 统一入口：失败先丢图重发纯文本的降级策略，底层提交走 sessionController。 */
   async function prompt(sessionId, promptText, imageParts) {
     const content = contentOf(promptText, imageParts)
@@ -617,7 +546,6 @@ export function createDshDriver(opts) {
     archive,
     findChatKeyBySession,
     forgetSession,
-    runIsolatedTask,
     onTurnEnd,
     fetchGroupContext,
     syncSessionTitles,

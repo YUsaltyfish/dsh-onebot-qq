@@ -404,7 +404,6 @@ export async function apply(ctx, bundleConfig = {}) {
     pluginErrors: new Map(),
     activeTurns: new Map(), // chatKey → TurnContext
     turnBySession: new Map(), // sessionId → TurnContext（工具执行时按 DSH 会话认线，防两条线串）
-    maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口一律拒绝，避免后台任务往群里发消息
     dataDir,
     configPath,
     archive,
@@ -536,7 +535,6 @@ export async function apply(ctx, bundleConfig = {}) {
     agentPreset: runtime.dsh.agentPreset,
     state,
     napcat,
-    maintSessionIds: kernel.maintSessionIds,
   })
   kernel.dsh = dsh
 
@@ -664,8 +662,6 @@ export async function apply(ctx, bundleConfig = {}) {
       }
     },
     get dsh() { return dsh },
-    /** 跨插件共享能力槽（只读视图）：插件把自己的能力挂上来供内核/控制台调用（如 memoryAccumulate）。 */
-    get shared() { return kernel.shared },
     /** 回复节奏能力（合批窗口 / 主动接话调度 + 状态）：插件可读 `config`、`stats()` 做控制台/自检 */
     get pacing() { return kernel.pacing },
     get state() { return state },
@@ -832,10 +828,6 @@ export async function apply(ctx, bundleConfig = {}) {
             render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }],
           },
           async execute(args, exec) {
-            // 后台任务会话（群记忆积累等）不允许调用任何工具：只输出文本
-            if (kernel.maintSessionIds.has(String(exec?.agent?.session?.id || ''))) {
-              throw new Error('后台任务不允许调用工具：请直接输出文本结果（不要调用 send_message / 任何工具）')
-            }
             const turnCtx = resolveToolTurn(exec, args?.target)
             // 会话认出来了就以"本轮会话"为准：模型把 target 写错（或从旧上文抄来）时别发错群。
             let callArgs = args

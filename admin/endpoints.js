@@ -933,29 +933,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     return [...ids].sort((a, b) => Number(a) - Number(b))
   }
 
-  /** 群记忆自动积累的现状：优先内置积累器（插件自带定时器），否则退回 ops provider。 */
-  function memoryAccumulateStatus() {
-    const fn = kernel?.shared?.memoryAccumulateStatus
-    if (typeof fn === 'function') {
-      const st = safe(() => fn(), null)
-      if (st) return { source: 'builtin', ...st }
-    }
-    if (hasOps(opsRef, 'memoryAccumulate')) return { source: 'ops', enabled: true, running: false }
-    return { source: 'none', enabled: false, running: false }
-  }
-
-  function memorySchedule(acc = memoryAccumulateStatus()) {
-    if (acc.source === 'builtin') {
-      if (!acc.enabled) return { cron: '', text: '自动积累已关闭（可在本页打开「自动积累群记忆」）' }
-      const fmt = (ts) => { try { return new Date(ts).toLocaleString('zh-CN', { hour12: false }) } catch { return '' } }
-      const parts = [`每 ${acc.intervalHours} 小时`]
-      if (acc.running) parts.push('正在积累…')
-      if (acc.lastRunAt) parts.push(`上次 ${fmt(acc.lastRunAt)}（${acc.lastResult?.message || '—'}）`)
-      if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)
-      return { cron: '', text: parts.join(' · '), status: acc }
-    }
-    if (acc.source === 'ops') return { cron: '', text: '由本机运维能力驱动（ops.memoryAccumulate）', status: acc }
-    return { cron: '', text: '（未启用自动积累；可打开「自动积累群记忆」或手动积累）', status: acc }
+  function memorySchedule() {
+    return hasOps(opsRef, 'memoryAccumulate')
+      ? { cron: '', text: '由本机运维能力驱动（ops.memoryAccumulate）' }
+      : { cron: '', text: '（本机未配置积累器；这里只能看/改文件）' }
   }
 
   function memoryControls(raw) {
@@ -969,8 +950,6 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const raw = store.read()
 
     if (op === 'list') {
-      const accumulate = memoryAccumulateStatus()
-      const schedule = memorySchedule(accumulate)
       const dir = memoryDir()
       const napcatGroups = await fetchGroupList(kernel)
       const nameByGid = new Map(napcatGroups.map((g) => [g.id, g.name]))
@@ -983,9 +962,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }))
       return {
         ok: true, op, dir, groups, sections: MEMORY_SECTIONS,
-        schedule: schedule.text,
-        accumulate,
-        estimate: null,
+        schedule: memorySchedule(), estimate: null,
       }
     }
 
@@ -1033,24 +1010,14 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
 
     if (op === 'refresh') {
-      if (payload.confirm !== true) {
-        return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
-      }
-      // ① 内置积累器（插件自带调度器）优先；② 退回 ops provider（老部署）
-      const builtin = kernel?.shared?.memoryAccumulate
-      if (typeof builtin === 'function') {
-        const result = await builtin({ ...payload, confirm: true })
-        if (result && result.ok === false) return { ok: false, error: result.error || '内置积累器拒绝执行' }
-        return {
-          ok: true, op, ...(isPlainObject(result) ? result : {}),
-          message: result?.message || '已在后台开始积累（过会儿点「刷新」看结果）',
-        }
-      }
       if (!hasOps(opsRef, 'memoryAccumulate')) {
         return {
           ok: false,
-          error: '没有可用的群记忆积累器：请在「群记忆」页打开「自动积累群记忆」，或安装带 ops.memoryAccumulate 的本机运维能力',
+          error: '本机未配置群记忆积累能力（ops.memoryAccumulate）：控制台只能看/改记忆文件，积累器请由本机运维任务负责',
         }
+      }
+      if (payload.confirm !== true) {
+        return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
       }
       const result = await opsRef.memoryAccumulate({ ...payload, confirm: true })
       if (result == null) return { ok: false, error: '本机群记忆积累器调用失败（详见日志）' }
