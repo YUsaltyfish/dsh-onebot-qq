@@ -49,7 +49,7 @@ after(async () => {
   }
 })
 
-test('1. 全量装配：9 子插件 + 8 原生工具 + 7 命令 + 单例（重复 apply 返回同一 kernel）', async (t) => {
+test('1. 全量装配：9 子插件 + 9 原生工具 + 7 命令 + 单例（重复 apply 返回同一 kernel）', async (t) => {
   const h = await bootKernel({ config: { pacing: { merge: { enabled: false } } } })
   t.after(() => h.dispose())
   // 不写死数量：新增子插件不该让测试红
@@ -60,7 +60,12 @@ test('1. 全量装配：9 子插件 + 8 原生工具 + 7 命令 + 单例（重�
   assert.equal(h.kernel.plugins.length, h.kernel.pluginDefs.length, '发现的插件全部加载（无静默跳过）')
   assert.equal(h.kernel.pluginErrors.size, 0, `零加载错误：${[...h.kernel.pluginErrors.keys()].join(',')}`)
   assert.ok(h.kernel.pluginDefs.length >= wantPlugins.length, 'pluginDefs 至少含内置插件')
-  assert.equal(h.kernel.toolDefs.size, 8, `原生工具 8 个，实际 ${[...h.kernel.toolDefs.keys()].join(',')}`)
+  // 原生工具只查「关键工具都在、数量不低于预期」，新增工具不该让测试红
+  for (const name of ['send_message', 'recall', 'send_image', 'generate_image', 'avatar', 'send_sticker',
+    'sticker_catalog', 'read_memory', 'memory_append']) {
+    assert.ok(h.kernel.toolDefs.has(name), `应注册原生工具 ${name}`)
+  }
+  assert.ok(h.kernel.toolDefs.size >= 9, `原生工具至少 9 个，实际 ${[...h.kernel.toolDefs.keys()].join(',')}`)
   assert.equal(h.kernel.commands.size, 7, `命令 7 个，实际 ${[...h.kernel.commands.keys()].join(',')}`)
   for (const cmd of ['help', 'status', 'reset', 'resetall', 'cancel', 'history', 'quota']) {
     assert.ok(h.kernel.commands.has(cmd), `应注册 /${cmd}`)

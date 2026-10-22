@@ -234,7 +234,8 @@ export function createDshDriver(opts) {
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const ev = events[i]
         if (ev?.type !== 'assistant/message') continue
-        const content = ev.message?.content
+        // 事件形状是 { type, seq, time, data:{ message } }；兼容可能被展平的旧形状
+        const content = (ev.data?.message || ev.message)?.content
         if (!Array.isArray(content)) continue
         return content
           .filter((c) => c?.type === 'text')

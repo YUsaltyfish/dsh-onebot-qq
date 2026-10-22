@@ -5,8 +5,9 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
 
-> **先读**：[`docs/使用说明书.md`](docs/使用说明书.md)（使用说明书：安装 → 连接 → 各功能怎么用 → 人设怎么写）。
-> 想自己装：本文「安装」；只想让 DSH 帮你装：把 [`docs/安装前准备.md`](docs/安装前准备.md) 甩给它。
+> **先读**：[`docs/README.md`](docs/README.md)（功能手册总览：按「我要做什么」找文档 + 全部功能索引）。
+> 日常用：[`docs/使用说明书.md`](docs/使用说明书.md)（安装 → 连接 → 各功能怎么用 → 人设怎么写）。
+> 想自己装：本文「安装」；只想让 DSH 帮你装：把 [`docs/安装与卸载.md`](docs/安装与卸载.md)（Windows 用 [`docs/Windows安装.md`](docs/Windows安装.md)）整份甩给它。
 
 ## 特性
 
@@ -48,6 +49,8 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 也可以在 DSH 桌面端的「设置 → 插件」里填 GitHub 仓库地址安装。
 
+> 装完还要「建数据目录 → 启动 → 控制台新手向导连 NapCat」才算跑通：完整步骤、升级、卸载、回滚见 [`docs/安装与卸载.md`](docs/安装与卸载.md)；Windows 见 [`docs/Windows安装.md`](docs/Windows安装.md)。
+
 > **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
 > `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
 > 不装也能正常用，只是 QQ 会话的工具面更大，token消耗略微增加，可能导致群聊天时调用不该用的工具而产生风险。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
@@ -72,15 +75,12 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/使用说明书.md`](docs/使用说明书.md) | **使用说明书（先看这个）** |
-| [`docs/安装前准备.md`](docs/安装前准备.md) | 装之前：还要另外准备什么（只有 2 项）+ 验收 |
-| [`docs/安装与卸载.md`](docs/安装与卸载.md) | 安装 / 升级 / 卸载 / 首次配置 |
-| [`docs/配置参考.md`](docs/配置参考.md) | 实例配置 v2 全部键、路径规则、凭据、控制台热改 |
-| [`docs/Windows安装.md`](docs/Windows安装.md) | Windows 从零到跑通 + 真机验证清单 |
-| [`docs/排错.md`](docs/排错.md) | 连不上 NapCat、工具不出现、图片发不出 |
-| [`docs/插件开发.md`](docs/插件开发.md) | 子插件契约、`bot` 能力表、五阶段、红线 |
-| [`docs/架构说明.md`](docs/架构说明.md) | 实现契约（贡献者必读） |
-| [`docs/运维接口.md`](docs/运维接口.md) | 可选运维外设接口（自检/清理等不进包） |
+| [`docs/README.md`](docs/README.md) | **功能手册总览（先看这个）**：按任务找文档 + 全部功能索引 |
+| [`docs/使用说明书.md`](docs/使用说明书.md) | 功能怎么用：控制台、生图、表情、群记忆、人设与句池 |
+| [`docs/安装与卸载.md`](docs/安装与卸载.md) | 安装 / 首次配置 / 升级 / 卸载 / 回滚 |
+| [`docs/开发指南.md`](docs/开发指南.md) | 架构与子插件 SDK（贡献者 / 二次开发必读） |
+
+其余文档（Windows、配置参考、排错、运维接口、维护记录）统一从 [功能手册总览](docs/README.md) 进。
 
 ## 隐私
 

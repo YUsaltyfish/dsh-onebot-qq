@@ -817,6 +817,9 @@ export async function apply(ctx, bundleConfig = {}) {
   }, { order: 50, pluginId: 'kernel:context' })
 
   // ── 原生工具注册：必须 inject 后再注册（受限 ctx 的坑，见文件头纪律 3） ──
+  // 后台任务（群记忆积累）允许调用的工具白名单：只有「提交结果」型的 memory_append。
+  // 这样后台会话能结构化提交数据，但调不到 send_message / 生图 / bash 等（防误发、防乱动系统）。
+  const MAINT_ALLOWED_TOOLS = new Set(['memory_append'])
   const prefix = String(runtime.toolPrefix || 'mcp__qq__')
   ctx.inject(['tools'], (child) => {
     const tools = child.tools
@@ -832,9 +835,15 @@ export async function apply(ctx, bundleConfig = {}) {
             render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }],
           },
           async execute(args, exec) {
-            // 后台任务会话（群记忆积累等）不允许调用任何工具：只输出文本
-            if (kernel.maintSessionIds.has(String(exec?.agent?.session?.id || ''))) {
-              throw new Error('后台任务不允许调用工具：请直接输出文本结果（不要调用 send_message / 任何工具）')
+            // 工具守卫（两道）：
+            // ① 后台任务会话（群记忆积累等）只允许 memory_append（提交群记忆要点），其它工具一律拒；
+            // ② memory_append 反过来只允许后台任务会话调，普通 QQ 会话调不到（不让它顺手改记忆）。
+            const isMaint = kernel.maintSessionIds.has(String(exec?.agent?.session?.id || ''))
+            if (isMaint && !MAINT_ALLOWED_TOOLS.has(toolName)) {
+              throw new Error(`后台任务只允许调用 ${[...MAINT_ALLOWED_TOOLS].join('/')}（提交群记忆要点），不要调用其它工具`)
+            }
+            if (!isMaint && MAINT_ALLOWED_TOOLS.has(toolName)) {
+              throw new Error('这个工具只能由后台任务调用（普通会话不需要）')
             }
             const turnCtx = resolveToolTurn(exec, args?.target)
             // 会话认出来了就以"本轮会话"为准：模型把 target 写错（或从旧上文抄来）时别发错群。

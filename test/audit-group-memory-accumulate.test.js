@@ -6,7 +6,9 @@
  *  ② 消息够 → 调后台任务 → 写回 + .revisions 备份 + 保留份数；
  *  ③ 消息太少 → 跳过、不调模型；
  *  ④ 模型输出无效（空）→ 不写盘、记入 failed；
- *  ⑤ 状态结构（enabled / intervalHours / lastRunAt / nextDueAt / lastResult）。
+ *  ⑤ 模型只写 `<<<GROUP>>>` 开头、漏 `<<<END>>>` 结尾（2026-10-22 线上实测）→ 仍能逐群解析、照常写回；
+ *  ⑥ 批量 digest 让模型用 `memory_append` 工具提交（结构化，不走文本解析）；漏提交的群记失败、不推水位；
+ *  ⑦ 状态结构（enabled / intervalHours / lastRunAt / nextDueAt / lastResult）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -39,10 +41,10 @@ function makeBot({ dataDir, archiveDir, cfg = {}, runner }) {
   return { bot, shared, tools, stages }
 }
 
-function writeArchive(archiveDir, rows) {
+function writeArchive(archiveDir, rows, gid = GROUP) {
   fs.mkdirSync(archiveDir, { recursive: true })
   const lines = rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
-  fs.writeFileSync(path.join(archiveDir, `group_${GROUP}.jsonl`), lines)
+  fs.writeFileSync(path.join(archiveDir, `group_${gid}.jsonl`), lines)
 }
 
 function msg(ts, qq, nick, text, dir = 'in') {
@@ -109,6 +111,8 @@ test('群记忆积累：保留 N 份历史版本，超出自动清理', async ()
   })
   plugin.setup(bot)
   for (let i = 0; i < 4; i += 1) {
+    // 每轮写一条新消息（否则水位会把它当已消化，不会产生新版本）
+    writeArchive(archiveDir, [msg(Date.now(), 111, '甲', `新话题出现了 ${i}`)])
     // eslint-disable-next-line no-await-in-loop
     const r = await shared.memoryAccumulateSync({ confirm: true })
     assert.equal(r.ok, true)
@@ -158,4 +162,163 @@ test('群记忆积累：开关关闭 / 模型输出无效 → 不写盘', async 
     assert.equal(r.failed.length, 1)
     assert.equal(fs.existsSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`)), false, '无效输出不应写盘')
   }
+})
+
+test('群记忆积累：digest 两个群只调一次模型（批量 + 标记解析 + 水位）', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const G2 = '2233445566'
+  const now = Date.now()
+  writeArchive(archiveDir, [msg(now - 3000, 111, '甲', '甲说话')])
+  writeArchive(archiveDir, [msg(now - 2000, 222, '乙', '乙说话')], G2)
+  let called = 0
+  const runner = async () => {
+    called += 1
+    return {
+      ok: true,
+      text: `<<<GROUP:${GROUP}>>>\n- **甲(111)**：爱开玩笑\n- 风格：语气轻松\n<<<END:${GROUP}>>>\n`
+        + `<<<GROUP:${G2}>>>\n- **乙(222)**：话少但会接根\n<<<END:${G2}>>>`,
+    }
+  }
+  const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
+  plugin.setup(bot)
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r.ok, true)
+  assert.equal(called, 1, '两个群应合成一次调用')
+  assert.equal(r.calls, 1)
+  assert.deepEqual([...r.updated].sort(), [GROUP, G2].sort())
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`), 'utf8'), /甲\(111\)/)
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
+
+  // 第二轮：同一批消息不应再喂模型（消化水位）
+  const r2 = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(called, 1, '没有新消息时不应再调用模型')
+  assert.equal(r2.calls, 0)
+})
+
+test('群记忆积累：模型漏写 <<<END>>> 标记也能解析（2026-10-22 线上实测格式）', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const G2 = '2233445566'
+  const now = Date.now()
+  writeArchive(archiveDir, [msg(now - 3000, 111, '甲', '甲说话')])
+  writeArchive(archiveDir, [msg(now - 2000, 222, '乙', '乙说话')], G2)
+  // 线上真实形态：每个群只有 GROUP 开头行，一条 END 都没有
+  const runner = async () => ({
+    ok: true,
+    text: `<<<GROUP:${GROUP}>>>\n- **甲(111)**：爱开玩笑\n\n<<<GROUP:${G2}>>>\n- **乙(222)**：话少但会接棗`,
+  })
+  const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
+  plugin.setup(bot)
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r.ok, true)
+  assert.equal(r.failed.length, 0, '漏 END 不应再整批失败')
+  assert.deepEqual([...r.updated].sort(), [GROUP, G2].sort())
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`), 'utf8'), /甲\(111\)/)
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
+})
+
+test('群记忆积累：digest 用 memory_append 工具提交（不走文本标签解析）', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const G2 = '2233445566'
+  const now = Date.now()
+  writeArchive(archiveDir, [msg(now - 3000, 111, '甲', '甲说话')])
+  writeArchive(archiveDir, [msg(now - 2000, 222, '乙', '乙说话')], G2)
+  let called = 0
+  let submit = null
+  const runner = async ({ prompt }) => {
+    called += 1
+    assert.match(prompt, /memory_append/, '批量 digest 提示词应要求用工具提交')
+    // 模拟模型在回合内逐群调工具；正文完全不含 <<<GROUP>>> 标记
+    submit({ group_id: GROUP, points: '- **甲(111)**：爱开玩笑\n- 风格：语气轻松' })
+    submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' })
+    return { ok: true, text: '已提交' }
+  }
+  const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
+  submit = (args) => bot.shared.memoryAccumulateSubmit(args)
+  plugin.setup(bot)
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r.ok, true)
+  assert.equal(called, 1, '仍然是两个群一次调用')
+  assert.equal(r.failed.length, 0, '工具提交不应再出现格式失败')
+  assert.deepEqual([...r.updated].sort(), [GROUP, G2].sort())
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`), 'utf8'), /甲\(111\)/)
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
+  // 模型回合结束后（普通会话/轮次外）工具应报错
+  assert.throws(() => shared.memoryAccumulateSubmit({ group_id: GROUP, points: '- x' }), /没有进行中的群记忆积累轮次/)
+})
+
+test('群记忆积累：工具漏提交的群记失败、不推水位（下轮能重试）', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const G2 = '2233445566'
+  const now = Date.now()
+  writeArchive(archiveDir, [msg(now - 3000, 111, '甲', '甲说话')])
+  writeArchive(archiveDir, [msg(now - 2000, 222, '乙', '乙说话')], G2)
+  let submit = null
+  let round = 0
+  const runner = async () => {
+    round += 1
+    if (round === 1) submit({ group_id: GROUP, points: '- **甲(111)**：爱开玩笑' }) // 故意漏 G2
+    else { submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' }) }
+    return { ok: true, text: '' }
+  }
+  const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
+  submit = (args) => bot.shared.memoryAccumulateSubmit(args)
+  plugin.setup(bot)
+  const r1 = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r1.failed.length, 1)
+  assert.equal(r1.failed[0].gid, G2)
+  // G2 没推水位 → 第二轮仍会喂它，提交后成功
+  const r2 = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(round, 2)
+  assert.deepEqual(r2.updated, [G2])
+  assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
+})
+
+test('群记忆积累：车轮清理只删「已消化 且 过期」的原始记录', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const now = Date.now()
+  writeArchive(archiveDir, [
+    msg(now - 5 * 86400000, 111, '甲', '五天前的旧消息'),
+    msg(now - 60_000, 222, '乙', '一分钟前的新消息'),
+  ])
+  // 预置状态：这个群已经消化到 now
+  fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true })
+  fs.writeFileSync(path.join(dataDir, 'state', 'group-memory.json'),
+    JSON.stringify({ groups: { [GROUP]: { digestedAt: now } } }))
+  const { bot, shared } = makeBot({
+    dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner: async () => ({ ok: true, text: '' }),
+  })
+  plugin.setup(bot)
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r.ok, true)
+  const lines = fs.readFileSync(path.join(archiveDir, `group_${GROUP}.jsonl`), 'utf8').trim().split('\n').filter(Boolean)
+  assert.equal(lines.length, 1, '只应保留未过期的一条')
+  assert.match(lines[0], /一分钟前/)
+  assert.equal(r.pruned.removed, 1)
+})
+
+test('群记忆积累：per-group 模式逐群各调一次', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const G2 = '2233445566'
+  const now = Date.now()
+  writeArchive(archiveDir, [msg(now - 1000, 111, '甲', '甲说话')])
+  writeArchive(archiveDir, [msg(now - 900, 222, '乙', '乙说话')], G2)
+  let called = 0
+  const runner = async () => {
+    called += 1
+    return { ok: true, text: `# 群记忆\n\n## 说话风格\n- 第 ${called} 版：群友很活跃，喜欢在晚上聊天，语气轻松\n` }
+  }
+  const { bot, shared } = makeBot({
+    dataDir, archiveDir, cfg: { accumulateMode: 'per-group', accumulateMinNewMsgs: 1 }, runner,
+  })
+  plugin.setup(bot)
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(called, 2)
+  assert.equal(r.calls, 2)
+  assert.equal(r.updated.length, 2)
 })

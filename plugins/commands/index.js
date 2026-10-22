@@ -62,7 +62,7 @@ export default {
   title: '基础命令',
   order: 20,
   configSchema: {
-    enabled: { type: 'bool', default: true, group: '群聊', label: '基础命令', hint: '开：支持 /help、/stats 这类斜杠命令（/help 谁都能用，改配置类命令仅主人）；关：全部不响应。' },
+    enabled: { type: 'bool', default: true, group: '群聊', label: '基础命令', hint: '开：支持 /help、/status 这类斜杠命令（/help 谁都能用，改配置类命令仅主人）；关：全部不响应。' },
   },
 
   setup(bot) {

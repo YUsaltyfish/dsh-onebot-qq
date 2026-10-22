@@ -948,7 +948,12 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     if (acc.source === 'builtin') {
       if (!acc.enabled) return { cron: '', text: '自动积累已关闭（可在本页打开「自动积累群记忆」）' }
       const fmt = (ts) => { try { return new Date(ts).toLocaleString('zh-CN', { hour12: false }) } catch { return '' } }
-      const parts = [`每 ${acc.intervalHours} 小时`]
+      const modeLabel = acc.mode === 'rewrite' ? '重写全文' : acc.mode === 'per-group' ? '逐群' : '增量要点'
+      const parts = [`每 ${acc.intervalHours} 小时`, modeLabel]
+      const keep = []
+      if (acc.keepDays) keep.push(`${acc.keepDays} 天`)
+      if (acc.keepRows) keep.push(`${acc.keepRows} 行`)
+      if (keep.length) parts.push(`原始记录保留 ${keep.join(' / ')}`)
       if (acc.running) parts.push('正在积累…')
       if (acc.lastRunAt) parts.push(`上次 ${fmt(acc.lastRunAt)}（${acc.lastResult?.message || '—'}）`)
       if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)

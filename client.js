@@ -1112,39 +1112,24 @@ window.__ModuleLoader__.load({
 				setCfgOpen(!cfgOpen)
 			}
 
-			const saveCfg = async (c, value) => {
-				if (value === c.value) return
-				setBusy(true); setMsg('')
-				try {
-					const r = await call('setcfg', { key: c.key, value: value })
-					if (r && r.ok === false) throw new Error(r.error)
-					setMsg(r && r.message ? r.message : '已保存 ✓')
-					const rr = await call('config')
-					setCfg(rr.controls || [])
-				} catch (e) { setMsg(`${c.label} ✗ ${e.message}`) } finally { setBusy(false) }
-			}
-
-			// 每行都带悬停详情（原生 title）：建议用量 + 影响
-			const cfgRow = (c) => {
-				const plainHint = String(c.hint || '').replace(/\*\*/g, '')
-				return h('div', { style: S.row, key: c.key, title: plainHint }, [
-				h('span', { style: S.label, key: 'l' }, [
-					c.label,
-					c.hint ? h('span', { key: 'i', style: { marginLeft: 6, opacity: .5, cursor: 'help' }, title: plainHint }, 'ⓘ') : null,
-					h('span', { key: 'k', style: { opacity: .4, fontSize: 11, marginLeft: 6 } }, c.key.replace('bridge.groupMemory.', '')),
-				]),
-				c.type === 'bool'
-					? h('input', {
-						key: 'v', type: 'checkbox', checked: !!c.value, disabled: busy,
-						onChange: (e) => saveCfg(c, e.target.checked),
-					})
-					: h('input', {
-						key: 'v', type: 'number', style: S.input, defaultValue: c.value, disabled: busy,
-						min: c.min, max: c.max, step: c.step,
-						title: [c.min != null ? `最小 ${c.min}` : '', c.max != null ? `最大 ${c.max}` : ''].filter(Boolean).join(' · '),
-						onBlur: (e) => saveCfg(c, Number(e.target.value)),
-					}),
-				])
+			// 工具配置行直接复用外壳的统一渲染器 ctrlRow（bool / enum / str / int 都由它渲染），
+			// 这里只把它的 api 换成本页的保存通道：memory/setcfg 落盘 + 读回最新配置热更新。
+			const cfgApi = {
+				busy, setMsg,
+				async run(label, fn) {
+					setBusy(true); setMsg('')
+					try {
+						await fn()
+						setMsg(`${label} ✓`)
+						const rr = await call('config')
+						setCfg(rr.controls || [])
+					} catch (e) { setMsg(`${label} ✗ ${e.message}`) } finally { setBusy(false) }
+				},
+				call(op, payload) {
+					if (op !== 'set' || !payload) return Promise.reject(new Error(`不支持的操作：${op}`))
+					return call('setcfg', { key: payload.key, value: payload.value })
+						.then((r) => { if (r && r.ok === false) throw new Error(r.error); return r })
+				},
 			}
 
 			useEffect(() => { load() }, [])   // 只在挂载时拉一次
@@ -1183,9 +1168,9 @@ window.__ModuleLoader__.load({
 						onClick: () => setConfirmBox({
 							title: '⚠️ 立刻积累一轮？',
 							lines: [
-								'会调用一次大模型（每群一次，跑在独立后台会话里），后台执行、不占页面。',
-								'只处理最近有消息的群；消息太少或内容没变化会跳过。',
-								'跑完后点「刷新」看结果；自动节奏见上面那行「自动积累」，开关/间隔在「工具配置」里改。',
+								'会调用大模型：默认把本轮所有「有新消息的群」合在一次调用里（群太多或聊天太长才自动拆批）。',
+								'跑在独立的临时后台会话里，后台执行、不占页面，也不会碰群里的对话。',
+								'只处理上次消化之后有新消息的群；消息太少会跳过。跑完点「刷新」看结果；节奏和开关在下面「工具配置」里改。',
 							],
 							okLabel: '开始积累',
 							onOk: async () => {
@@ -1212,11 +1197,12 @@ window.__ModuleLoader__.load({
 
 				h('div', { style: SM.dim, key: 'hint' },
 					'每个群一篇 Markdown：记「唤醒与对话风格」和「群里的人」。' +
-					'群聊时内核会把该群这一篇贴给它看；内容由本机积累器自动更新' +
+					'群聊时内核只给模型一行「有这份记忆」的指针，它需要时再自己调 read_memory 读（整篇不往对话正文里贴）；' +
+					'内容由插件自带的积累器定时更新' +
 					'（节奏见上面那行「自动积累」），' +
 					'这里可以手改（保存会先把旧版备份到 .revisions/）。'),
 
-				// ⚙ 工具配置（折叠）：改的是 config.json 的 bridge.groupMemory 段
+				// ⚙ 工具配置（折叠）：改的是 config.json 的 pluginConfig['group-memory'] 段
 				h('div', { key: 'cfg' }, [
 					h('button', { style: S.btn, disabled: busy, onClick: toggleCfg },
 						(cfgOpen ? '▾ 收起工具配置' : '▸ 工具配置') + (cfg ? `（${cfg.length} 项）` : '')),
@@ -1225,15 +1211,14 @@ window.__ModuleLoader__.load({
 						for (const c of cfg) if (!gs.includes(c.group)) gs.push(c.group)
 						return gs.map((gname) => h('div', { key: 'g' + gname }, [
 							h('div', { style: S.pgroup, key: 't' }, gname),
-							cfg.filter((c) => c.group === gname).map(cfgRow),
+							cfg.filter((c) => c.group === gname).map((c) => ctrlRow(c, cfgApi)),
 						]))
 					})()) : null,
 					cfgOpen ? h('div', { style: SM.dim, key: 'doc' },
 						'💡 换算口径：1 汉字 ≈ 3.2 字节，1 token ≈ 1.4 汉字（即 1000 字节 ≈ 310 字 ≈ 220 token）。　' +
-						'把鼠标停在任意一行（或那个 ⓘ）上，会显示**建议用量、影响和具体换算**。　' +
-						'改完立刻落盘（写入前备份 config.json）并热重载内核：读取侧马上生效，积累器下一轮按新值跑。' +
-						'合并衰减的权重公式 = 累计确认次数 × 2^(-距上次出现天数 / 半衰期)；' +
-						'条目后面那些 <!-- n=.. d=.. --> 就是它的记账，注入前会被剥掉。') : null,
+						'鼠标停在任意一行（或那个 ⓘ）上会显示用途和影响。　' +
+						'改完立刻落盘（写入前备份 config.json）并热重载：读取侧马上生效，积累器下一轮按新值跑。　' +
+						'积累方式「增量要点」只追加新条目（按 QQ / 文本去重），每节超上限从最早的开始丢；想要模型整篇重写就切「重写全文」。') : null,
 				]),
 
 				h('div', { style: SM.layout, key: 'body' }, [

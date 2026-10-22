@@ -29,7 +29,7 @@
 ## 二、目录与命名
 
 ```
-QQ机器人维护记录/
+docs/维护记录/
 ├── README.md                       ← 本文件（规范 + 索引）
 ├── YYYY-MM-DD.md                   ← 每天一个维护记录
 └── patches/
@@ -68,7 +68,7 @@ QQ机器人维护记录/
 
 | 日期 | 主题 | 涉及文件 | 状态 | 记录 |
 |---|---|---|---|---|
-| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关 + 群记忆自动积累（**方案 B：同插件内拆模块**） | `kernel/napcat-adapter.js`、`kernel/dsh-driver.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`plugins/group-memory/{index.js,accumulate.js}`、`docs/配置参考.md` | 登录/冷场：`3df2991`；积累：`18b6db8`→`b4fab27` 复原 → 方案 B 重做（本次提交） | [2026-10-22.md](2026-10-22.md) |
+| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关 + 群记忆自动积累（方案 B）→ **改为一轮一次批量提炼 + 原始记录 3 天车轮清理（方案 A）** | `kernel/napcat-adapter.js`、`kernel/dsh-driver.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`plugins/group-memory/{index.js,accumulate.js}`、`docs/配置参考.md`、`docs/使用说明书.md` | 登录/冷场：`3df2991`；积累：`18b6db8`→`b4fab27` 复原 → 方案 B 重做；批量提炼/滚动清理：本机已改，待重启 | [2026-10-22.md](2026-10-22.md) |
 
 > 更早的变更（插件重命名、历史会话归位、opsgate 工具门等）已在仓库 git 历史或对应上游提交里，不再重复记录。
 

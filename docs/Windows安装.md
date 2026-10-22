@@ -2,7 +2,8 @@
 
 > 目标：一台**干净的 Windows 10/11 x64**，装上 Node、DSH、NapCat、本插件，让 QQ 群里 @ 机器人能收到回复。
 > 全程只用 Windows 自带工具 + PowerShell；不需要 WSL、不需要 bash、不需要管理员权限（安装 Node 时除外）。
-> 每一步都有「怎么确认成功」，卡住时看 [`troubleshooting.md`](排错.md) 的 Windows 部分。
+> 每一步都有「怎么确认成功」，卡住时看 [排错](排错.md) 的 Windows 部分。
+> 本文是 Windows 专用全流程；通用安装 / 升级 / 卸载 / 回滚见 [安装与卸载](安装与卸载.md)。
 
 ## 零、版本与前置
 
@@ -10,7 +11,7 @@
 |---|---|---|
 | Windows | 10 / 11 x64 | `winver` |
 | Node.js | **>= 22 LTS** | `node --version` → `v22.x` |
-| DSH | **>= 0.2.0 < 0.3.0**（建议 0.2.1-rc.2+） | `dsh --version` |
+| DSH | **>= 0.2.1-rc.2 < 0.3.0** | `dsh --version` |
 | NapCatQQ | 近期版本（QQNT 客户端 + OneBot v11） | NapCat WebUI 能打开、QQ 已登录 |
 | QQ 账号 | 建议小号 | — |
 
@@ -32,19 +33,12 @@
 ```powershell
 npm install -g @deepseek-ai/dsh
 dsh --version
+dsh web          # 首次启动会初始化 web profile（%USERPROFILE%\.dsh\profiles\web）
 ```
 
-首次启动会初始化 `web` profile（在 `%USERPROFILE%\.dsh\profiles\web`）：
+浏览器打开 <http://127.0.0.1:3080>，能进 GUI 就成功。**先让 dsh-web 保持运行**（装插件后要重启它；可以用两个终端，或装完 Ctrl+C 再启动）。
 
-```powershell
-dsh web
-```
-
-看到 Web 地址（默认 <http://127.0.0.1:3080>）后在浏览器打开，能进 GUI 就成功。
-**先让 dsh-web 保持运行**（后面装插件后要重启它；可以用两个终端，或装完后 Ctrl+C 再启动）。
-
-> 如果 3080 被占用：`dsh web --port 3090`。
-> 想换 DSH 数据位置：设置环境变量 `DSH_HOME`（如 `D:\dsh-home`）后再启动。
+> 3080 被占用用 `dsh web --port 3090`；想换 DSH 数据位置，先设 `DSH_HOME`（如 `D:\dsh-home`）再启动。
 
 ## 三、安装并配置 NapCat（QQ 协议端）
 
@@ -62,48 +56,28 @@ dsh web
 
 ## 四、安装本插件
 
-### 方式 A：DSH 插件管理器（推荐）
-
-1. 浏览器打开 DSH Web → 左侧栏 **Plugins / 插件**；
-2. 安装 bundle，填以下任一：
-   - 本地目录：`C:\path\to\dsh-onebot-qq`（开发/内网）
-   - tgz：`C:\path\to\dsh-onebot-qq-0.1.1.tgz`
-   - GitHub：`github:YUsaltyfish/dsh-onebot-qq`
-3. 安装完成后确认列表里 `dsh-onebot-qq` 为启用状态。
-
-### 方式 B：命令行
+Windows 常用写法是命令行装本地目录；GitHub / tgz / 插件管理器等其它装法见
+[安装与卸载 §三](安装与卸载.md#三安装本插件三选一)。
 
 ```powershell
 # 本地目录（link: 方式，改代码立即生效）
 dsh plugin --profile web add link:C:\path\to\dsh-onebot-qq
-
-# 本地 tgz
-dsh plugin --profile web add C:\path\to\dsh-onebot-qq-0.1.1.tgz
-
-# GitHub
-dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
 ```
 
 > 路径含空格时用引号：`dsh plugin --profile web add "C:\my bots\dsh-onebot-qq"`。
+> 📁 命令里的相对路径（`node bin\dsh-onebot-qq.mjs`、`examples\`、`node --test`）以**包目录**为基准：
+> 源码仓库跑 = 仓库根（如 `C:\src\dsh-onebot-qq`）；tgz 装进 profile = `%USERPROFILE%\.dsh\profiles\web\node_modules\dsh-onebot-qq`。
+> （tgz 的 `files` 不含 `test/`，所以**离线测试只能在源码仓库根跑**。）
 
-> 📁 **命令里的相对路径（`node bin\dsh-onebot-qq.mjs`、`examples\`、`node --test`）以「包目录」为基准**：
-> - 从**源码仓库**跑（推荐）：包目录 = 你 clone/解压的仓库根（如 `C:\src\dsh-onebot-qq`），命令都在仓库根执行；
-> - 从 **tgz 装进 profile**：包目录 = `%USERPROFILE%\.dsh\profiles\web\node_modules\dsh-onebot-qq`，
->   命令要写成 `node "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-onebot-qq\bin\dsh-onebot-qq.mjs" ...`。
->   （tgz 的 `files` 不含 `test/`，所以**离线测试只能在源码仓库根跑**。）
-
-**重启 dsh-web**（Ctrl+C 后重新 `dsh web`），日志里出现 `dsh-onebot-qq` 相关输出即挂载成功：
+**重启 dsh-web**（Ctrl+C 后重新 `dsh web`），日志出现 `dsh-onebot-qq` 输出即挂载成功；还没填 QQ 号会进入「待配置模式」，按 §六 填即可：
 
 ```
-[onebot-qq:kernel] 内核就绪（契约 v1，插件 9/9，工具 8，命令 7）
+[onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 8，命令 7）
 ```
-
-> 此时还没配 QQ 号也没关系：插件进入「**待配置模式**」（控制台/工具可用、不连 NapCat），
-> 日志会提示「实例配置未完成（缺 adminQq）…控制台可继续配置」——跟着下一步的新手向导填就行。
 
 ## 五、创建数据目录（含默认人设）
 
-### 方式 A：PowerShell 脚本（推荐）
+### 方式 A：PowerShell 脚本（推荐，Windows 专属）
 
 ```powershell
 # 在包目录里执行（默认数据目录 %USERPROFILE%\.dsh\dsh-onebot-qq）
@@ -113,137 +87,64 @@ powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1
 powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1 -DataDir 'C:\dsh-data\qq-bot'
 ```
 
-> ⚠️ 脚本只复制文件、**不激活人设**；想要 init 的完整效果（自动投递默认人设），用下面的方式 B，
-> 或直接启动 DSH —— 插件首次启动会**自动投递内置默认人设「蓝色大肥鱼」**。
+> ⚠️ 脚本只复制文件、**不激活人设**；要 init 的完整效果（自动投递默认人设）用跨平台 CLI
+> `node bin\dsh-onebot-qq.mjs init [--data-dir ...]`，与全手动建目录的做法一并见
+> [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导)
+> （不跑也行：插件首次启动会自动投递内置默认人设「蓝色大肥鱼」）。
 
-### 方式 B：跨平台 CLI（与 Linux 相同）
+### 自定义数据目录要同时告诉插件
+
+`--data-dir` / `-DataDir` 只写那个目录下的 config.json，插件默认仍读 `%USERPROFILE%\.dsh\dsh-onebot-qq`。
+推荐**设环境变量再启动 dsh**（在启动 dsh 的同一个终端里）：
 
 ```powershell
-node bin\dsh-onebot-qq.mjs init
-node bin\dsh-onebot-qq.mjs init --data-dir 'C:\dsh-data\qq-bot'
+$env:DSH_QQ_DATA_DIR = 'C:\dsh-data\qq-bot'
+dsh web
 ```
 
-`init` 会建目录、写 `config.json`（`adminQq: 0` 待填）、复制 QQ 线/人设模板，
-并**自动投递默认人设「蓝色大肥鱼」**（Windows 无 symlink 权限时用复制模式），
-同时把 `pluginConfig.persona-voice.activePersona` 写进配置。
-
-> ⚠️ **自定义数据目录必须同时告诉插件**（`init --data-dir` 只写那个目录下的 config.json，插件默认仍读
-> `%USERPROFILE%\.dsh\dsh-onebot-qq`）。两种正确做法，二选一：
->
-> 1. **推荐：设环境变量再启动 dsh**（在启动 dsh 的同一个终端里）：
->    ```powershell
->    $env:DSH_QQ_DATA_DIR = 'C:\dsh-data\qq-bot'
->    dsh web
->    ```
-> 2. **或改 profile patch**：`%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml` 里给
->    `dsh-onebot-qq` 行加 `config`（**整块替换，字段要写全**）：
->    ```yaml
->    - id: dsh-onebot-qq
->      config:
->        dataDir: 'C:/dsh-data/qq-bot'
->        configPath: ''
->        autoConnect: true
->        compatServer: false
->        compatPort: 3971
->    ```
-
-### 方式 C：全手动
-
-1. 建目录：`C:\dsh-data\qq-bot`，其下建 `workspace`、`personas`、`qq-stickers`、`qq-memory`、
-   `qq-welcome-images`、`qq_uploads`、`qq-refs`、`qq_avatars`、`logs\qq_chat`、`state`；
-2. 把 `examples\config.example.json` 复制成 `C:\dsh-data\qq-bot\config.json`；
-3. 把 `examples\qq-lines\*` 复制进 `workspace\`，`examples\personas\*` 复制进 `personas\`；
-4. 激活默认人设（可选）：`node bin\dsh-onebot-qq.mjs persona use 蓝色大肥鱼 --data-dir 'C:\dsh-data\qq-bot'`
-   （不跑也行：插件首次启动会自动投递并激活）。
+> 另一种做法是改 profile patch（`%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml` 里给 `dsh-onebot-qq`
+> 行加 `config.dataDir`，整块替换、字段写全），见 [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导)。
 
 ## 六、首次启动与新手向导（推荐）
 
-> 🛡️ **纯聊天 preset 已随包**：插件安装时会在 `cordis.patch.yml` 里声明内置 preset `qq-chat`
-> （纯聊天 + 联网；**bash / pwsh / 文件 / 任务 / 技能 / 插件管理类工具全部裁掉**），配置留空时自动启用，
-> 不需要再把 `examples\presets\qq-chat.patch.yml` 手动合并进 profile。
->
-> 📁 **单开 QQ 工作区**：插件启动时会按 `dsh.qqWorkspacePath`（默认 `<dataDir>\workspace`）在 DSH 侧栏
-> 创建名为「QQ 聊天」的工作区（名称 = `dsh.workspaceTitle`），QQ 会话都归到这里，不再散在「未分组」；
-> 这两项在实例 `config.json` 的 `dsh` 段（控制台不再提供单独页面），「运维 → 📁 检查 / 创建 QQ 工作区」可手动触发一次（幂等）。
+> **不用先手改 JSON**：缺 `adminQq` 时插件进入「**待配置模式**」（控制台可用、不连 NapCat），日志会提示缺什么；
+> 控制台填完保存后**自动连接**（无需重启）。`qq-chat` preset、「QQ 聊天」工作区、默认人设都由插件自动装好。
 
-> **不用先手改 JSON**：缺 `adminQq` 时插件进入「**待配置模式**」——控制台可用、工具已注册、
-> 但**不连 NapCat**，日志会提示缺什么。填完保存后**自动连接**（无需重启）。
-
-1. **启动**（首次可以先启动）：
+1. **启动**：
    ```powershell
    dsh web
    ```
-   日志会看到：
+   日志会看到（此时**没有**「NapCat WS 已连接」是预期）：
    ```
    [onebot-qq:kernel] 实例配置未完成（缺 adminQq）…控制台可继续配置
-   [onebot-qq:kernel] 内核就绪（契约 v1，插件 9/9，工具 8，命令 7）
+   [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 8，命令 7）
    ```
-   此时**没有**「NapCat WS 已连接」是预期（还没配置）。
-2. 浏览器打开 <http://127.0.0.1:3080> → **设置 → QQ 控制台**：
+2. **打开控制台填写**：浏览器打开 <http://127.0.0.1:3080> → **设置 → QQ 控制台**：
    - **总览 → 新手向导**：逐项 ✅/❌（配置文件 / 主人 QQ / NapCat 连接 / 人设 / 生图），每项一句「怎么做」；
-     未完成时顶部有醒目提示条；
-   - **NapCat 连接**页：图文步骤 + `wsUrl` / `httpUrl` / token 输入（**「测试 NapCat 连接」/「重新连接 NapCat」按钮在「运维」页**，先保存再测）；
-   - **生图**页：**协议**（`openai-images` / `openai-chat`）、API 地址、模型（带建议）、API Key（掩码）；**「检查生图配置」按钮在「运维」页**；
-   - **人设**：安装时已自动投递「蓝色大肥鱼」，不用手动创建；换/加人设见 [`prepare-dsh.md`](安装前准备.md) 的「人设怎么写」。
-3. **填写顺序**：主人 QQ → NapCat 的 `wsUrl` / `httpUrl`（有鉴权再填 token；离开输入框即保存）
-   → 到「运维」点「测试 NapCat 连接」确认返回正常 → 插件自动连接，向导里 NapCat 项变 ✅，可以发消息。
-4. 生图不配置不影响聊天；配置后到「运维」点「检查生图配置」验证地址/Key/模型。
+   - **NapCat 连接**页：`wsUrl` / `httpUrl` / token（**「测试 NapCat 连接」/「重新连接」按钮在「运维」页**，先保存再测）；
+   - **生图**页：协议 / API 地址 / 模型 / API Key（可选，不配不影响聊天）；人设已自动投递，换人设见 [使用说明书 §6](使用说明书.md#6-人设怎么写)。
+3. **填写顺序**：主人 QQ → NapCat 地址/token（离开输入框即保存）→ 到「运维」点「测试 NapCat 连接」→ 插件自动连接，向导里 NapCat 项变 ✅ 就能发消息。
 
-### 手动填写配置（备选，等价）
+### 手动填写配置（备选）
 
-用记事本/VS Code 打开 `%USERPROFILE%\.dsh\dsh-onebot-qq\config.json`（或你的 `--data-dir` 下）。
+用记事本/VS Code 打开 `%USERPROFILE%\.dsh\dsh-onebot-qq\config.json`（或你的 `--data-dir` 下），字段说明见
+[安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导)。**Windows 路径写法**（JSON 里 `\` 是转义符）：
 
-**Windows 路径写法**（JSON 里 `\` 是转义符）：
-
-```json
-{
-  "version": 2,
-  "adminQq": 10001,
-  "napcat": {
-    "wsUrl": "ws://127.0.0.1:3001",
-    "wsToken": "",
-    "httpUrl": "http://127.0.0.1:3000",
-    "httpToken": ""
-  },
-  "archive": { "enabled": true, "dir": "C:/dsh-data/qq-bot/logs/qq_chat" }
-}
-```
-
-- **推荐用正斜杠**（`C:/dsh-data/qq-bot`）或双反斜杠（`C:\\dsh-data\\qq-bot`），避免转义错误；
+- 用**正斜杠**（`"C:/dsh-data/qq-bot"`）或双反斜杠（`"C:\\dsh-data\\qq-bot"`），避免转义错误；
 - 相对路径（如 `"workspace"`）相对**数据目录**解析，跨机器迁移最省事；
-- 必填：`adminQq`（换成你的 QQ 号）、`napcat.wsUrl`、`napcat.httpUrl`；
-- NapCat 开了鉴权就填 `wsToken` / `httpToken`；
-- 生图凭据建议用环境变量（见 §九），不要写进 JSON；
-- **手改配置后要重启一次 dsh-web**；控制台里改是热生效、保存即自动连接。
+- 必填 `adminQq` / `napcat.wsUrl` / `napcat.httpUrl`；NapCat 开了鉴权就填 `wsToken` / `httpToken`；
+- 生图凭据建议用环境变量（见 §九），不要写进 JSON；**手改配置后要重启一次 dsh-web**（控制台改是热生效）。
 
-自检：
-
-```powershell
-node bin\dsh-onebot-qq.mjs doctor
-# 没有 QQ/NapCat 时跳过端口探测：
-node bin\dsh-onebot-qq.mjs doctor --no-net
-```
-
-❌ 项修完再启动；⚠️（如 symlink 不可用、NapCat 未启动、人设缺失）属正常提示。
+自检：`node bin\dsh-onebot-qq.mjs doctor`（无 QQ/NapCat 时加 `--no-net`）；❌ 项修完再启动，⚠️（如 symlink 不可用、NapCat 未启动）属正常提示。
 
 ## 七、启动与验证
 
-> **顺序不再强制**：可以先启动 dsh-web（进入待配置模式）→ 控制台新手向导填写 → 自动连接；
-> 也可以手改 `config.json` 后重启一次。缺 `adminQq` 不再导致插件激活失败。
+1. NapCat 在线、QQ 已登录；控制台「测试 NapCat 连接」返回 ok，或日志出现 `[onebot-qq:napcat] NapCat WS 已连接`；
+2. 私聊「ping」→ 有回复；群里 @ 机器人「ping」→ 有回复；
+3. `/status`（仅主人）→ 有回执；发一张本地图（`a.png` 放进 `<dataDir>\workspace\` 后说「发一下 a.png」）→ QQ 收到图；
+4. 重启 `dsh web` 后再发一条 → 仍是同一个 DSH 会话；异常走控制台「运维 → 🩺 一键诊断」，报告在 `<dataDir>\reports\`。
 
-1. 确认 NapCat 在线、QQ 已登录；
-2. **控制台「测试 NapCat 连接」返回 ok**，或日志出现：
-   ```
-   [onebot-qq:napcat] NapCat WS 已连接
-   ```
-3. **验收四步**：
-   - 私聊机器人发「ping」→ QQ 收到回复；
-   - 群里 @ 机器人发「ping」→ 收到回复；
-   - 发 `/status`（仅主人）→ 有回执；
-   - 让它发一张本地图（把 `a.png` 放进 `<dataDir>\workspace\`，说「发一下 a.png」）→ QQ 收到图。
-4. 重启 `dsh web` 后再发一条消息 → 仍是同一个 DSH 会话（会话映射生效）。
-5. 有任何异常：控制台 →「运维」→ **🩺 一键诊断 / 导出运维报告**，报告在
-   `<dataDir>\reports\diagnose-<时间>.md`，可把路径贴给 DSH 让它按报告修复。
+> 验收四步的完整口径（服务/连接证据/真实请求/能力抽检）见 [安装与卸载 §五](安装与卸载.md#五启动与验收)。
 
 ## 八、人设切换（copy 降级）
 
@@ -262,9 +163,8 @@ node bin\dsh-onebot-qq.mjs persona use 蓝色大肥鱼
 
 ## 九、图片 / 生图 / 表情包
 
-1. **发本地图**（`send_image`）：图片必须在 `file-transfer.imageWhitelist` 内
-   （默认数据目录 + 系统临时目录）。放进 `<dataDir>\workspace\a.png` 即可。
-2. **生图**（`generate_image`）：控制台「生图」页填 **协议 / API 地址 / 模型 / API Key**，点「检查生图配置」；
+1. **发本地图**（`send_image`）：图片必须在 `file-transfer.imageWhitelist` 内（默认数据目录 + 系统临时目录），放进 `<dataDir>\workspace\a.png` 即可。
+2. **生图**（`generate_image`）：控制台「生图」页填 **协议 / API 地址 / 模型 / API Key**，到「运维」点「检查生图配置」；
    或设环境变量（推荐，**环境变量优先于输入框**）：
    ```powershell
    # 在启动 dsh 的同一个终端里设置；也可写进系统环境变量
@@ -274,10 +174,9 @@ node bin\dsh-onebot-qq.mjs persona use 蓝色大肥鱼
    $env:QQ_IMAGEGEN_MODEL    = 'gpt-image-2'
    dsh web
    ```
-   - `openai-images`：走 `/images/generations`（文生图）与 `/images/edits`（图生图）；
-   - `openai-chat`：走 `/chat/completions`（部分中转站/模型用对话接口出图）。
-3. **表情包**：群里发过的表情会自动入库（`<dataDir>\qq-stickers`）；让机器人「发个无语的表情」试 `send_sticker`。
-4. **入群欢迎**：把图片放进 `<dataDir>\qq-welcome-images`，在控制台或 `pluginConfig.group-welcome` 配好群。
+   协议怎么选、冷却与失败不重试等规则见 [使用说明书 §5.4](使用说明书.md#54-生图--图生图)。
+3. **表情包**：群里发过的表情自动入库（`<dataDir>\qq-stickers`）；用法与开关见 [使用说明书 §5.6](使用说明书.md#56-表情包)。
+4. **入群欢迎**：图片放 `<dataDir>\qq-welcome-images`；群开关与欢迎语见 [使用说明书 §5.7](使用说明书.md#57-入群欢迎)。
 
 ### CQ 文件引用真机验证清单（重要）
 
@@ -333,14 +232,16 @@ node --test test\e2e.test.js   # 只跑假 NapCat 端到端（本机动态端口
 | 限制 | 影响 | 处理 |
 |---|---|---|
 | 普通用户无 symlink 权限 | 人设投递走 copy 模式 | 功能正常；想用软链开「开发者模式」 |
-| `chmod 600` 基本无效 | 配置权限靠 ACL | 用 `icacls` 收紧（见 install 文档） |
+| `chmod 600` 基本无效 | 配置权限靠 ACL | 用 `icacls` 收紧（见 [安装与卸载 §九](安装与卸载.md#九权限与凭据)） |
 | 长路径 >260 字符 | 可能 `ENAMETOOLONG` | 数据目录放短路径（`C:\dsh-data\qq-bot`） |
 | 杀毒/索引器占用文件 | 原子写 rename 偶发失败 | 内核自动重试 3 次；仍失败看日志 |
 | NapCat 文件引用形式不统一 | 发图可能失败 | 按上面 7 组清单实测，切 `DSH_QQ_MEDIA_REF` |
-| 没有 systemd/cron | 自检/定时任务不可用 | 用 Windows 任务计划程序；或挂 ops provider（[`ops.md`](运维接口.md)） |
+| 没有 systemd/cron | 自检/定时任务不可用 | 用 Windows 任务计划程序；或挂 ops provider（[运维接口](运维接口.md)） |
 | DSH 重启 = 机器人重启 | 进程内形态的固有特性 | 会话映射可恢复；重启前确认没有进行中的回合 |
 
 ## 十二、Windows 专属排查
+
+> 通用排障（日志在哪、连不上 NapCat、图片发不出等）见 [排错](排错.md)；下表只收 Windows 专属问题。
 
 | 现象 | 处理 |
 |---|---|

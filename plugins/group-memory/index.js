@@ -45,11 +45,36 @@ export default {
     },
     accumulateIntervalHours: {
       type: 'int', default: 8, min: 1, max: 24, step: 1, group: '群记忆', label: '积累间隔', unit: '小时',
-      hint: '多久跑一轮。每轮会为「有新消息的群」各调用一次模型；群多时可以把间隔调长。',
+      hint: '多久跑一轮。每轮只处理「有新消息的群」；默认一批一次模型调用（群多时按下面的上限自动拆批）。',
+    },
+    accumulateMode: {
+      type: 'enum', default: 'digest', group: '群记忆', label: '积累方式',
+      options: [
+        { value: 'digest', label: '增量要点（推荐：一轮一次调用，只提炼新信息）' },
+        { value: 'rewrite', label: '重写全文（一轮一次，模型重写各群完整记忆）' },
+        { value: 'per-group', label: '逐群（每群一次调用，仅排障用）' },
+      ],
+      hint: '增量要点 = 把本轮所有群合成一次调用，模型只输出「新增要点」，本地合并进记忆文件（快、省、输出小）；重写全文 = 模型输出各群完整记忆再整篇替换（记忆更整，但输出大、慢）；逐群 = 每个群单独调用一次。',
+    },
+    accumulateBatchMaxChars: {
+      type: 'int', default: 200000, min: 20000, max: 600000, step: 10000, group: '群记忆', label: '单次提示词上限', unit: '字',
+      hint: '一轮里所有群（聊天正文）加起来超过这个上限就自动拆成多次调用；越大越省调用次数，但单次更慢。',
     },
     accumulateLookbackHours: {
-      type: 'int', default: 8, min: 1, max: 72, step: 1, group: '群记忆', label: '回看最近多少小时', unit: '小时',
-      hint: '每轮只取最近这段时间的聊天留档来更新记忆（更早的内容已经在记忆文件里了）。',
+      type: 'int', default: 72, min: 1, max: 240, step: 1, group: '群记忆', label: '回看最近多少小时', unit: '小时',
+      hint: '首次积累/水位之前最多回看多久的聊天（已消化过的不会重复喂）；一般与「原始记录保留天数」对齐即可。',
+    },
+    accumulateKeepDays: {
+      type: 'int', default: 3, min: 0, max: 30, step: 1, group: '群记忆', label: '原始记录保留天数', unit: '天',
+      hint: '车轮式清理：每轮写完记忆后，删掉「已消化 且 超过 N 天」的聊天留档（保留今天+前 N-1 天）；0 = 永不删。未消化的记录不会删。',
+    },
+    accumulateKeepRows: {
+      type: 'int', default: 0, min: 0, max: 100000, step: 100, group: '群记忆', label: '每群最多保留多少行',
+      hint: '在「保留天数」之外的额外行数上限（只裁已消化的最旧行）；0 = 不限。',
+    },
+    accumulateSectionMaxItems: {
+      type: 'int', default: 80, min: 10, max: 500, step: 10, group: '群记忆', label: '每节条目上限',
+      hint: '增量合并时每个小节（群里的人/对话风格/其它）最多保留多少条，超出从最早的开始丢（防记忆文件无限膨胀）。',
     },
     accumulateMsgPerGroup: {
       type: 'int', default: 200, min: 20, max: 1000, step: 20, group: '群记忆', label: '每群最多取多少条',
@@ -188,6 +213,24 @@ export default {
       },
     })
 
+    // ── 入口 ③：工具 memory_append（只给积累后台任务用；结构化提交，替代 `<<<GROUP>>>` 文本解析）──
+    // 内核的工具守卫只允许「群记忆积累后台会话」调用它；普通 QQ 会话调会被拒。
+    bot.registerTool('memory_append', {
+      description:
+        '群记忆积累**后台任务专用**：把从最近聊天里提炼出的「新增要点」按群提交，插件会去重后合并进该群记忆文件'
+        + '（群聊会话调不到、也不需要它）。每个群调一次：group_id = 群号；points = 新增要点 Markdown 列表行；'
+        + '没有值得记的写「（无新增）」。调用成功后不要再重复提交同一个群。',
+      parameters: {
+        group_id: { type: 'string', required: true, description: '群号（prompt 里【群 号码】的号码，原样抄）' },
+        points: { type: 'string', required: true, description: '本群新增要点：Markdown 列表行（- **昵称(QQ)**：… / - 风格：… / - 其它：…）；没有新增写「（无新增）」' },
+      },
+      execute(args, exec) {
+        const submit = bot.shared.memoryAccumulateSubmit
+        if (typeof submit !== 'function') throw new Error('群记忆积累器未启用，无法提交')
+        return submit(args, exec)
+      },
+    })
+
     // ── 积累侧：实现拆在同目录 accumulate.js（同一子插件、同一组配置），这里只负责接线 ──
     const accumulator = createAccumulator({
       bot,
@@ -201,6 +244,7 @@ export default {
     bot.shared.memoryAccumulate = accumulator.manual
     bot.shared.memoryAccumulateStatus = accumulator.status
     bot.shared.memoryAccumulateSync = accumulator.sync
+    bot.shared.memoryAccumulateSubmit = accumulator.submit
     accumulator.start()
   },
 }
