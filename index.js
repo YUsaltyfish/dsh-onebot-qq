@@ -402,8 +402,9 @@ export async function apply(ctx, bundleConfig = {}) {
     plugins: [],
     pluginDefs: [],
     pluginErrors: new Map(),
-    activeTurns: new Map(), // chatKey → TurnContext
-    turnBySession: new Map(), // sessionId → TurnContext（工具执行时按 DSH 会话认线，防两条线串）
+    activeTurns: new Map(), // chatKey → TurnContext（**正在跑**的那一轮：turn/start → turn/end）
+    turnBySession: new Map(), // sessionId → TurnContext（同上；工具执行时按 DSH 会话认线）
+    pendingTurns: new Map(), // sessionId → TurnContext[]（prompt 已 admission、等 turn/start 的队列）
     maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口一律拒绝，避免后台任务往群里发消息
     dataDir,
     configPath,
@@ -509,21 +510,20 @@ export async function apply(ctx, bundleConfig = {}) {
     }
   })
 
-  // ── 内置出站钩子②：自动引用锚定夺（唤醒后、回复前同群插话数 ≥ quoteAfterMsgs 才自动挂引用） ──
+  // ── 内置出站钩子②：自动引用（锚在 turn/start → turn/end 之间有效，取队首＝正在回的那轮） ──
   deliver.onDecorate((out) => {
-    const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
-    if (turnCtx && !out.turnCtx) out.turnCtx = turnCtx
+    // 只有模型经 send_message 发的回复才自动挂引用。命令 / 答应声 / 冷却 / 生图失败
+    // 这些出站没有自己的回合上下文，以前回退 activeTurns 会把引用挂到上一个人身上。
+    if (!out.autoQuote) return
+    const turnCtx = out.turnCtx ?? null
     // 主动接话不挂引用（上一道钩子已清掉显式值，这里也不再补）
-    if (turnCtx?.wakeKind === 'proactive') return
+    if (!turnCtx || turnCtx.wakeKind === 'proactive') return
     if (out.noReply || out.replyTo != null || out.ats?.length) return
     const need = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     if (need <= 0) return
+    // 锚队列队首 = 正在回的那一轮（turn/start 后才存在，turn/end 就消费掉）
     const q = state.quoteNeed(out.target, need)
-    if (q.allow && q.triggerId != null) {
-      out.replyTo = q.triggerId
-    } else if (turnCtx && turnCtx.arrivedDuringTurn >= need && turnCtx.triggerMsgId != null) {
-      out.replyTo = turnCtx.triggerMsgId
-    }
+    if (q.allow && q.triggerId != null) out.replyTo = q.triggerId
   })
 
   // ── DSH 会话驱动（只保留 in-process） ──────────────────────────
@@ -605,6 +605,8 @@ export async function apply(ctx, bundleConfig = {}) {
       const r = await deliver(args.target, args.text, {
         replyTo: args.reply_to,
         turnCtx,
+        // 只有模型显式调 send_message 的回复才由内核自动挂引用（锚已绑定当前 DSH 回合）
+        autoQuote: true,
       })
       return { ok: true, target: r.target, message_id: r.messageId, mode: r.mode, redacted: r.hits }
     },
@@ -863,11 +865,14 @@ export async function apply(ctx, bundleConfig = {}) {
     log.info(`已注册 ${kernel.toolDefs.size} 个原生工具（前缀 ${prefix}）`)
   })
 
-  // ── 轮次上下文存活期 ────────────────────────────────────────
-  // 模型回合里的工具调用发生在 dsh.prompt() 返回**之后**：如果提交完就把 activeTurns 删掉，
-  // 出站钩子/主动接话统计/引用插话计数/表情包工具全都拿不到 TurnContext。
-  // 所以：一轮从"开始处理"起挂到 activeTurns 上，至少保留到这一轮正常结束的合理时长；
-  // 下一条唤醒消息会覆盖它（同线串行），TTL 兜底防止泄漏。
+  // ── 轮次上下文：绑定到 DSH 的 turn/start → turn/end ─────────
+  // ⚠️ `sessionController.prompt()` 只是 **admission**（内部是 agent.followup），模型真正
+  //    开始跑是之后的事。所以：
+  //    · prompt 提交后先放 pendingTurns（等 turn/start）；
+  //    · turn/start 才把这一轮挂到 turnBySession / activeTurns（工具执行时按它认轮）；
+  //    · turn/end 才清上下文 + 消费引用锚（旧桥接 consumeTrigger 的语义）。
+  //    以前在 runTurn.finally（admission 时）就 pop 锚/清映射，回复发出时只能猜"最后一轮"，
+  //    这正是引用引错人的根因。
   const ACTIVE_TURN_TTL_MS = 5 * 60000
   const activeTurnTimers = new Map()
   // 会话 id → TurnContext：工具 execute 拿到的 exec.agent.session.id 就是它。
@@ -897,56 +902,122 @@ export async function apply(ctx, bundleConfig = {}) {
     activeTurnTimers.set(chatKey, timer)
   }
 
+  // ── DSH 回合与引用锚的绑定 ──────────────────────────────────
+  const boundTurnHooks = new Set()
+  const pushPendingTurn = (sessionId, turnCtx) => {
+    const key = String(sessionId || '')
+    if (!key) return
+    const q = kernel.pendingTurns.get(key) || []
+    q.push(turnCtx)
+    kernel.pendingTurns.set(key, q)
+  }
+  const removePendingTurn = (sessionId, turnCtx) => {
+    const key = String(sessionId || '')
+    const q = kernel.pendingTurns.get(key)
+    if (!q) return
+    const i = q.indexOf(turnCtx)
+    if (i >= 0) q.splice(i, 1)
+    if (!q.length) kernel.pendingTurns.delete(key)
+  }
+  const hasPendingTurn = (chatKey) => {
+    for (const q of kernel.pendingTurns.values()) {
+      for (const t of q) if (String(t.chatKey) === String(chatKey)) return true
+    }
+    return false
+  }
+  function bindTurnHooks(sessionId) {
+    const key = String(sessionId || '')
+    if (!key || boundTurnHooks.has(key)) return
+    boundTurnHooks.add(key)
+    dsh.onTurnStart(key, () => startPendingTurn(key))
+    dsh.onTurnEnd(key, () => finishRunningTurn(key))
+  }
+  function startPendingTurn(sessionId) {
+    const key = String(sessionId || '')
+    const q = kernel.pendingTurns.get(key)
+    const turnCtx = q?.shift()
+    if (q && !q.length) kernel.pendingTurns.delete(key)
+    if (!turnCtx) {
+      log.debug(`turn/start 没有待启动的 QQ 回合 (${key})`)
+      return
+    }
+    turnCtx._turnStarted = true
+    holdTurnSession(key, turnCtx)
+    holdActiveTurn(turnCtx.chatKey, turnCtx)
+    log.debug(`turn/start 绑定 ${key} → ${turnCtx.chatKey}#${turnCtx.triggerMsgId ?? '-'}`)
+  }
+  function finishRunningTurn(sessionId) {
+    const key = String(sessionId || '')
+    const turnCtx = kernel.turnBySession.get(key) || null
+    if (turnCtx) {
+      if (kernel.turnBySession.get(key) === turnCtx) kernel.turnBySession.delete(key)
+      if (kernel.activeTurns.get(turnCtx.chatKey) === turnCtx) kernel.activeTurns.delete(turnCtx.chatKey)
+      // 一轮真正结束才消费锚：一轮发多条也只消费一次
+      if (turnCtx._hasAnchor) state.consumeTurnAnchor(turnCtx.chatKey, turnCtx.triggerMsgId)
+      log.debug(`turn/end 清理 ${key} → ${turnCtx.chatKey}#${turnCtx.triggerMsgId ?? '-'}`)
+    }
+    const st = turnSessionTimers.get(key)
+    if (st) { clearTimeout(st); turnSessionTimers.delete(key) }
+    if (turnCtx) {
+      const at = activeTurnTimers.get(turnCtx.chatKey)
+      if (at) { clearTimeout(at); activeTurnTimers.delete(turnCtx.chatKey) }
+    }
+  }
+
   // ── 入站：一条消息走完全部阶段，末端交给 agent ───────────────
   const runTurn = async (ev) => {
     if (!ev.wake) return
     // Pipeline.run 已经创建了 ev.turnCtx 并放入 turnStore
     const turnCtx = ev.turnCtx
     turnCtx.quoteAfterMsgs = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
-    holdActiveTurn(ev.chatKey, turnCtx)
-    if (ev.wake.kind !== 'proactive') {
-      state.markTurnAnchor(ev.chatKey, ev.messageId)
-    }
+    // 引用锚：入站事件自带 message_id，记下来；活到这一轮的 DSH turn/end
+    turnCtx._hasAnchor = ev.wake.kind !== 'proactive'
+    turnCtx._turnStarted = false
+    if (turnCtx._hasAnchor) state.markTurnAnchor(ev.chatKey, ev.messageId)
+
+    let sessionId = ''
     try {
-      let sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
-      turnCtx.sessionId = sessionId
-      holdTurnSession(sessionId, turnCtx)
+      sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
       const makePrompt = (sid) => buildPromptText(ev, {
         greeted: greetedSessions.has(sid),
         quoteText: ev._scratch.quoteText || '',
         fileHint: ev._scratch.fileHint || '',
       })
-      let promptText = makePrompt(sessionId)
-      turnCtx.promptText = promptText
+      const submit = async (sid) => {
+        turnCtx.sessionId = sid
+        turnCtx.promptText = makePrompt(sid)
+        bindTurnHooks(sid)
+        pushPendingTurn(sid, turnCtx)
+        await dsh.prompt(sid, turnCtx.promptText, ev.imageParts)
+      }
       try {
-        await dsh.prompt(sessionId, promptText, ev.imageParts)
+        await submit(sessionId)
       } catch (e) {
         // 会话被彻底清理（删了会话目录）→ 映射已失效：删映射、建新会话、重试一次
         if (!isSessionGone(e) || typeof dsh.forgetSession !== 'function') throw e
         log.warn(`会话 ${sessionId} 已不存在（可能被彻底清理），删映射重建后重试 (${ev.chatKey})`)
+        removePendingTurn(sessionId, turnCtx)
         dsh.forgetSession(ev.chatKey)
         sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
-        turnCtx.sessionId = sessionId
-        holdTurnSession(sessionId, turnCtx)
-        promptText = makePrompt(sessionId)
-        turnCtx.promptText = promptText
-        await dsh.prompt(sessionId, promptText, ev.imageParts)
+        await submit(sessionId)
       }
       greetedSessions.add(sessionId)
       dsh.syncSessionTitles?.().catch(() => {})
       log.debug(`turn 已提交 ${ev.chatKey} → ${sessionId}`)
     } catch (e) {
+      // prompt 没提交成功：这一轮不会发生，清掉 pending + 锚（还没到 turn/start）
+      if (!turnCtx._turnStarted) {
+        removePendingTurn(sessionId, turnCtx)
+        if (turnCtx._hasAnchor) state.consumeTurnAnchor(ev.chatKey, ev.messageId)
+      }
       log.error(`提交 agent 失败 (${ev.chatKey}): ${e.message}`)
       // 兜底也必须走 deliver（强制脱敏 + 留档）—— 根治旧实现错误裸发漏脱敏的 bug！
       // 主动接话轮是"自己找话"，出错时**静默**（群里没人在等它，别突然冒一句「出错了」）。
       if (ev._scratch?.silentFailure) log.warn(`[主动接话] 本轮失败（已静默）: ${e.message}`)
       else await deliver(ev.chatKey, `⚠️ 出错了: ${e.message}`, { turnCtx }).catch(() => {})
-    } finally {
-      const q = state.get(ev.chatKey).turnQueue
-      const idx = q.findIndex((a) => a.triggerId === ev.messageId)
-      if (idx >= 0) q.splice(idx, 1)
-      // 注意：**不在这里删 activeTurns** —— 模型回合还没跑完（见 holdActiveTurn 的说明）。
     }
+    // ⚠️ 不能在 finally 里 pop 锚/清上下文：prompt admission 时模型还没跑，
+    //    真正的清理在 turn/end 回调（finishRunningTurn）。
   }
 
   // ── 主动接话：没入站也能起一轮候选（走正规管线语义，出站不 @ 不引用由 decorate 钩子硬挡） ──
@@ -976,7 +1047,7 @@ export async function apply(ctx, bundleConfig = {}) {
   }
   pacing.start({
     onProactiveTurn: runProactiveTurn,
-    isBusy: (chatKey) => kernel.activeTurns.has(String(chatKey)),
+    isBusy: (chatKey) => kernel.activeTurns.has(String(chatKey)) || hasPendingTurn(String(chatKey)),
   })
 
   // 冷场判据的"起点"：开机时把每个允许主动接话的群的**最后一条消息时间**播种进 ChatState。
@@ -1019,6 +1090,12 @@ export async function apply(ctx, bundleConfig = {}) {
       state.countArrival(ev.chatKey, ev.messageId)
       const active = kernel.activeTurns.get(ev.chatKey)
       if (active && ev.messageId !== active.triggerMsgId) active.arrivedDuringTurn += 1
+      // 已 admission、还没 turn/start 的回合也要计数（它们还没被提升到 activeTurns）
+      for (const q of kernel.pendingTurns.values()) {
+        for (const t of q) {
+          if (String(t.chatKey) === String(ev.chatKey) && ev.messageId !== t.triggerMsgId) t.arrivedDuringTurn += 1
+        }
+      }
     }
 
     try {
@@ -1354,6 +1431,8 @@ export async function apply(ctx, bundleConfig = {}) {
     tmp.cleanup()
     kernel.activeTurns.clear()
     kernel.turnBySession.clear()
+    kernel.pendingTurns.clear()
+    boundTurnHooks.clear()
     log.info('已卸载')
   })
 

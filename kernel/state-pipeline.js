@@ -91,6 +91,26 @@ export class ChatState {
     }
   }
 
+  /**
+   * 这一轮**真正结束**（DSH turn/end）时消费它的锚。
+   *
+   * 旧桥接的语义：锚从 `turn/start` 活到 `turn/end`，出站取队首＝正在回的那轮；
+   * 一轮发多条也只消费一次。**不要**在 prompt admission 时消费 —— 那时模型还没跑，
+   * 回复属于哪一轮就说不清了（引错人的根因）。
+   * triggerId 不匹配时按 id 兜底删（防御异常/乱序）。
+   */
+  consumeTurnAnchor(chatKey, triggerId) {
+    const q = this.get(chatKey).turnQueue
+    if (!q.length) return null
+    let idx = 0
+    if (triggerId != null && Number(q[0].triggerId) !== Number(triggerId)) {
+      idx = q.findIndex((a) => Number(a.triggerId) === Number(triggerId))
+      if (idx < 0) return null
+    }
+    const [removed] = q.splice(idx, 1)
+    return removed || null
+  }
+
   /** need = 0 → 永不自动挂（全交给模型显式传 replyTo） */
   quoteNeed(chatKey, need = 1) {
     const n = Number.isFinite(Number(need)) ? Number(need) : 1
@@ -260,6 +280,9 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
       noReply: opts.replyTo !== undefined && opts.replyTo !== null && rawRt === 0,
       mode: 'plain',
       turnCtx: opts.turnCtx ?? null,
+      // 只有"模型通过 send_message 工具发的回复"才允许内核自动挂引用。
+      // 命令 / 答应声 / 冷却 / 生图失败提示等出站没有自己的回合上下文，挂引用只会引错人。
+      autoQuote: opts.autoQuote === true,
     }
     for (const fn of [...hooks]) {
       try { await fn(out) } catch (e) { log.error(`[出站] decorate 钩子异常(忽略): ${e.stack || e.message}`) }
