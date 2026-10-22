@@ -80,7 +80,7 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 | [`docs/安装与卸载.md`](docs/安装与卸载.md) | 安装 / 首次配置 / 升级 / 卸载 / 回滚 |
 | [`docs/开发指南.md`](docs/开发指南.md) | 架构与子插件 SDK（贡献者 / 二次开发必读） |
 
-其余文档（Windows、配置参考、排错、运维接口、维护记录）统一从 [功能手册总览](docs/README.md) 进。
+其余文档（Windows、配置参考、排错、运维接口）统一从 [功能手册总览](docs/README.md) 进。
 
 ## 隐私
 
