@@ -1,0 +1,739 @@
+diff --git a/admin/endpoints.js b/admin/endpoints.js
+index 823773a..19cbf97 100644
+--- a/admin/endpoints.js
++++ b/admin/endpoints.js
+@@ -933,10 +933,29 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
+     return [...ids].sort((a, b) => Number(a) - Number(b))
+   }
+ 
+-  function memorySchedule() {
+-    return hasOps(opsRef, 'memoryAccumulate')
+-      ? { cron: '', text: '由本机运维能力驱动（ops.memoryAccumulate）' }
+-      : { cron: '', text: '（本机未配置积累器；这里只能看/改文件）' }
++  /** 群记忆自动积累的现状：优先内置积累器（插件自带定时器），否则退回 ops provider。 */
++  function memoryAccumulateStatus() {
++    const fn = kernel?.shared?.memoryAccumulateStatus
++    if (typeof fn === 'function') {
++      const st = safe(() => fn(), null)
++      if (st) return { source: 'builtin', ...st }
++    }
++    if (hasOps(opsRef, 'memoryAccumulate')) return { source: 'ops', enabled: true, running: false }
++    return { source: 'none', enabled: false, running: false }
++  }
++
++  function memorySchedule(acc = memoryAccumulateStatus()) {
++    if (acc.source === 'builtin') {
++      if (!acc.enabled) return { cron: '', text: '自动积累已关闭（可在本页打开「自动积累群记忆」）' }
++      const fmt = (ts) => { try { return new Date(ts).toLocaleString('zh-CN', { hour12: false }) } catch { return '' } }
++      const parts = [`每 ${acc.intervalHours} 小时`]
++      if (acc.running) parts.push('正在积累…')
++      if (acc.lastRunAt) parts.push(`上次 ${fmt(acc.lastRunAt)}（${acc.lastResult?.message || '—'}）`)
++      if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)
++      return { cron: '', text: parts.join(' · '), status: acc }
++    }
++    if (acc.source === 'ops') return { cron: '', text: '由本机运维能力驱动（ops.memoryAccumulate）', status: acc }
++    return { cron: '', text: '（未启用自动积累；可打开「自动积累群记忆」或手动积累）', status: acc }
+   }
+ 
+   function memoryControls(raw) {
+@@ -950,6 +969,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
+     const raw = store.read()
+ 
+     if (op === 'list') {
++      const accumulate = memoryAccumulateStatus()
++      const schedule = memorySchedule(accumulate)
+       const dir = memoryDir()
+       const napcatGroups = await fetchGroupList(kernel)
+       const nameByGid = new Map(napcatGroups.map((g) => [g.id, g.name]))
+@@ -962,7 +983,9 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
+       }))
+       return {
+         ok: true, op, dir, groups, sections: MEMORY_SECTIONS,
+-        schedule: memorySchedule(), estimate: null,
++        schedule: schedule.text,
++        accumulate,
++        estimate: null,
+       }
+     }
+ 
+@@ -1010,15 +1033,25 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
+     }
+ 
+     if (op === 'refresh') {
++      if (payload.confirm !== true) {
++        return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
++      }
++      // ① 内置积累器（插件自带调度器）优先；② 退回 ops provider（老部署）
++      const builtin = kernel?.shared?.memoryAccumulate
++      if (typeof builtin === 'function') {
++        const result = await builtin({ ...payload, confirm: true })
++        if (result && result.ok === false) return { ok: false, error: result.error || '内置积累器拒绝执行' }
++        return {
++          ok: true, op, ...(isPlainObject(result) ? result : {}),
++          message: result?.message || '已在后台开始积累（过会儿点「刷新」看结果）',
++        }
++      }
+       if (!hasOps(opsRef, 'memoryAccumulate')) {
+         return {
+           ok: false,
+-          error: '本机未配置群记忆积累能力（ops.memoryAccumulate）：控制台只能看/改记忆文件，积累器请由本机运维任务负责',
++          error: '没有可用的群记忆积累器：请在「群记忆」页打开「自动积累群记忆」，或安装带 ops.memoryAccumulate 的本机运维能力',
+         }
+       }
+-      if (payload.confirm !== true) {
+-        return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
+-      }
+       const result = await opsRef.memoryAccumulate({ ...payload, confirm: true })
+       if (result == null) return { ok: false, error: '本机群记忆积累器调用失败（详见日志）' }
+       return { ok: true, op, ...(isPlainObject(result) ? result : {}), message: result?.message || '已在后台开始积累（过会儿点「刷新」看结果）' }
+diff --git a/client.js b/client.js
+index 3244c9b..975bfed 100644
+--- a/client.js
++++ b/client.js
+@@ -1038,8 +1038,8 @@ window.__ModuleLoader__.load({
+ 
+ 		// ═══════════ 标签页⑤：群记忆（每群一篇 Markdown，可预览可编辑） ═══════════
+ 		// 数据来自 RPC 端点 memory 的 list / read / save / refresh。
+-		// 文件的**自动积累**由本机运维能力（ops.memoryAccumulate / 外部任务）负责；
+-		// 这个页面只用来「看」和「人工干预」—— 保存会先备份旧版到 .revisions/。
++		// 自动积累由插件自带的定时器负责（配置在下面「工具配置」里：开关 / 间隔 / 每群条数…）；
++		// 这个页面用来「看」「人工干预」和「立刻积累一轮」—— 保存/积累都会先备份旧版到 .revisions/。
+ 		const SM = {
+ 			layout: { display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' },
+ 			list: { flex: '0 0 230px', maxHeight: 440, overflow: 'auto' },
+@@ -1183,11 +1183,9 @@ window.__ModuleLoader__.load({
+ 						onClick: () => setConfirmBox({
+ 							title: '⚠️ 立刻积累一轮？',
+ 							lines: [
+-								'会调用一次大模型（跑在常驻后台会话里），后台执行、不占页面。',
+-								data.estimate
+-									? `规模按当前设置估：${data.estimate.groups} 个群 × 每群 ${data.estimate.msgPerGroup} 条 ≈ ${data.estimate.approxInputTokens} token（实测 20~70 秒出结果）。`
+-									: '实测 20~70 秒出结果。',
+-								'自动积累的节奏见上面那行「自动积累」；由本机运维能力驱动。',
++								'会调用一次大模型（每群一次，跑在独立后台会话里），后台执行、不占页面。',
++								'只处理最近有消息的群；消息太少或内容没变化会跳过。',
++								'跑完后点「刷新」看结果；自动节奏见上面那行「自动积累」，开关/间隔在「工具配置」里改。',
+ 							],
+ 							okLabel: '开始积累',
+ 							onOk: async () => {
+@@ -1201,9 +1199,13 @@ window.__ModuleLoader__.load({
+ 						}),
+ 					}, '⚡ 立刻积累一轮'),
+ 					h('span', { key: 'd', style: SM.dim }, '目录 ' + (data.dir || '')),
+-					h('span', { key: 'sch', style: SM.dim, title: '由本机运维能力驱动；未配置时只显示占位' },
+-						'自动积累：' + ((data.schedule && data.schedule.text) || '—') +
+-						(data.schedule && data.schedule.cron ? `（cron ${data.schedule.cron}）` : '')),
++					h('span', {
++						key: 'sch', style: SM.dim,
++						title: data.accumulate
++							? `来源：${data.accumulate.source === 'builtin' ? '插件内置调度器' : data.accumulate.source === 'ops' ? '本机运维能力' : '未启用'}`
++							: '',
++					}, '自动积累：' + (String(data.schedule || '') || '—')
++						+ (data.accumulate && data.accumulate.running ? '（正在积累…）' : '')),
+ 					data.estimate ? h('span', { key: 'est', style: SM.dim },
+ 						`一轮约 ${data.estimate.approxInputTokens} token（${data.estimate.groups} 群 × ${data.estimate.msgPerGroup} 条，按当前设置估）`) : null,
+ 				]),
+diff --git a/docs/配置参考.md b/docs/配置参考.md
+index 3e0a420..1fbe81b 100644
+--- a/docs/配置参考.md
++++ b/docs/配置参考.md
+@@ -322,9 +322,21 @@ $DSH_HOME = 环境变量；留空 = ~/.dsh
+ 
+ | 键 | 类型 | 默认 | 说明 |
+ |---|---|---|---|
+-| `enabled` | bool | `true` | 插件总开关 |
+-| `dir` | path | `"qq-memory"` | 记忆目录（每群一篇 `<群号>.md`，本插件只读） |
++| `enabled` | bool | `true` | 插件总开关（关 = 不注入记忆指针、`read_memory` 报错；不影响积累） |
++| `dir` | path | `"qq-memory"` | 记忆目录（每群一篇 `<群号>.md`） |
+ | `maxBytes` | int | `24000` | 单篇读取上限（字节，按整行截断） |
++| `accumulateEnabled` | bool | `true` | **自动积累**总开关（插件自带定时器，不依赖外部 cron） |
++| `accumulateIntervalHours` | int | `8` | 积累间隔（小时） |
++| `accumulateLookbackHours` | int | `8` | 每轮回看最近多少小时的聊天留档 |
++| `accumulateMsgPerGroup` | int | `200` | 每群最多取多少条消息 |
++| `accumulateMaxChars` | int | `8000` | 每群喂给模型的正文上限（字符） |
++| `accumulateMinNewMsgs` | int | `20` | 少于多少条新消息就跳过该群（省 token；0 = 有消息就积累） |
++| `accumulateRetainRevisions` | int | `20` | `.revisions/` 保留多少份历史版本（0 = 不备份） |
++
++> 积累流程：定时器到期（或控制台点「立刻积累一轮」）→ 读各群 `logs/qq_chat/group_<群号>.jsonl` 最近消息
++> → 在**独立的一次性后台会话**里让模型输出更新后的完整 Markdown（该会话禁止调用任何工具，不占 QQ 线）
++> → 原子写回 `<dir>/<群号>.md`，旧版备份到 `<dir>/.revisions/`。
++> 控制台「群记忆」页显示：每 N 小时 / 上次时间+结果 / 下次预计时间；开关与参数在「工具配置」里改。
+ 
+ ## 六、控制台（新手向导与热改）
+ 
+diff --git a/index.js b/index.js
+index 4bac170..55ada8a 100644
+--- a/index.js
++++ b/index.js
+@@ -404,6 +404,7 @@ export async function apply(ctx, bundleConfig = {}) {
+     pluginErrors: new Map(),
+     activeTurns: new Map(), // chatKey → TurnContext
+     turnBySession: new Map(), // sessionId → TurnContext（工具执行时按 DSH 会话认线，防两条线串）
++    maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口一律拒绝，避免后台任务往群里发消息
+     dataDir,
+     configPath,
+     archive,
+@@ -535,6 +536,7 @@ export async function apply(ctx, bundleConfig = {}) {
+     agentPreset: runtime.dsh.agentPreset,
+     state,
+     napcat,
++    maintSessionIds: kernel.maintSessionIds,
+   })
+   kernel.dsh = dsh
+ 
+@@ -662,6 +664,8 @@ export async function apply(ctx, bundleConfig = {}) {
+       }
+     },
+     get dsh() { return dsh },
++    /** 跨插件共享能力槽（只读视图）：插件把自己的能力挂上来供内核/控制台调用（如 memoryAccumulate）。 */
++    get shared() { return kernel.shared },
+     /** 回复节奏能力（合批窗口 / 主动接话调度 + 状态）：插件可读 `config`、`stats()` 做控制台/自检 */
+     get pacing() { return kernel.pacing },
+     get state() { return state },
+@@ -828,6 +832,10 @@ export async function apply(ctx, bundleConfig = {}) {
+             render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }],
+           },
+           async execute(args, exec) {
++            // 后台任务会话（群记忆积累等）不允许调用任何工具：只输出文本
++            if (kernel.maintSessionIds.has(String(exec?.agent?.session?.id || ''))) {
++              throw new Error('后台任务不允许调用工具：请直接输出文本结果（不要调用 send_message / 任何工具）')
++            }
+             const turnCtx = resolveToolTurn(exec, args?.target)
+             // 会话认出来了就以"本轮会话"为准：模型把 target 写错（或从旧上文抄来）时别发错群。
+             let callArgs = args
+diff --git a/kernel/dsh-driver.js b/kernel/dsh-driver.js
+index a66bd25..9801f91 100644
+--- a/kernel/dsh-driver.js
++++ b/kernel/dsh-driver.js
+@@ -226,6 +226,77 @@ export function createDshDriver(opts) {
+       + `${kind === 'size' ? '，并请他把图截小一点或压缩后重发' : ''}]`
+   }
+ 
++  /** 读某个会话最后一条 assistant 消息的纯文本（后台任务取返回值用）。 */
++  async function readLastAssistantText(sessionId) {
++    try {
++      const ins = await ctx.sessionController.inspect(sessionId)
++      const events = Array.isArray(ins?.events) ? ins.events : []
++      for (let i = events.length - 1; i >= 0; i -= 1) {
++        const ev = events[i]
++        if (ev?.type !== 'assistant/message') continue
++        const content = ev.message?.content
++        if (!Array.isArray(content)) continue
++        return content
++          .filter((c) => c?.type === 'text')
++          .map((c) => String(c.text ?? ''))
++          .join('\n')
++          .trim()
++      }
++    } catch (e) {
++      log.debug(`读取后台任务输出失败 (${sessionId}): ${e.message}`)
++    }
++    return ''
++  }
++
++  /**
++   * 起一个**独立的一次性后台会话**执行一段提示词，返回模型最终文本，完成后归档。
++   *
++   * 用途：群记忆积累这类"要模型但不要 QQ 线"的任务。
++   *   · 不进 sessions.json（不占用 QQ 线映射）；cwd = 数据目录，不挂 QQ 工作区；
++   *   · 用当前 QQ preset（工具面已裁剪），并且内核会在工具入口拒绝「后台任务会话」调用工具
++   *     （`kernel.maintSessionIds`）—— 双保险，绝不会把积累结果发到群里；
++   *   · 超时/失败都会归档清场，不留在侧栏。
++   * @param {{name?:string, prompt:string, timeoutMs?:number}} opts
++   * @returns {Promise<{ok:boolean, sessionId:string, text:string, reason:string}>}
++   */
++  async function runIsolatedTask({ name = '后台任务', prompt: taskPrompt, timeoutMs = 10 * 60000, cwd = '' } = {}) {
++    const text = String(taskPrompt ?? '').trim()
++    if (!text) throw new Error('runIsolatedTask 需要 prompt')
++    if (typeof ctx.sessionController?.create !== 'function') throw new Error('sessionController 服务不可用，无法执行后台任务')
++    const created = await ctx.sessionController.create({
++      cwd: String(cwd || settings.workspacePath || '').trim() || undefined,
++      ...(settings.agentPreset ? { agentPreset: settings.agentPreset } : {}),
++    })
++    const sessionId = String(created?.sessionId || '')
++    if (!sessionId) throw new Error('创建后台任务会话失败（没有 sessionId）')
++    if (opts.maintSessionIds?.add) opts.maintSessionIds.add(sessionId)
++    let reason = ''
++    const finished = new Promise((resolve, reject) => {
++      let off = null
++      const timer = setTimeout(() => {
++        off?.()
++        reject(new Error(`${name}超时（${Math.round(Number(timeoutMs) / 1000)}s）`))
++      }, Math.max(30000, Number(timeoutMs) || 600000))
++      timer.unref?.()
++      off = onTurnEnd(sessionId, (event) => {
++        clearTimeout(timer)
++        off?.()
++        reason = String(event?.reason || '')
++        resolve(event)
++      })
++    })
++    try {
++      await prompt(sessionId, text)
++      await finished
++      const out = await readLastAssistantText(sessionId)
++      return { ok: Boolean(out), sessionId, text: out, reason }
++    } finally {
++      try { opts.maintSessionIds?.delete?.(sessionId) } catch { /* ignore */ }
++      // 归档：后台会话不该留在侧栏；失败只记 debug
++      try { await archive(sessionId) } catch (e) { log.debug(`归档后台任务会话失败 (${sessionId}): ${e.message}`) }
++    }
++  }
++
+   /** 统一入口：失败先丢图重发纯文本的降级策略，底层提交走 sessionController。 */
+   async function prompt(sessionId, promptText, imageParts) {
+     const content = contentOf(promptText, imageParts)
+@@ -546,6 +617,7 @@ export function createDshDriver(opts) {
+     archive,
+     findChatKeyBySession,
+     forgetSession,
++    runIsolatedTask,
+     onTurnEnd,
+     fetchGroupContext,
+     syncSessionTitles,
+diff --git a/plugins/group-memory/index.js b/plugins/group-memory/index.js
+index 7fca7d6..5e65236 100644
+--- a/plugins/group-memory/index.js
++++ b/plugins/group-memory/index.js
+@@ -1,14 +1,17 @@
+ /**
+  * group-memory — 群记忆子插件（id: 'group-memory'，order: 90）
+  *
+- * 设计（手册 §十九）：**没有数据库** —— 每个群一篇人可读的 Markdown（`<群号>.md`），文件本身就是全部状态。
+- * 本插件只做三件事：① before-turn 给一行"指针"；② 工具 read_memory 按群读那一篇；③ 按 mtime+size 缓存。
++ * 设计：**没有数据库** —— 每个群一篇人可读的 Markdown（`<群号>.md`），文件本身就是全部状态。
++ *
++ * 两部分职责：
++ *   A. **读取侧**（每次回话前）：① before-turn 给一行"指针"；② 工具 read_memory 按群读那一篇；③ 按 mtime+size 缓存。
++ *   B. **积累侧**（后台定时）：按配置的间隔，取各群最近的聊天留档 → 交给模型合并/更新这一篇 Markdown。
++ *      积累跑在一个**独立的一次性后台会话**里（不占 QQ 线、不允许调工具），写完原子落盘并留历史版本。
+  *
+  * 三条纪律（踩出来的结论，别改）：
+  *  ① **只给指针，绝不贴正文**。历史上曾把记忆正文拼进 prompt → 它拼在**用户消息**里，模型会误当成
+  *     "群友说的话"（出错概率高）；每次更新还往历史里再塞一份，白烧上下文。正文只在模型**自己调工具**时进上下文。
+- *  ② **本插件永远不写记忆文件**。文件的积累是独立进程/cron 的事 —— 本文件里没有任何写盘路径，
+- *     从结构上就不可能跟积累器打架。
++ *  ② **写盘只有一处**：`writeMemory()`（备份到 `.revisions/` → 原子写）。读取侧永远不写。
+  *  ③ **认人只看 QQ 号**：条目形如 `- **昵称(QQ)**：…`，群友常换昵称、号码不变；同一人换了名字仍是同一人。
+  *     指针与工具描述里都把这条写给模型。
+  *
+@@ -16,7 +19,14 @@
+  */
+ import fs from 'node:fs'
+ import path from 'node:path'
+-import { stripBom } from '../../platform/atomic.js'
++import { stripBom, readJsonFile, writeJsonFileSync, atomicWriteFileSync } from '../../platform/atomic.js'
++import { ensureDir } from '../../platform/paths.js'
++
++/** 历史版本子目录（与旧版布局一致）。 */
++const REVISIONS = '.revisions'
++
++/** 单次级联上限：一轮最多处理多少个群（防止首次开启时一口气跑几十个模型调用）。 */
++const MAX_GROUPS_PER_ROUND = 12
+ 
+ export default {
+   id: 'group-memory',
+@@ -27,19 +37,50 @@ export default {
+     enabled: { type: 'bool', default: true, group: '群记忆', label: '群记忆（指针注入）', hint: '开：把本群历史要点作为提示注入上下文，帮它记住群里的事；关：不读记忆。' },
+     dir: {
+       type: 'str', default: 'qq-memory', group: '群记忆', label: '记忆目录',
+-      hint: '相对路径由内核按数据目录解析；每群一篇 <群号>.md。本插件只读，积累是独立进程的事',
++      hint: '相对路径由内核按数据目录解析；每群一篇 <群号>.md',
+     },
+     maxBytes: {
+       type: 'int', default: 24000, min: 1000, max: 200000, step: 1000, group: '群记忆', label: '单篇读取上限（字节）',
+       hint: '超了按**整行**截断（不切碎多字节字符），末尾注明"过长已截断"',
+     },
++
++    // ── 自动积累（本插件自带定时器，不需要外部 cron）──────────────────
++    accumulateEnabled: {
++      type: 'bool', default: true, group: '群记忆', label: '自动积累群记忆',
++      hint: '开：按下面的间隔，把各群最近的聊天交给模型，自动更新记忆文件；关：完全不跑（仍可手动「立刻积累一轮」）。',
++    },
++    accumulateIntervalHours: {
++      type: 'int', default: 8, min: 1, max: 24, step: 1, group: '群记忆', label: '积累间隔', unit: '小时',
++      hint: '多久跑一轮。每轮会为「有新消息的群」各调用一次模型；群多时可以把间隔调长。',
++    },
++    accumulateLookbackHours: {
++      type: 'int', default: 8, min: 1, max: 72, step: 1, group: '群记忆', label: '回看最近多少小时', unit: '小时',
++      hint: '每轮只取最近这段时间的聊天留档来更新记忆（更早的内容已经在记忆文件里了）。',
++    },
++    accumulateMsgPerGroup: {
++      type: 'int', default: 200, min: 20, max: 1000, step: 20, group: '群记忆', label: '每群最多取多少条',
++      hint: '从最近的消息往前取；条数越多越准，token 也越多。',
++    },
++    accumulateMaxChars: {
++      type: 'int', default: 8000, min: 1000, max: 30000, step: 500, group: '群记忆', label: '每群正文上限', unit: '字',
++      hint: '喂给模型的聊天正文最多多少字符（超出从最早的消息开始丢）。',
++    },
++    accumulateMinNewMsgs: {
++      type: 'int', default: 20, min: 0, max: 500, step: 5, group: '群记忆', label: '少于多少条就跳过',
++      hint: '某个群最近消息太少时跳过、不调模型（省 token）。0 = 只要有一条就积累。',
++    },
++    accumulateRetainRevisions: {
++      type: 'int', default: 20, min: 0, max: 200, step: 5, group: '群记忆', label: '保留多少历史版本',
++      hint: '每次改写前把旧版备份到 .revisions/，只保留最近 N 份（0 = 不备份）。',
++    },
+   },
+ 
+   setup(bot) {
+     const cfg = bot.cfg || {}
+     const log = bot.log
+     // 目录以实例配置为准（内核已解析成绝对路径）；缺省退回 <dataDir>/qq-memory
+-    const dirOf = () => String(cfg.dir || '').trim() || path.join(String(bot.core?.dataDir || '.'), 'qq-memory')
++    const dataDirOf = () => String(bot.core?.dataDir || '.')
++    const dirOf = () => String(cfg.dir || '').trim() || path.join(dataDirOf(), 'qq-memory')
+     const maxBytesOf = () => Math.max(1000, Number(cfg.maxBytes) || 24000)
+     const cache = new Map() // 文件路径 -> { stamp, text }：文件没改就不重复读盘
+     const fallbackSeen = new Map() // 当 bot.state 不可用时的兜底
+@@ -76,12 +117,14 @@ export default {
+       return cut.slice(0, nl > 0 ? nl : cut.length).replace(/\r$/, '') + '\n…（本群记忆过长已截断，请精简文件）'
+     }
+ 
++    const fileOf = (gid) => path.join(dirOf(), `${gid}.md`)
++
+     /**
+      * 读一个群的记忆（只读）。返回 `{ text, stamp }`，没有文件返回 null。
+      * `stamp = mtimeMs:size`：文件没改就不重复读盘；改了（积累器原子写回）就自然换新版。
+      */
+     function readMemory(gid) {
+-      const file = path.join(dirOf(), `${gid}.md`) // gid 已过 4–12 位纯数字校验 → 不会有路径穿越
++      const file = fileOf(gid) // gid 已过 4–12 位纯数字校验 → 不会有路径穿越
+       let st
+       try { st = fs.statSync(file) } catch { return null } // 没文件 = 没记忆
+       const stamp = `${st.mtimeMs}:${st.size}`
+@@ -150,5 +193,305 @@ export default {
+         return { ok: true, target, group_id: gid, chars: mem.text.length, memory: mem.text }
+       },
+     })
++
++    // ══════════════════════════════════════════════════════════════════
++    //  积累侧：定时器 + 手动触发；写盘唯一入口 writeMemory()
++    // ══════════════════════════════════════════════════════════════════
++    const num = (v, d, min, max) => {
++      const n = Number(v)
++      const base = Number.isFinite(n) ? n : d
++      return Math.max(min, Math.min(max, base))
++    }
++    const accumulateOn = () => cfg.accumulateEnabled !== false
++    const intervalMs = () => num(cfg.accumulateIntervalHours, 8, 1, 24) * 3600 * 1000
++    const lookbackMs = () => num(cfg.accumulateLookbackHours, 8, 1, 72) * 3600 * 1000
++    const msgPerGroup = () => Math.round(num(cfg.accumulateMsgPerGroup, 200, 20, 1000))
++    const maxCharsOf = () => Math.round(num(cfg.accumulateMaxChars, 8000, 1000, 30000))
++    const minNewMsgs = () => Math.round(num(cfg.accumulateMinNewMsgs, 20, 0, 500))
++    const retainRevisions = () => Math.round(num(cfg.accumulateRetainRevisions, 20, 0, 200))
++    const archiveDirOf = () => String(bot.core?.archive?.dir || '').trim() || path.join(dataDirOf(), 'logs', 'qq_chat')
++    const stateFileOf = () => path.join(dataDirOf(), 'state', 'group-memory.json')
++
++    // 积累状态（落盘：重启后不立刻重跑；也给控制台显示"上次/下次"）
++    let state = {}
++    try { state = readJsonFile(stateFileOf()) || {} } catch { state = {} }
++    let lastRunAt = Number(state.lastRunAt) || 0
++    let lastResult = state.lastResult && typeof state.lastResult === 'object' ? state.lastResult : null
++    let running = null // Promise | null：单飞锁
++    let lastError = ''
++    const bootAt = Date.now() // 首次启动缓冲：没有 lastRunAt 时也先等 5 分钟再跑，避免重启即抢模型
++
++    const saveState = () => {
++      try { writeJsonFileSync(stateFileOf(), { lastRunAt, lastResult, lastError }) } catch (e) { log.warn(`[群记忆] 状态写入失败: ${e.message}`) }
++    }
++
++    /** 群号清单：聊天留档里出现过的群 ∪ 已有记忆文件的群。 */
++    function listGroupIds() {
++      const ids = new Set()
++      let names = []
++      try { names = fs.readdirSync(archiveDirOf()) } catch { names = [] }
++      for (const n of names) {
++        const m = /^group_(\d{4,12})\.jsonl(?:\.\d+)?$/.exec(n)
++        if (m) ids.add(m[1])
++      }
++      try {
++        for (const n of fs.readdirSync(dirOf())) {
++          const m = /^(\d{4,12})\.md$/.exec(n)
++          if (m) ids.add(m[1])
++        }
++      } catch { /* 目录还没建 */ }
++      return [...ids].sort()
++    }
++
++    /** 读某群最近的聊天留档（jsonl，含轮转文件），返回按时间升序的 `{ ts, who, text, out }`。 */
++    function readRecentMessages(gid) {
++      const dir = archiveDirOf()
++      let names = []
++      try {
++        names = fs.readdirSync(dir)
++          .filter((n) => new RegExp(`^group_${gid}\\.jsonl(?:\\.(\\d+))?$`).test(n))
++          .map((n) => ({ n, mtime: (() => { try { return fs.statSync(path.join(dir, n)).mtimeMs } catch { return 0 } })() }))
++          .sort((a, b) => a.mtime - b.mtime) // 旧 → 新
++          .map((x) => x.n)
++      } catch { return [] }
++      const since = Date.now() - lookbackMs()
++      const out = []
++      for (const n of names) {
++        let text = ''
++        try { text = fs.readFileSync(path.join(dir, n), 'utf8') } catch { continue }
++        for (const line of text.split('\n')) {
++          const s = line.trim()
++          if (!s) continue
++          let row
++          try { row = JSON.parse(s) } catch { continue }
++          const ts = Number(row?.ts) || 0
++          if (ts && ts < since) continue
++          const msg = String(row?.text ?? '').replace(/\s+/g, ' ').trim()
++          if (!msg) continue
++          if (/^\[CQ:[^\]]+\]$/.test(msg)) continue // 纯图片/表情占位不喂给模型
++          const outbound = row?.dir === 'out'
++          const nick = String(row?.sender?.nickname || row?.sender?.card || '').trim()
++          const qq = String(row?.sender?.qq ?? '').trim()
++          out.push({ ts, out: outbound, who: outbound ? '机器人' : (nick && qq ? `${nick}(${qq})` : (nick || qq || '未知')), text: msg })
++        }
++      }
++      out.sort((a, b) => a.ts - b.ts)
++      return out.slice(-msgPerGroup())
++    }
++
++    /** 把一批消息压成正文（超字符上限从最早的开始丢）。 */
++    function transcriptOf(rows) {
++      const lines = rows.map((r) => `${r.out ? '→' : ''}[${r.who}] ${r.text}`)
++      let total = 0
++      const kept = []
++      for (let i = lines.length - 1; i >= 0; i -= 1) {
++        total += lines[i].length + 1
++        if (total > maxCharsOf()) break
++        kept.push(lines[i])
++      }
++      kept.reverse()
++      return kept.join('\n')
++    }
++
++    /** 组装积累提示词：给旧记忆 + 最近聊天，要求输出**完整**的更新后 Markdown。 */
++    function buildPrompt({ gid, oldText, transcript }) {
++      return [
++        '你是 QQ 群聊机器人背后的「群记忆维护员」。任务：根据最近的群聊，更新这个群的长期记忆文件。',
++        '',
++        '【当前记忆文件】（可能为空；格式是 Markdown，标题层级与条目的写法要保持）',
++        oldText && oldText.trim() ? oldText.trim() : '（空，这是第一次积累）',
++        '',
++        '【最近聊天】（`→` 开头的是机器人自己说的话；`昵称(QQ号)` 是发言人）',
++        transcript || '（无）',
++        '',
++        '【输出要求】',
++        '1. 只输出**更新后的完整记忆文件正文**（Markdown），不要解释、不要寒暄、不要用 ``` 代码块包裹。',
++        '2. 保持原有结构和写法：记录「这个群怎么把机器人叫起来 / 该怎么回话（语气、长度、称呼、忌讳）」和「群里的人」。',
++        '3. 群友条目写成 `- **昵称(QQ)**：特点`；**认人只看 QQ 号**，昵称变了要合并到同一个 QQ，不要新增重复条目。',
++        '4. 把最近聊天里的**稳定信息**合并进去（性格、口头禅、常聊话题、群规矩、对机器人的要求）；',
++        '   一次的闲聊、临时话题、没有信息量的刷屏不要写。不要编造聊天里没有的内容。',
++        '5. 过时或明显不对的旧条目要修正或删掉；宁缺毋滥，总长度控制在 20000 字以内。',
++        '6. 记忆里提到机器人自己一律用「我」，不要写人设。',
++        '',
++        '现在直接输出更新后的完整 Markdown：',
++      ].join('\n')
++    }
++
++    /** 剥掉模型可能加的代码块围栏 / 开场白，返回纯 Markdown。 */
++    function cleanOutput(raw) {
++      let t = String(raw || '').trim()
++      const fence = /^```(?:markdown|md)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i.exec(t)
++      if (fence) t = fence[1].trim()
++      return t.replace(/^```(?:markdown|md)?\s*\r?\n/i, '').replace(/\r?\n```\s*$/, '').trim()
++    }
++
++    /** 写记忆的唯一入口：备份旧版到 .revisions/ → 原子写。返回是否写入。 */
++    function writeMemory(gid, text) {
++      const body = String(text || '').trim()
++      if (!body) return false
++      const file = fileOf(gid)
++      ensureDir(dirOf())
++      const old = readMemory(gid)
++      if (old && old.text.trim() === body) return false // 内容没变：不写、不留冗余版本
++      const keep = retainRevisions()
++      if (old && keep > 0) {
++        try {
++          const revDir = path.join(dirOf(), REVISIONS)
++          ensureDir(revDir)
++          const iso = new Date().toISOString().replace(/[-:T.]/g, '')
++          const stamp = `${iso.slice(0, 8)}-${iso.slice(8, 14)}`
++          // 同一秒内多次积累：加序号避免覆盖（旧版本绝不互相顶掉）
++          let revFile = path.join(revDir, `${gid}-${stamp}.md`)
++          for (let i = 1; fs.existsSync(revFile) && i < 100; i += 1) {
++            revFile = path.join(revDir, `${gid}-${stamp}-${i}.md`)
++          }
++          atomicWriteFileSync(revFile, old.text + '\n')
++          // 只保留最近 N 份：按 mtime 排序，删最旧的（文件名同秒时的序号不影响判定）
++          const entries = fs.readdirSync(revDir)
++            .filter((n) => new RegExp(`^${gid}-\\d{8}-\\d{6}(?:-\\d+)?\\.md$`).test(n))
++            .map((n) => ({ n, at: (() => { try { return fs.statSync(path.join(revDir, n)).mtimeMs } catch { return 0 } })() }))
++            .sort((a, b) => a.at - b.at || a.n.localeCompare(b.n))
++          for (const e of entries.slice(0, Math.max(0, entries.length - keep))) {
++            try { fs.unlinkSync(path.join(revDir, e.n)) } catch { /* ignore */ }
++          }
++        } catch (e) { log.warn(`[群记忆] 历史版本备份失败 (${gid}): ${e.message}`) }
++      }
++      atomicWriteFileSync(file, body.endsWith('\n') ? body : `${body}\n`, { mode: 0o600 })
++      cache.delete(file) // 让读取侧下次重新读盘
++      return true
++    }
++
++    /** 单个群积累一次。返回 `{gid, status:'updated'|'skipped'|'failed', detail}`。 */
++    async function accumulateGroup(gid) {
++      const rows = readRecentMessages(gid)
++      if (rows.length < minNewMsgs()) {
++        return { gid, status: 'skipped', detail: `最近消息 ${rows.length} 条 < 门槛 ${minNewMsgs()}` }
++      }
++      const runner = bot.dsh?.runIsolatedTask
++      if (typeof runner !== 'function') {
++        return { gid, status: 'failed', detail: '内核不支持后台任务（runIsolatedTask），无法积累' }
++      }
++      const old = readMemory(gid)
++      const prompt = buildPrompt({ gid, oldText: old?.text || '', transcript: transcriptOf(rows) })
++      const res = await runner({
++        name: `群记忆积累(${gid})`,
++        prompt,
++        cwd: dataDirOf(),
++        timeoutMs: 10 * 60 * 1000,
++      })
++      const body = cleanOutput(res?.text)
++      if (!body) return { gid, status: 'failed', detail: '模型输出为空' }
++      if (body.length < 30) return { gid, status: 'failed', detail: `模型输出过短（${body.length} 字），疑似无效` }
++      if (!/#/.test(body)) return { gid, status: 'failed', detail: '模型输出不像 Markdown（缺标题行）' }
++      const wrote = writeMemory(gid, body)
++      return { gid, status: wrote ? 'updated' : 'skipped', detail: wrote ? `${body.length} 字` : '内容未变化' }
++    }
++
++    /** 跑一轮：按群串行，单群失败不影响其它群。 */
++    async function runRound({ trigger = 'schedule' } = {}) {
++      const started = Date.now()
++      const ids = listGroupIds().slice(0, MAX_GROUPS_PER_ROUND)
++      const result = { ok: true, trigger, groups: ids.length, updated: [], skipped: [], failed: [] }
++      for (const gid of ids) {
++        if (!accumulateOn() && trigger === 'schedule') break // 跑的过程中被关掉：立即停
++        try {
++          const r = await accumulateGroup(gid)
++          if (r.status === 'updated') result.updated.push(gid)
++          else if (r.status === 'skipped') result.skipped.push(gid)
++          else result.failed.push({ gid, detail: r.detail })
++        } catch (e) {
++          log.warn(`[群记忆] 积累失败 (${gid}): ${e.message}`)
++          result.failed.push({ gid, detail: String(e.message || e) })
++        }
++      }
++      result.ms = Date.now() - started
++      result.message = `更新 ${result.updated.length} / 跳过 ${result.skipped.length} / 失败 ${result.failed.length}`
++      lastResult = { ...result, at: Date.now() }
++      return result
++    }
++
++    /** 统一触发入口（定时器 + 控制台「立刻积累」都走这里）：单飞，返回同一个 Promise。 */
++    function trigger({ trigger: kind = 'manual' } = {}) {
++      if (running) return { started: false, busy: true, promise: running, message: lastResult?.message || '上一轮还在跑' }
++      const p = (async () => {
++        try {
++          const r = await runRound({ trigger: kind })
++          lastRunAt = Date.now()
++          lastError = ''
++          saveState()
++          log.info(`[群记忆] 第 ${kind === 'manual' ? '手动' : '定时'} 轮积累完成：${r.message}`)
++          return r
++        } catch (e) {
++          lastError = String(e.message || e)
++          saveState()
++          log.warn(`[群记忆] 积累轮次异常：${lastError}`)
++          throw e
++        } finally {
++          running = null
++        }
++      })()
++      running = p
++      p.catch(() => {}) // 防未处理 rejection（调用方按需 await）
++      return { started: true, busy: false, promise: p, message: '已在后台开始积累（过一会儿刷新看结果）' }
++    }
++
++    // 给控制台/内核用的能力（kernel.shared 上）
++    bot.shared.memoryAccumulate = async (payload = {}) => {
++      if (payload?.confirm !== true) {
++        return { ok: false, error: '需要 confirm:true（会调用模型）' }
++      }
++      const r = trigger({ trigger: 'manual' })
++      return {
++        ok: true,
++        started: r.started,
++        busy: r.busy,
++        message: r.message,
++        status: statusOf(),
++      }
++    }
++    bot.shared.memoryAccumulateStatus = () => statusOf()
++    /** 同 memoryAccumulate，但**等这一轮跑完**再返回（CLI/测试用；控制台用上面的异步版）。 */
++    bot.shared.memoryAccumulateSync = async (payload = {}) => {
++      if (payload?.confirm !== true) return { ok: false, error: '需要 confirm:true（会调用模型）' }
++      const r = trigger({ trigger: 'manual' })
++      const result = await r.promise
++      return { ok: true, ...result }
++    }
++
++    function nextDueAt() {
++      if (!accumulateOn()) return 0
++      return lastRunAt ? lastRunAt + intervalMs() : bootAt + 5 * 60 * 1000
++    }
++    function statusOf() {
++      return {
++        enabled: accumulateOn(),
++        intervalHours: Math.round(intervalMs() / 3600000),
++        lookbackHours: Math.round(lookbackMs() / 3600000),
++        msgPerGroup: msgPerGroup(),
++        minNewMsgs: minNewMsgs(),
++        retainRevisions: retainRevisions(),
++        running: Boolean(running),
++        lastRunAt: lastRunAt || 0,
++        nextDueAt: nextDueAt(),
++        lastResult: lastResult || null,
++        lastError: lastError || '',
++      }
++    }
++    // 尽量显式登记（内核可能有清理钩子；没有也不影响，定时器已 unref）
++    bot.shared.memoryAccumulateStatus = () => statusOf()
++
++    // 定时器：每 60s 看一次是否到期。首次启动给 90s 缓冲，避免插件刚起就抢模型资源。
++    const timer = setInterval(() => {
++      try {
++        if (!accumulateOn()) return
++        if (running) return
++        const due = nextDueAt()
++        if (due && Date.now() < due) return
++        trigger({ trigger: 'schedule' })
++      } catch (e) { log.warn(`[群记忆] 定时检查异常: ${e.message}`) }
++    }, 60 * 1000)
++    timer.unref?.()
++    log.info(`[群记忆] 自动积累：${accumulateOn() ? `开（每 ${Math.round(intervalMs() / 3600000)} 小时）` : '关'}`
++      + `｜记忆目录 ${dirOf()}`)
+   },
+ }
+diff --git a/test/audit-data-admin.test.js b/test/audit-data-admin.test.js
+index 432304e..9109c85 100644
+--- a/test/audit-data-admin.test.js
++++ b/test/audit-data-admin.test.js
+@@ -368,17 +368,21 @@ test('persona 端点：list / switch（投递文件 + 同步配置）', async (t
+   assert.ok(String(sw.message || '').includes('tester'), '返回可读提示')
+ })
+ 
+-test('ops 未配置：memory refresh / action selfcheck 等返回 {ok:false,error} 不 throw', async (t) => {
++test('ops 未配置：memory refresh 走内置积累器（不再要求 ops）/ action selfcheck 等降级不 throw', async (t) => {
+   const h = await boot(t)
+   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
++  // 群记忆积累已内置到插件（shared.memoryAccumulate），没有 ops 也能跑：
++  // 未确认 → 返回 needsConfirm；确认后 → 交给内置积累器（本测试只验证路由，不真跑模型）
++  const ask = await endpoints.handle('memory', { op: 'refresh' })
++  assert.equal(ask.ok, true)
++  assert.equal(ask.needsConfirm, true)
+   for (const [ep, payload] of [
+-    ['memory', { op: 'refresh' }],
+     ['action', { id: 'selfcheck' }],
+     ['action', { id: 'cleanup-tmp' }],
+   ]) {
+     // eslint-disable-next-line no-await-in-loop
+     const r = await endpoints.handle(ep, payload)
+-    assert.equal(r.ok, false, `${ep} ${payload.op || payload.id} 应降级`)
++    assert.equal(r.ok, false, `${ep} ${payload.id} 应降级`)
+     assert.match(String(r.error), /未配置/)
+   }
+ })
