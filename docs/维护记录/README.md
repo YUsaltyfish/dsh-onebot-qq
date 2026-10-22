@@ -68,7 +68,7 @@ QQ机器人维护记录/
 
 | 日期 | 主题 | 涉及文件 | 状态 | 记录 |
 |---|---|---|---|---|
-| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关 | `kernel/napcat-adapter.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`docs/配置参考.md` | 本机已生效（待重启），**未入库** | [2026-10-22.md](2026-10-22.md) |
+| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关 + 群记忆自动积累内置化 | `kernel/napcat-adapter.js`、`kernel/dsh-driver.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`plugins/group-memory/index.js`、`docs/配置参考.md` | 本机已提交（`3df2991` / `18b6db8`），待重启验证 | [2026-10-22.md](2026-10-22.md) |
 
 > 更早的变更（插件重命名、历史会话归位、opsgate 工具门等）已在仓库 git 历史或对应上游提交里，不再重复记录。
 
