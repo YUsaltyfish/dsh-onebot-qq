@@ -135,9 +135,14 @@ test('文案里不再引用已删除的页面名（所有提示/说明都指向�
   assert.deepEqual(bad, [], `仍有旧页面引用：${bad.join(' / ')}`)
 })
 
-test('表情包「自动打标」不暴露（内核暂无看图能力，避免死开关）', async (t) => {
+test('表情包「自动打标」现在暴露在控制台（内核已注入看图能力）', async (t) => {
+  // 这条以前断言"不暴露"：那时内核没有 bot.describeImage，暴露出来只会是死开关。
+  // 内核补上 describeImage 之后前提翻转 —— 现在要暴露，且默认开着。
   const schema = await schemaOf(t)
-  assert.equal(schema.controls.some((c) => c.key === 'stickers.tagging'), false)
+  const c = schema.controls.find((x) => x.key === 'stickers.tagging')
+  assert.ok(c, 'stickers.tagging 应当出现在控制台')
+  assert.equal(c.group, '表情包')
+  assert.equal(c.default, true, '默认开启：装上就能用，不必先去翻设置')
 })
 
 test('「能力」页已拆：gate-wake 归「唤醒」、commands 归「群聊」', async (t) => {

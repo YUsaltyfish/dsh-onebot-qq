@@ -25,6 +25,9 @@ const BUNDLED_VENDOR = fileURLToPath(new URL('../../vendor/dsh-sticker-shelf.mjs
 const VENDOR = process.env.QQ_STICKER_VENDOR || BUNDLED_VENDOR
 const TAG_INTERVAL_MS = 15 * 60 * 1000 // 打标节流：旧实现靠 cron */15；这里被聊天顺带触发，节奏一样
 const TAG_BATCH = 3 // 一次最多 3 张（一张 ≈ 一次看图往返，别堵队列）
+const TAG_POLL_MS = 30 * 1000 // 轮询周期：多久检查一次「机器人闲了没」
+/** 启动后第一次检查的延迟：给宿主把会话/模型准备好留点时间，也不用等满一个轮询周期。 */
+const tagBootDelayMs = () => 60 * 1000
 
 /** 打标提示词：只有「看/用/词」三行，**不带安全线**（群聊场景不需要额外的内容过滤词）。 */
 const TAG_PROMPT =
@@ -111,8 +114,17 @@ export default {
       hint: '相对路径由内核按数据目录解析；index.json 与图片都在这里。**只由本插件一条串行队列写**，别再让外部脚本写它' },
     max: { type: 'int', default: 200, min: 10, max: 2000, step: 10, group: '表情包', label: '库上限（张）',
       hint: '满了跳过新图（不淘汰旧的）；要换血就手动删几张' },
-    // 「自动打标」依赖内核注入 bot.describeImage（当前内核没有）→ 不在控制台暴露，避免死开关；
-    // 运行时代码仍读 cfg.tagging，内核将来补上后把这一项加回来即可。
+    // 「自动打标」需要内核注入 bot.describeImage（内核已提供）；没有注入时这个开关不起作用，
+    // setup 里会 warn 一次，不至于变成静默死开关。
+    tagging: { type: 'bool', default: true, group: '表情包', label: '自动打标（看图写描述与关键词）',
+      hint: '开：**机器人自己空闲时**让模型看一遍新收的表情，写 desc/use/tags —— 打完标才能按「无语」「心动」这类词检索到。'
+        + '群里热闹但没叫它，也算空闲。**每张 = 一次模型调用**，会占额度。' },
+    tagIdleSeconds: { type: 'int', default: 90, min: 10, max: 3600, step: 10, unit: '秒', scale: 1000, group: '表情包', label: '机器人空闲多久才打标',
+      hint: '它最后一次被叫醒/回话之后，过了这么久没再被叫，就开始打标。' },
+    tagGapSeconds: { type: 'int', default: 20, min: 0, max: 600, step: 5, unit: '秒', scale: 1000, group: '表情包', label: '两批之间间隔',
+      hint: '打完一批隔这么久再打下一批（0 = 连着打，不推荐）。' },
+    tagDailyMax: { type: 'int', default: 60, min: 0, max: 1000, step: 10, group: '表情包', label: '每天最多打几张（0 = 不限）',
+      hint: '防止把额度打空。跨天自动清零。' },
     skipGif: { type: 'bool', default: true, group: '表情包', label: '跳过 GIF（只收静态图）',
       hint: '按内容魔数判（GIF87a/GIF89a），扩展名改成 .jpg 也拦得住；只挡新收的图' },
     collectGroupsOnly: { type: 'bool', default: true, group: '表情包', label: '只在群里收', hint: '开：只收群聊里的表情；关：私聊里的也收。' },
@@ -140,6 +152,17 @@ export default {
     let lastTagAt = 0
     let prunedAt = 0
     const offerAt = new Map() // chatKey -> 上次提醒时间（丢了也只会早提醒一次，不值得进 ChatState）
+
+    // ── 打标空闲判据：看「机器人自己」忙不忙，不看群里热不热闹 ──
+    // 群里一直有人聊天是常态；只要它没被叫到，就该趁机打标。
+    // （早期实现在这里统计群消息量，结果活跃群永远 ≥ 阈值 → 打标一次都跑不起来。）
+    let lastBusyAt = 0        // 最后一次被叫醒/回话的时间（0 = 启动后还没忙过）
+    let tagGapUntil = 0       // 打完一批后要等到这个时间才允许下一批
+    let tagDayKey = ''
+    let tagDayCount = 0
+    const idleMs = () => Math.max(10, Number(cfg.tagIdleSeconds) || 90) * 1000
+    const idleFor = () => (lastBusyAt ? Date.now() - lastBusyAt : Number.POSITIVE_INFINITY)
+    const isIdle = () => idleFor() >= idleMs()
 
     if (cfg.tagging && typeof bot.describeImage !== 'function') {
       log.warn('[表情] 打标已开，但内核没注入看图能力（bot.describeImage）→ 只收不打；这是契约缺口，找内核补')
@@ -224,19 +247,77 @@ export default {
       log.info(`[表情] 入库 +${r.added}（已有 ${r.seen}，跳过 ${r.skipped}）${nick ? ' ← ' + nick : ''}`)
     }
 
-    /** 打标（tagging=true 时）：节流 + 与采集同一条队列（同一写者）。 */
+    /**
+     * 打标（tagging=true 时）：节流 + 空闲判定 + 与采集同一条队列（同一写者）。
+     *
+     * 为什么必须由定时器驱动：早期实现只在「收图 / 掷骰命中」时顺手调一次。
+     * 可那两个入口恰恰是"群里有动静"的时候 —— 等群真安静下来，就再没人叫它，
+     * 于是攒了一堆图始终没有标签（线上实测：79 张，零打标）。
+     *
+     * 空闲判据看「机器人自己」：它最后一次被叫醒/回话之后过了 tagIdleSeconds 秒没再被叫，
+     * 就是空闲。群里热闹不代表它忙 —— 没被叫到的时候正好用来打标。
+     */
     function maybeTag() {
       if (!cfg.tagging || typeof bot.describeImage !== 'function') return
       const now = Date.now()
       if (now - lastTagAt < TAG_INTERVAL_MS) return
+      if (now < tagGapUntil) return
+      if (!isIdle()) return
       lastTagAt = now
+
       queue.push(async () => {
+        // 日上限（跨天清零）
+        const dayKey = new Date().toISOString().slice(0, 10)
+        if (tagDayKey !== dayKey) { tagDayKey = dayKey; tagDayCount = 0 }
+        const dailyMax = Number(cfg.tagDailyMax) || 0
+        if (dailyMax > 0 && tagDayCount >= dailyMax) return
+
         const s = await shelf()
         if (!s) return
+
+        // 先去重：同一张图（同 hash）只留最早一条，免得同一张打标两次、占两个坑位
+        const removed = await dedupeLocked(s).catch(() => 0)
+        if (removed) log.info(`[表情] 去重：合并 ${removed} 张重复图`)
+
         const n = await s.tagPending(TAG_BATCH)
-        if (n) log.info(`[表情] 打标 ${n} 张`)
+        if (n) {
+          tagDayCount += n
+          log.info(`[表情] 空闲打标 ${n} 张（今天累计 ${tagDayCount}${dailyMax > 0 ? '/' + dailyMax : ''}）`)
+          // 还有活：隔 tagGapSeconds 再来一批
+          tagGapUntil = Date.now() + Math.max(0, Number(cfg.tagGapSeconds) || 20) * 1000
+        }
       }).catch((e) => log.warn(`[表情] 打标失败（不影响聊天）: ${e.message}`))
     }
+
+    /**
+     * 去重：同 hash 多条目只留最早一条（hash 由上游按图片内容算，与文件名无关）。
+     * @returns {Promise<number>} 删掉几条
+     */
+    async function dedupeLocked(s) {
+      if (!s || typeof s.remove !== 'function') return 0
+      const items = readIndex(dir).items
+      const seen = new Map()
+      const dupes = []
+      for (const it of items) {
+        if (!it || it.blocked || !it.hash || !it.file) continue
+        if (seen.has(it.hash)) dupes.push(it.id)
+        else seen.set(it.hash, it.id)
+      }
+      let n = 0
+      for (const id of dupes) {
+        try { if (await s.remove(id, '去重：同一张图只留一份')) n++ } catch { /* 单条失败不影响别的 */ }
+      }
+      return n
+    }
+
+    // ── 打标轮询：每 30 秒看一眼「机器人闲了没、还有没有要打的」──
+    // 只在启动时看一次不够 —— 空闲是随时间出现的状态，得持续观察。
+    const tagTimer = setInterval(() => {
+      try { maybeTag() } catch { /* 轮询异常不影响聊天 */ }
+    }, TAG_POLL_MS)
+    tagTimer.unref?.()
+    const tagBoot = setTimeout(() => { try { maybeTag() } catch { /* 忽略 */ } }, tagBootDelayMs())
+    tagBoot.unref?.()
 
     /**
      * 清理「文件被手删」的条目（节流 60s）。必须连标签、连哈希一起删 —— 上游可用判据不查文件是否存在，
@@ -355,6 +436,9 @@ export default {
     // 前置（任一不满足就不掷、零成本）：库开着 / 概率>0 / 只在群聊（旧实现 offerGroupsOnly 默认 true）/
     //  冷却已过 / 库里有可挑的图。
     bot.on('before-turn', (ev) => {
+      // 被唤醒 = 它这一轮要干活 → 记「忙」，打标会等它闲下来
+      // （放在所有 return 之前：只要叫醒它就算忙，不管这轮最后发不发图）
+      if (ev.wake) lastBusyAt = Date.now()
       if (cfg.enabled === false || !ev.wake) return // 没唤醒的消息不该掷骰（也别白推进冷却）
       if (ev.wake.kind === 'welcome') return // 入群欢迎轮只发欢迎语，别塞"发表情包"提醒分心
       const pct = Number(cfg.offerPercent) || 0
@@ -388,6 +472,7 @@ export default {
         text: { type: 'string', description: '随图发的一句文字，一般不用给' },
       },
       async execute(args) {
+        lastBusyAt = Date.now()   // 正在发图 = 正在回话 → 算忙
         const turn = bot.currentTurn()
         const target = turn?.chatKey
         if (!target) return { ok: false, reason: '没有进行中的会话（send_sticker 只能在回话轮里用）' }

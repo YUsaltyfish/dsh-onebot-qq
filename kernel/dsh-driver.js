@@ -67,6 +67,13 @@ export function createDshDriver(opts) {
   const turnEndFns = new Map()    // sessionId -> Set<fn>
   const unsubs = []               // ctx.on(...) 的 disposer
 
+  // ── 看图能力（表情包自动打标等场景复用）──
+  // 为什么单开一条会话：全局 assistant/message 事件只带 sessionId，多轮并发时分不清
+  // 哪条回复属于哪次调用；专用会话的 sessionId 唯一，作用域天然隔离。
+  let tagSessionId = null
+  const tagChatKey = 'image-describe'
+  const DESCRIBE_TIMEOUT_MS = 90 * 1000   // 模型带图推理慢，给足 90s
+
   // 会话标题同步的状态（每次 sync 都读写这个小文件，不塞进会话映射里 —— 两者生命周期不同）
   let autoTitlesFile = path.join(path.dirname(settings.sessionsFile), 'session-titles.json')
   let autoTitles = loadAutoTitles()   // chatKey -> { sessionId, title }: 上次**我们**自动设的标题
@@ -240,6 +247,73 @@ export function createDshDriver(opts) {
       ])
     }
     return true
+  }
+
+  /**
+   * 让模型看图并回答一段文字（表情包打标、图片理解等场景复用）。
+   *
+   * 与 prompt() 的关系：提交路径完全一致（都走 prompt → sessionController.prompt），
+   * 区别只是用一条**专用会话**，并等这一轮的正文回来。
+   *
+   * @param {string} filePath 本地图片路径
+   * @param {string} promptText 要问模型的话
+   * @returns {Promise<string>} 模型回复的纯文本；失败抛错（调用方自己降级）
+   */
+  async function describeImage(filePath, promptText) {
+    const buf = await fs.promises.readFile(filePath)
+    // 按魔数认 MIME：群图/侧车来源杂，不能只看扩展名
+    const mediaType = buf[0] === 0x89 && buf[1] === 0x50 ? 'image/png'
+      : buf[0] === 0xff && buf[1] === 0xd8 ? 'image/jpeg'
+        : buf.slice(0, 3).toString('latin1') === 'GIF' ? 'image/gif'
+          : buf.slice(8, 12).toString('latin1') === 'WEBP' ? 'image/webp'
+            : 'image/jpeg'
+
+    // ① 专用会话（第一次用时建，之后复用；被归档/清掉就重建）
+    if (!tagSessionId) {
+      tagSessionId = crypto.randomUUID()
+      await ctx.sessionController.create({
+        sessionId: tagSessionId,
+        cwd: ctx.get('workspaceRegistry')?.workspacePathOf?.(tagChatKey) || process.cwd(),
+      })
+      log.debug(`[看图] 建专用会话 ${tagSessionId}`)
+    }
+
+    // ② 订阅这一轮结束 + 收集助手正文（只认这个 sessionId）
+    //    超时兜底：turn/end 万一不来（会话被清/宿主异常），不能让调用方永久挂住
+    const collected = []
+    const settled = new Promise((resolve) => {
+      const off = ctx.on('session/event', (session, event) => {
+        if (session?.id !== tagSessionId) return
+        if (event?.type === 'assistant/message') {
+          for (const block of event?.data?.message?.content ?? []) {
+            if (block?.type === 'text' && block.text) collected.push(String(block.text))
+          }
+        }
+        if (event?.type === 'turn/end') { clearTimeout(timer); off(); resolve(event?.data?.reason ?? {}) }
+      })
+      const timer = setTimeout(() => {
+        off()
+        resolve({ kind: 'error', error: { message: '看图超时（未收到 turn/end）' } })
+      }, DESCRIBE_TIMEOUT_MS)
+    })
+
+    // ③ 提交（带图）
+    try {
+      await prompt(tagSessionId, promptText, [{ data: buf.toString('base64'), mediaType, name: 'image' }])
+    } catch (e) {
+      // 会话可能被清了（归档/被删/宿主重启）：清掉缓存，下一次调用会重建。
+      // 不原地重试 —— 重试要连带重建 settled 订阅，代价高于让调用方降级。
+      log.warn(`[看图] 提交失败（${e.message}），已丢弃会话缓存`)
+      tagSessionId = null
+      throw e
+    }
+    const reason = await settled
+    if (reason?.kind === 'error') {
+      throw new Error(`看图失败: ${reason.error?.message || '模型报错'}`)
+    }
+    const text = collected.join('\n').trim()
+    if (!text) throw new Error('看图失败: 模型没有返回文字')
+    return text
   }
 
   /** 提交：唯一正确路径就是 sessionController.prompt（理由见文件头）。 */
@@ -541,6 +615,7 @@ export function createDshDriver(opts) {
     applyConfig,
     ensureSession,
     prompt,
+    describeImage,
     cancel,
     rename,
     archive,

@@ -662,6 +662,12 @@ export async function apply(ctx, bundleConfig = {}) {
       }
     },
     get dsh() { return dsh },
+    /**
+     * 看图能力：让插件能把一张本地图片交给模型并拿回文字（表情包打标就靠它）。
+     * 走专用会话，作用域隔离；模型用当前 agentDefaultModel 的选择。
+     * @type {((filePath: string, promptText: string) => Promise<string>) | undefined}
+     */
+    get describeImage() { return typeof dsh.describeImage === 'function' ? dsh.describeImage : undefined },
     /** 回复节奏能力（合批窗口 / 主动接话调度 + 状态）：插件可读 `config`、`stats()` 做控制台/自检 */
     get pacing() { return kernel.pacing },
     get state() { return state },
