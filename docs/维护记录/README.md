@@ -68,7 +68,7 @@ QQ机器人维护记录/
 
 | 日期 | 主题 | 涉及文件 | 状态 | 记录 |
 |---|---|---|---|---|
-| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关（**已提交，待重启验证**）；群记忆自动积累（**已复原，仅留设计留档**） | `kernel/napcat-adapter.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`docs/配置参考.md` | 登录/冷场：`3df2991`；积累：`18b6db8` 已由 `b4fab27` 复原 | [2026-10-22.md](2026-10-22.md) |
+| 2026-10-22 | QQ 登录状态真实检测 + 主动接话「冷场找话」开关 + 群记忆自动积累（**方案 B：同插件内拆模块**） | `kernel/napcat-adapter.js`、`kernel/dsh-driver.js`、`index.js`、`admin/endpoints.js`、`client.js`、`kernel/pacing.js`、`kernel/config-store.js`、`admin/schema.js`、`plugins/group-memory/{index.js,accumulate.js}`、`docs/配置参考.md` | 登录/冷场：`3df2991`；积累：`18b6db8`→`b4fab27` 复原 → 方案 B 重做（本次提交） | [2026-10-22.md](2026-10-22.md) |
 
 > 更早的变更（插件重命名、历史会话归位、opsgate 工具门等）已在仓库 git 历史或对应上游提交里，不再重复记录。
 

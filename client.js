@@ -1038,8 +1038,8 @@ window.__ModuleLoader__.load({
 
 		// ═══════════ 标签页⑤：群记忆（每群一篇 Markdown，可预览可编辑） ═══════════
 		// 数据来自 RPC 端点 memory 的 list / read / save / refresh。
-		// 文件的**自动积累**由本机运维能力（ops.memoryAccumulate / 外部任务）负责；
-		// 这个页面只用来「看」和「人工干预」—— 保存会先备份旧版到 .revisions/。
+		// 自动积累由插件自带的定时器负责（配置在下面「工具配置」里：开关 / 间隔 / 每群条数…）；
+		// 这个页面用来「看」「人工干预」和「立刻积累一轮」—— 保存/积累都会先备份旧版到 .revisions/。
 		const SM = {
 			layout: { display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' },
 			list: { flex: '0 0 230px', maxHeight: 440, overflow: 'auto' },
@@ -1183,11 +1183,9 @@ window.__ModuleLoader__.load({
 						onClick: () => setConfirmBox({
 							title: '⚠️ 立刻积累一轮？',
 							lines: [
-								'会调用一次大模型（跑在常驻后台会话里），后台执行、不占页面。',
-								data.estimate
-									? `规模按当前设置估：${data.estimate.groups} 个群 × 每群 ${data.estimate.msgPerGroup} 条 ≈ ${data.estimate.approxInputTokens} token（实测 20~70 秒出结果）。`
-									: '实测 20~70 秒出结果。',
-								'自动积累的节奏见上面那行「自动积累」；由本机运维能力驱动。',
+								'会调用一次大模型（每群一次，跑在独立后台会话里），后台执行、不占页面。',
+								'只处理最近有消息的群；消息太少或内容没变化会跳过。',
+								'跑完后点「刷新」看结果；自动节奏见上面那行「自动积累」，开关/间隔在「工具配置」里改。',
 							],
 							okLabel: '开始积累',
 							onOk: async () => {
@@ -1201,9 +1199,13 @@ window.__ModuleLoader__.load({
 						}),
 					}, '⚡ 立刻积累一轮'),
 					h('span', { key: 'd', style: SM.dim }, '目录 ' + (data.dir || '')),
-					h('span', { key: 'sch', style: SM.dim, title: '由本机运维能力驱动；未配置时只显示占位' },
-						'自动积累：' + ((data.schedule && data.schedule.text) || '—') +
-						(data.schedule && data.schedule.cron ? `（cron ${data.schedule.cron}）` : '')),
+					h('span', {
+						key: 'sch', style: SM.dim,
+						title: data.accumulate
+							? `来源：${data.accumulate.source === 'builtin' ? '插件内置调度器' : data.accumulate.source === 'ops' ? '本机运维能力' : '未启用'}`
+							: '',
+					}, '自动积累：' + (String(data.schedule || '') || '—')
+						+ (data.accumulate && data.accumulate.running ? '（正在积累…）' : '')),
 					data.estimate ? h('span', { key: 'est', style: SM.dim },
 						`一轮约 ${data.estimate.approxInputTokens} token（${data.estimate.groups} 群 × ${data.estimate.msgPerGroup} 条，按当前设置估）`) : null,
 				]),
