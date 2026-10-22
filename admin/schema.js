@@ -191,6 +191,11 @@ export const CORE_CONTROLS = [
     hint: '两次“可以考虑开口”之间至少隔这么久；实际间隔 = max(本值, 60÷每小时次数)。',
   },
   {
+    key: 'pacing.reply.silenceEnabled', group: '主动接话', type: 'bool', label: '群冷场时也主动找话', default: true,
+    hint: '开 = 群里长时间没人说话也会主动起个话头（按「安静多久算冷场」判定）；'
+      + '关 = 不再定时找话，只有群里出现新消息、且语境合适时才可能接一句。',
+  },
+  {
     key: 'pacing.reply.coldSilenceMs', group: '主动接话', type: 'int', label: '群里安静多久算冷场', unit: '分钟',
     scale: 60000, min: 1, max: 120, step: 1, default: 180000,
     hint: '群里没人说话超过这么久、又到了机会点 → 可能主动起个话头。',

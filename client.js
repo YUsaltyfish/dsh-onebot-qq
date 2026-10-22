@@ -270,6 +270,7 @@ window.__ModuleLoader__.load({
 			const lpN = (x) => (typeof x === 'number' ? x : '?')
 			const meta = status.meta || null
 			const onboarding = Array.isArray(status.onboarding) ? status.onboarding : []
+			const fmtCheck = (ts) => { try { return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) } catch { return '' } }
 			return h('div', null, [
 				// ═══ 待配置模式提示条（首次安装还没填主人 QQ / NapCat 时最醒目）═══
 				(meta && meta.configReady === false)
@@ -279,9 +280,32 @@ window.__ModuleLoader__.load({
 					}, '⚠️ 还没完成必填配置（主人 QQ / NapCat），按下面清单填完即可')
 					: null,
 
+				// ═══ QQ 掉线提醒：NapCat WS 还连着，但 QQ 服务端往返探测失败（get_stranger_info）═══
+				(health.napcatLinked && health.qqLoggedIn === false)
+					? h('div', {
+						key: 'qqoffline',
+						style: { padding: '8px 10px', borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13, marginBottom: 8, lineHeight: 1.5 },
+					}, '🔴 QQ 账号已掉线（NapCat WS 还连着）：机器人现在收发不到消息。请打开 NapCat WebUI 重新登录；'
+						+ (health.qqLoginError ? `原因：${health.qqLoginError}` : '登录后本页约 5 秒自动恢复。') + ' 也可点「检查 QQ 登录」立即重试。')
+					: null,
+
 				h('div', { style: S.row, key: 'hc' }, [
 					h('span', { style: S.badge(health.dshLinked), key: 'd' }, `DSH ${health.dshLinked ? '已连' : '断开'}`),
 					h('span', { style: S.badge(health.napcatLinked && !health.napcatStale), key: 'n' }, `NapCat ${health.napcatLinked && !health.napcatStale ? '在线' : '异常'}`),
+					h('span', {
+						style: S.badge(health.qqLoggedIn === true), key: 'q',
+						title: health.qqLoginError || '',
+					}, health.napcatLinked
+						? (health.qqLoggedIn === true ? 'QQ 已登录' : (health.qqLoggedIn === false ? 'QQ 未登录' : 'QQ 检查中'))
+						: 'QQ 未知'),
+					h('button', {
+						key: 'ql', style: S.btn, disabled: busy,
+						title: '主动调用 get_stranger_info 验证 QQ 是否真的在线（NapCat 缓存的登录信息可能过期）',
+						onClick: () => run('检查 QQ 登录', () => call('action', { id: 'napcat-check' })),
+					}, '检查 QQ 登录'),
+					health.qqLoginCheckedAt
+						? h('span', { key: 'qt', style: { opacity: .6, fontSize: 12 } }, `最近检查 ${fmtCheck(health.qqLoginCheckedAt)}`)
+						: null,
 					h('span', { key: 'l' }, `QQ 线 ${status.lines ? status.lines.mapped : '?'} 条`),
 					h('span', { key: 's' }, Object.keys(svc).map((k) => `${k}:${svc[k] === 'active' ? '✓' : '✗'}`).join('  ')),
 				]),
@@ -406,7 +430,10 @@ window.__ModuleLoader__.load({
 			const linked = Boolean(health.napcatLinked)
 			const selfId = nap.selfId || health.selfId || ''
 			const nick = health.selfNickname || ''
-			const online = Boolean(selfId) && !nap.stale
+			const qqLoggedIn = nap.qqLoggedIn ?? health.qqLoggedIn ?? null
+			const online = linked && qqLoggedIn === true
+			const loginUnknown = linked && qqLoggedIn == null
+			const loginErr = nap.qqLoginError || health.qqLoginError || ''
 
 			const test = async () => {
 				setBusyLocal(true); setNote('')
@@ -422,14 +449,20 @@ window.__ModuleLoader__.load({
 			return h('div', null, [
 				h('div', { style: S.row, key: 'hd' }, [
 					h('span', { style: S.badge(linked), key: 'br' }, `内核 ${linked ? '已连接' : '断开'}`),
-					h('span', { style: S.badge(online), key: 'qq' }, online
-						? `QQ 已登录${selfId ? `：${nick || selfId}${nick ? `（${selfId}）` : ''}` : ''}`
-						: 'QQ 未登录'),
-					h('button', { key: 't', style: S.btn, disabled: busy || busyLocal, onClick: test, title: '测试内核到 NapCat 的连接：WebSocket 是否连通、HTTP API 是否可用' }, '🔌 测试连接'),
+					h('span', { style: S.badge(online), key: 'qq', title: loginErr || '' }, !linked
+						? 'QQ 未知（NapCat 未连接）'
+						: online
+							? `QQ 已登录${selfId ? `：${nick || selfId}${nick ? `（${selfId}）` : ''}` : ''}`
+							: (loginUnknown ? 'QQ 检查中' : 'QQ 未登录/已掉线')),
+					h('button', { key: 't', style: S.btn, disabled: busy || busyLocal, onClick: test, title: '测试内核到 NapCat 的连接，并主动 get_login_info 检查 QQ 是否在线' }, '🔌 测试连接 / 检查登录'),
 				]),
-				h('div', { key: 'hint', style: S.msg }, online
-					? 'QQ 已登录，机器人可以收发消息。状态与总览页同一来源，约 5 秒自动刷新。'
-					: '未登录：请用 NapCat 自带 WebUI 扫码 / 密码登录（默认 http://127.0.0.1:6099，端口以你的 NapCat 配置为准）；登录后本页与总览会自动更新。'),
+				h('div', { key: 'hint', style: S.msg }, !linked
+					? 'NapCat WS 未连接：先检查 NapCat 是否启动、地址/token 是否正确。'
+					: online
+						? 'QQ 已登录，机器人可以收发消息。状态与总览页同一来源，约 5 秒自动刷新。'
+						: loginUnknown
+							? '正在检查 QQ 登录状态…（每 30 秒自动检查一次，也可点上面按钮立即检查）'
+							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用 NapCat 自带 WebUI 扫码 / 密码登录（默认 http://127.0.0.1:6099，端口以你的 NapCat 配置为准）；登录后本页与总览会自动更新。`),
 				note ? h('div', { key: 'note', style: S.msg }, note) : null,
 				h(SwitchGroup, Object.assign({}, props, { key: 'sw', group: 'NapCat 连接' })),
 			])

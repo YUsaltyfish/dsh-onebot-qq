@@ -1189,6 +1189,9 @@ export async function apply(ctx, bundleConfig = {}) {
    *   selfId:number|null, nickname:string|null, latencyMs?:number, error?:string}>}
    */
   kernel.checkNapcat = async () => {
+    const t0 = Date.now()
+    // 先主动查一次登录状态：NapCat WS 连着但 QQ 掉线时，只有 get_login_info 能发现
+    const login = await napcat.checkLogin?.({ force: true }).catch((e) => ({ ok: null, error: e?.message || String(e) }))
     const health = napcat.health?.() || {}
     const base = {
       ok: false,
@@ -1197,34 +1200,23 @@ export async function apply(ctx, bundleConfig = {}) {
       lastFrameAgoMs: health.lastFrameAgoMs ?? null,
       selfId: napcat.selfId ?? null,
       nickname: napcat.selfNickname ?? null,
+      qqLoggedIn: health.qqLoggedIn ?? null,
+      qqLoginCheckedAt: health.qqLoginCheckedAt ?? null,
+      qqLoginError: health.qqLoginError || '',
     }
     if (!base.linked) return { ...base, error: 'NapCat 未连接' }
-    const t0 = Date.now()
-    let timer = null
-    try {
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('NapCat 响应超时（5s）')), 5000)
-        timer.unref?.()
-      })
-      const res = await Promise.race([napcat.wsApi('get_login_info', {}), timeout])
-      const info = res?.data && typeof res.data === 'object' ? res.data : (res || {})
-      if (info?.user_id) {
-        napcat.selfId = Number(info.user_id)
-        if (info.nickname) napcat.selfNickname = String(info.nickname)
-      }
+    if (health.qqLoggedIn === false) {
       return {
         ...base,
-        ok: true,
-        linked: true,
-        selfId: napcat.selfId ?? null,
-        nickname: napcat.selfNickname ?? null,
+        ok: false,
+        error: `QQ 未登录或已掉线：${health.qqLoginError || login?.error || 'NapCat 未返回登录账号'}`,
         latencyMs: Date.now() - t0,
       }
-    } catch (e) {
-      return { ...base, error: `NapCat 连接测试失败：${e?.message || e}`, latencyMs: Date.now() - t0 }
-    } finally {
-      if (timer) clearTimeout(timer)
     }
+    if (health.qqLoggedIn !== true) {
+      return { ...base, ok: false, error: `无法确认 QQ 登录状态：${login?.error || health.qqLoginError || 'get_login_info 未返回账号'}`, latencyMs: Date.now() - t0 }
+    }
+    return { ...base, ok: true, linked: true, latencyMs: Date.now() - t0 }
   }
 
   /**

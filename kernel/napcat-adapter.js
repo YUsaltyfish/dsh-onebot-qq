@@ -28,6 +28,11 @@ const MEMBER_CACHE_MS = 5 * 60 * 1000
  */
 const STALE_MS = 100 * 1000
 
+/** QQ 登录状态主动探测间隔（WS 连着不代表 QQ 在线：NapCat 可能仍保持心跳）。 */
+const LOGIN_CHECK_MS = 30000
+/** 同一检测结果的缓存时间，避免控制台 5s 轮询频繁打 NapCat。 */
+const LOGIN_CHECK_TTL_MS = 10000
+
 function chatTarget(chatKey) {
   const m = /^(group|private):(\d{1,12})$/.exec(String(chatKey ?? ''))
   if (!m) throw new Error(`chatKey 格式错误: "${chatKey}"，应为 group:<群号> 或 private:<QQ号>`)
@@ -60,6 +65,12 @@ export class NapCatAdapter {
     this._wsGen = 0            // socket 代际：旧 socket 的迟到事件一律忽略（防重连叠出第二条 WS）
     this._reconnectTimer = null
     this._livenessTimer = null
+    // QQ 登录状态（主动探测）：NapCat WS 连着但 QQ 掉线时，靠它发现并提醒
+    this.loginOk = null
+    this.loginCheckedAt = 0
+    this.loginError = ''
+    this._loginTimer = null
+    this._loginChecking = null
   }
 
   /**
@@ -69,6 +80,7 @@ export class NapCatAdapter {
   async connect() {
     this.closed = false
     this._startLiveness()
+    this._startLoginWatch()
     this._open()
   }
 
@@ -80,6 +92,10 @@ export class NapCatAdapter {
     this._reconnectTimer = null
     if (this._livenessTimer) clearInterval(this._livenessTimer)
     this._livenessTimer = null
+    if (this._loginTimer) clearInterval(this._loginTimer)
+    this._loginTimer = null
+    this.loginOk = null
+    this.loginError = ''
     for (const w of this._waiters.values()) {
       clearTimeout(w.timer)
       w.reject(new Error('适配器已关闭'))
@@ -125,6 +141,10 @@ export class NapCatAdapter {
       selfNickname: this.selfNickname,
       lastFrameAgoMs: ago,
       stale: ago == null || ago > STALE_MS, // 与看门狗同阈值，别在两个地方各写一个数
+      // QQ 登录状态：null=尚未探测/未知，false=WS 在但 QQ 不在线
+      qqLoggedIn: this.loginOk,
+      qqLoginCheckedAt: this.loginCheckedAt || null,
+      qqLoginError: this.loginError || '',
     }
   }
 
@@ -188,6 +208,8 @@ export class NapCatAdapter {
       clearTimeout(watchdog)
       this._connecting = false
       this.ws = null
+      this.loginOk = null
+      this.loginError = 'NapCat WS 断开'
       this.log.info('NapCat WS 已断开')
       this._scheduleReconnect()
     }
@@ -219,6 +241,8 @@ export class NapCatAdapter {
     this.ws = null
     this._connecting = false
     this.lastFrameAt = 0
+    this.loginOk = null
+    this.loginError = '连接重建中'
     try { old?.close(code, reason) } catch { /* 已断开 */ }
     this._scheduleReconnect()
   }
@@ -437,18 +461,85 @@ export class NapCatAdapter {
    * 纯客户端适配，不动 NapCat 任何配置。
    */
   async _fetchLoginInfo() {
-    let info = null
-    try { info = (await this.wsApi('get_login_info'))?.data } catch { /* WS 通道不稳，走 HTTP */ }
-    if (!info?.user_id) {
-      try { info = (await this._post('get_login_info', {}))?.data?.data } catch (e) {
-        this.log.warn(`取登录信息失败(WS+HTTP 均失败): ${e.message}`)
-        return
-      }
+    return this.checkLogin({ force: true, quiet: true })
+  }
+
+  /** 启动登录状态轮询（连接期间每 30s 主动 get_login_info；断线时暂停）。 */
+  _startLoginWatch() {
+    if (this._loginTimer) return
+    this._loginTimer = setInterval(() => {
+      if (this.closed) return
+      if (!this.ws || this.ws.readyState !== 1) return
+      this.checkLogin({ quiet: true }).catch(() => {})
+    }, LOGIN_CHECK_MS)
+    this._loginTimer.unref?.()
+  }
+
+  /**
+   * 主动检查 QQ 是否还在线。WS 连着只说明 NapCat 在，不代表 QQ 账号在线。
+   * 先 WS get_login_info，失败再走 HTTP；成功置 loginOk=true，失败置 false 并记录原因。
+   * @param {{force?:boolean, quiet?:boolean}} [opts]
+   * @returns {Promise<{ok:boolean|null, selfId:number|null, nickname:string|null, error:string|null, checkedAt:number}>}
+   */
+  async checkLogin({ force = false, quiet = false } = {}) {
+    const now = Date.now()
+    if (!force && this.loginCheckedAt && now - this.loginCheckedAt < LOGIN_CHECK_TTL_MS) {
+      return { ok: this.loginOk, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError || null, checkedAt: this.loginCheckedAt }
     }
-    if (!info?.user_id) return
-    this.selfId = Number(info.user_id)
-    this.selfNickname = info.nickname || this.selfNickname
-    this.log.info(`机器人 QQ: ${this.selfId} (${this.selfNickname || ''})`)
+    if (this._loginChecking) return this._loginChecking
+    const task = (async () => {
+      if (!this.ws || this.ws.readyState !== 1) {
+        return { ok: null, selfId: this.selfId, nickname: this.selfNickname, error: 'NapCat WS 未连接', checkedAt: this.loginCheckedAt }
+      }
+      let info = null
+      let err = null
+      // get_login_info 在 QQ 掉线后仍可能返回缓存账号（NapCat 实测），不能单独作为在线依据
+      try { info = (await this.wsApi('get_login_info'))?.data } catch (e) { err = e }
+      if (!info?.user_id) {
+        try { info = (await this._post('get_login_info', {}))?.data?.data } catch (e) { err = e }
+      }
+      if (info?.user_id) {
+        this.selfId = Number(info.user_id)
+        this.selfNickname = info.nickname || this.selfNickname
+      }
+      if (!this.selfId) {
+        this.loginOk = false
+        this.loginError = err ? String(err.message || err) : 'NapCat 未返回登录账号'
+        this.loginCheckedAt = Date.now()
+        if (!quiet) this.log.warn(`QQ 登录状态检查失败: ${this.loginError}`)
+        return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
+      }
+
+      // 真·在线探测：get_stranger_info 需要 QQ 服务端往返。离线时 NapCat 会返回
+      // retcode!=0 / "网络连接异常" / coreInfo null；在线时 retcode=0。
+      // 仅用 get_status/get_login_info 都会命中缓存，发现不了这种掉线（2026-10-22 实测）。
+      let probePayload = null
+      let probeError = null
+      try {
+        const r = await this._post('get_stranger_info', { user_id: this.selfId })
+        probePayload = r?.data && typeof r.data === 'object' && ('retcode' in r.data || 'status' in r.data) ? r.data : null
+      } catch (e) { probeError = e }
+      if (!probePayload) {
+        try {
+          const r = await this.wsApi('get_stranger_info', { user_id: this.selfId })
+          probePayload = r && typeof r === 'object' && ('retcode' in r || 'status' in r) ? r : null
+        } catch (e) { probeError = e }
+      }
+      const probeOk = Boolean(probePayload && probePayload.status === 'ok' && Number(probePayload.retcode) === 0)
+      this.loginCheckedAt = Date.now()
+      if (probeOk) {
+        this.loginOk = true
+        this.loginError = ''
+        if (!quiet) this.log.info(`机器人 QQ: ${this.selfId} (${this.selfNickname || ''}) 在线`)
+        return { ok: true, selfId: this.selfId, nickname: this.selfNickname, error: null, checkedAt: this.loginCheckedAt }
+      }
+      this.loginOk = false
+      this.loginError = String(probePayload?.wording || probePayload?.message || probeError?.message || 'QQ 网络连接异常（NapCat 仍缓存了登录信息）')
+      if (!quiet) this.log.warn(`QQ 登录状态检查失败（已掉线）: ${this.loginError}`)
+      return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
+    })().finally(() => { this._loginChecking = null })
+    this._loginChecking = task
+    return task
   }
 
   /** 戳一戳（群聊带 group_id，私聊只带 user_id）。协议端不支持时**静默降级**：回戳是锦上添花。 */

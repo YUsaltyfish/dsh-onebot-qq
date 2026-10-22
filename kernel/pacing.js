@@ -30,6 +30,7 @@ export const REPLY_DEFAULTS = {
   hourlyMax: 6,              // 每小时最多几次"机会"（0 = 关）
   minGapMs: 480000,          // 两次机会最小间隔（8 分钟）
   coldSilenceMs: 180000,     // 群安静多久算冷场（3 分钟）
+  silenceEnabled: true,      // 冷场找话：关 = 只在群里有新消息时才可能接话（不定时找话）
   topicWindowMs: 600000,     // 机会窗口：到点后再等多久的合适时机（10 分钟）
   topicMinMsgs: 3,           // 窗口内至少几条消息才按"话题"挑时机（防单条消息就接）
   sensitivity: 0.45,         // 语境敏感度 0~1（越高越挑"值得接"的时机）
@@ -304,8 +305,12 @@ export function createPacing({ log = console, state, clock = null }) {
     if (score >= threshold) fire(key, gid, 'topic', score)
   }
 
+  /** 冷场找话是否开启（关 = 只由入站消息驱动「话题合适时接话」，不再定时找话）。 */
+  const silenceOn = () => cfg.reply.silenceEnabled !== false
+
   /** 冷场：到点了、群又安静够久 → 直接起一轮"找话"（不等消息） */
   function tick() {
+    if (!silenceOn()) return
     if (!cfg.reply.enabled || num(cfg.reply.hourlyMax, 0) <= 0 || !onProactiveTurn) return
     const now = nowMs()
     for (const gid of allowedGroups()) {
@@ -331,6 +336,8 @@ export function createPacing({ log = console, state, clock = null }) {
     if (timer) clearInterval(timer)
     timer = null
     if (!proactiveEnabled()) return null
+    // 冷场找话关掉时不需要定时器：接话机会只由入站消息触发（topic 路径）
+    if (!silenceOn()) return null
     timer = setInterval(() => {
       try { tick() } catch (e) { log.error(`[主动接话] tick 异常: ${e.message}`) }
     }, 30000)
@@ -426,7 +433,9 @@ export function createPacing({ log = console, state, clock = null }) {
     lastLogged = stamp
     try {
       log.info(`节奏：主动接话=${r.enabled && r.hourlyMax > 0 ? '开' : '关'}`
-        + `（每小时≤${r.hourlyMax}次，间隔≥${Math.round(opportunityGapMs() / 60000)}分钟，冷场≥${Math.round(num(r.coldSilenceMs, 300000) / 60000)}分钟，敏感度${Math.round(clamp01(r.sensitivity) * 100)}%，群${Object.keys(r.groups).join('/') || '（无）'}）`
+        + `（每小时≤${r.hourlyMax}次，间隔≥${Math.round(opportunityGapMs() / 60000)}分钟，`
+        + (silenceOn() ? `冷场≥${Math.round(num(r.coldSilenceMs, 300000) / 60000)}分钟` : '只在群里有新消息时接')
+        + `，敏感度${Math.round(clamp01(r.sensitivity) * 100)}%，群${Object.keys(r.groups).join('/') || '（无）'}）`
         + ` 合批=${cfg.merge.enabled ? '开' : '关'}(${num(cfg.merge.windowMs, 800)}/${num(cfg.merge.windowActiveMs, 4000)}ms 冷清/在聊)`)
     } catch { /* 日志失败不影响配置生效 */ }
     return cfg

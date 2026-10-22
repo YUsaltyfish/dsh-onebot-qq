@@ -77,6 +77,7 @@ export function defaultConfig() {
         hourlyMax: 6,
         minGapMs: 480000,
         coldSilenceMs: 180000,
+        silenceEnabled: true,     // 冷场找话（关掉 = 只在有群消息时接话）
         topicWindowMs: 600000,
         topicMinMsgs: 3,
         sensitivity: 0.45,

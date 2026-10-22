@@ -439,6 +439,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       stale: Boolean(health?.stale),
       lastFrameAgoMs: health?.lastFrameAgoMs ?? null,
       selfId: health?.selfId ?? null,
+      // QQ 登录状态：null=未知/检查中，false=WS 连着但 QQ 不在线（要靠它提醒）
+      qqLoggedIn: health?.qqLoggedIn ?? null,
+      qqLoginCheckedAt: health?.qqLoginCheckedAt ?? null,
+      qqLoginError: toStr(health?.qqLoginError),
     }
   }
 
@@ -602,6 +606,9 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         lastFrameAgo: napcatHealth.lastFrameAgoMs ?? null,
         selfId: napcatHealth.selfId ?? null,
         selfNickname: toStr(napcatHealth.selfNickname),
+        qqLoggedIn: napcatHealth.qqLoggedIn ?? null,
+        qqLoginCheckedAt: napcatHealth.qqLoginCheckedAt ?? null,
+        qqLoginError: toStr(napcatHealth.qqLoginError),
         plugins: {
           total: modules.length,
           loaded: modules.filter((m) => m.loaded).length,
