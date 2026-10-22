@@ -753,28 +753,35 @@ export async function apply(ctx, bundleConfig = {}) {
     // ⚠️ 关键：QQ 里「发转发」和「@它」**必然是两条消息**（客户端限制），第二条只能引用第一条。
     //    before-turn 跑在"@它"那条上，它的 _scratch.forwards 是空的 —— 转发 id 在被引消息里。
     //    所以这里必须**反查一次被引消息**把 forwards 挖出来。这跟 video-read 拿被引视频同构。
-    let fwdIds = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
-    if (ev.wake && !fwdIds.length && ev.replyToId) {
+    // forwards 现在是 [{ id, content }]：content 是 NapCat 在 get_msg 里已经内联好的转发正文
+    // （真机上 get_forward_msg(id) 常直接失败："消息已过期或者为内层消息"，所以内联才是主路径）
+    let fwdItems = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
+    if (ev.wake && !fwdItems.length && ev.replyToId) {
       try {
         const qMsg = await napcat.msgById(ev.replyToId)
         const qParsed = qMsg ? extractText(qMsg.message ?? qMsg.raw_message ?? '', napcat.selfId) : null
-        if (qParsed?.forwards?.length) fwdIds = qParsed.forwards
+        if (qParsed?.forwards?.length) fwdItems = qParsed.forwards
       } catch (e) {
         log.debug(`反查被引消息失败（不影响本轮）: ${e.message}`)
       }
     }
-    if (ev.wake && fwdIds.length) {
-      try {
-        const parts = []
-        for (const fid of fwdIds.slice(0, 2)) {   // 一条消息最多两条转发
-          const fwd = await napcat.getForwardMsg(fid)
-          const rendered = fwd ? renderForward(fwd) : ''
-          parts.push(rendered || '（这条转发的内容取不到）')
+    if (ev.wake && fwdItems.length) {
+      const parts = []
+      for (const item of fwdItems.slice(0, 2)) {   // 一条消息最多两条转发
+        // ① 先用已经内联好的正文（主路径，省一次接口且更可靠）
+        let rendered = renderForward(Array.isArray(item?.content) ? { content: item.content } : null)
+        // ② 内联没有才回退请求（有些来源确实只给 id）
+        if (!rendered && item?.id) {
+          try {
+            const fwd = await napcat.getForwardMsg(item.id)
+            rendered = fwd ? renderForward(fwd) : ''
+          } catch (e) {
+            log.warn(`取合并转发失败（id=${item.id}）: ${e.message}`)
+          }
         }
-        if (parts.length) ev.hint.push(`[合并转发内容（原文，按条分隔）]\n${parts.join('\n---\n')}`)
-      } catch (e) {
-        log.warn(`取合并转发失败: ${e.message}`)
+        parts.push(rendered || '（这条转发的内容取不到）')
       }
+      if (parts.length) ev.hint.push(`[合并转发内容（原文，按条分隔）]\n${parts.join('\n---\n')}`)
     }
 
     // 3. 入站图片（含被引图）三级溯源下载 → sharp 缩图(≤8000px) → 填 ev.imageParts & ev.imagePaths

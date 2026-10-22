@@ -375,7 +375,13 @@ function extractCardUrl(seg) {
  * @returns {string} 渲染结果；forward 为空时返回 ''（调用方据此降级）
  */
 export function renderForward(forward, opts = {}) {
-  const list = Array.isArray(forward?.messages) ? forward.messages : []
+  // 两种来源都吃：
+  //   · get_forward_msg 的返回 → { messages: [...] }
+  //   · get_msg 内联的 forward 段 → { content: [...] }（真机走这条，别漏）
+  const list = Array.isArray(forward?.messages) ? forward.messages
+    : Array.isArray(forward?.content) ? forward.content
+      : Array.isArray(forward) ? forward
+        : []
   if (!list.length) return ''
   const maxItems = Number(opts.maxItems) > 0 ? Number(opts.maxItems) : 30
   const perItem = Number(opts.perItemChars) > 0 ? Number(opts.perItemChars) : 80
@@ -387,7 +393,10 @@ export function renderForward(forward, opts = {}) {
     const uid = it?.sender?.user_id ?? it?.user_id ?? ''
     const name = String(it?.sender?.card || it?.sender?.nickname || uid || '?')
     // 每条内容按段解析（不递归 parse 转发 —— 嵌套转发极罕见，且会被 QQ 折叠）
-    const body = clipChars(extractText(it?.message ?? it?.content ?? '', null).text || '[非文字]', perItem)
+    // ⚠️ 真机：内层条目的 message 有时是空字符串/空数组，正文只在 raw_message 里
+    const body = clipChars(extractText(it?.message ?? it?.content ?? '', null).text
+      || String(it?.raw_message ?? '').trim()
+      || '[非文字]', perItem)
       .replace(/\s+/g, ' ')
       .trim()
     lines.push(`[${name}${uid ? `(QQ:${uid})` : ''}]: ${body}`)
@@ -452,10 +461,13 @@ export function extractText(message, selfId) {
       if (url) cards.push(url)
       parts.push('')
     } else if (type === 'forward') {
-      // 合并转发：内容要靠 get_forward_msg 再取一次，纯函数不碰网络 —— 这里只留占位，
-      // 真正的正文由 index.js 在 before-turn 里取来塞进 hint（见 renderForward）。
+      // 合并转发。⚠️ 真机实测：NapCat 的 get_msg 已经把转发内容**内联**在
+      //   data.content 里了，而 get_forward_msg(id) 对这类消息常直接失败
+      //   （"消息已过期或者为内层消息"）。所以先把 inline 内容带出去，别白跑一趟。
+      // 纯函数不碰网络：这里只做结构整理，取不到才由 index.js 回退请求。
       const fid = String(d.id ?? d.resid ?? '')
-      if (fid) forwards.push(fid)
+      const inline = Array.isArray(d.content) ? d.content : null
+      if (fid || inline) forwards.push({ id: fid, content: inline })
       parts.push('[合并转发]')
     } else parts.push('') // face / 未知段：忽略
   }
