@@ -65,6 +65,7 @@ export function createDshDriver(opts) {
   const sessions = new Map()      // chatKey -> sessionId
   const creating = new Map()      // chatKey -> Promise<sessionId>（同一条线并发时只建一个会话）
   const turnEndFns = new Map()    // sessionId -> Set<fn>
+  const turnStartFns = new Map()  // sessionId -> Set<fn>
   const unsubs = []               // ctx.on(...) 的 disposer
 
   // 会话标题同步的状态（每次 sync 都读写这个小文件，不塞进会话映射里 —— 两者生命周期不同）
@@ -114,11 +115,29 @@ export function createDshDriver(opts) {
     return sessionId
   }
 
-  // ── 本轮结束回调 ────────────────────────────────────────────
+  // ── 本轮开始 / 结束回调 ──────────────────────────────────────
   function fireTurnEnd(sessionId, event) {
     for (const fn of turnEndFns.get(sessionId) ?? []) {
       try { fn(event) } catch (e) { log.warn(`turn/end 回调异常 (${sessionId}): ${e.message}`) }
     }
+  }
+
+  function fireTurnStart(sessionId, event) {
+    for (const fn of turnStartFns.get(sessionId) ?? []) {
+      try { fn(event) } catch (e) { log.warn(`turn/start 回调异常 (${sessionId}): ${e.message}`) }
+    }
+  }
+
+  /**
+   * 订阅某会话的「一轮开始」。返回取消函数。
+   * 为什么需要它：`sessionController.prompt()` 只做**入队 admission**，模型真正开始跑
+   * 是之后才发生的；引用锚必须等 turn/start 才能绑定到正确的模型回合（而不是"最后一个提交的回合"）。
+   */
+  function onTurnStart(sessionId, fn) {
+    let set = turnStartFns.get(sessionId)
+    if (!set) turnStartFns.set(sessionId, (set = new Set()))
+    set.add(fn)
+    return () => set.delete(fn)
   }
 
   /**
@@ -540,10 +559,11 @@ export function createDshDriver(opts) {
     return { renamed, skipped, checked: wanted.size }
   }
 
-  // ── 事件订阅：turn/end + 提问拦截 ───────────────────────────
+  // ── 事件订阅：turn/start + turn/end + 提问拦截 ─────────────────
   unsubs.push(ctx.on('session/event', (session, event) => {
-    if (event?.type !== 'turn/end' || !turnEndFns.has(session.id)) return
-    fireTurnEnd(session.id, event)
+    const type = event?.type
+    if (type === 'turn/start' && turnStartFns.has(session.id)) fireTurnStart(session.id, event)
+    else if (type === 'turn/end' && turnEndFns.has(session.id)) fireTurnEnd(session.id, event)
   }))
   // QQ 端没有可点的卡片：选择题会让会话挂起等一个永远不会来的点击，表现就是"卡死"。
   // 只拦 `agent.id` 属于 QQ 会话的请求，其他（网页 / 工作线）必须 return next() ——
@@ -593,6 +613,7 @@ export function createDshDriver(opts) {
       try { off() } catch { /* 上下文可能已卸载 */ }
     }
     turnEndFns.clear()
+    turnStartFns.clear()
   }
 
   /**
@@ -619,6 +640,7 @@ export function createDshDriver(opts) {
     findChatKeyBySession,
     forgetSession,
     runIsolatedTask,
+    onTurnStart,
     onTurnEnd,
     fetchGroupContext,
     syncSessionTitles,
