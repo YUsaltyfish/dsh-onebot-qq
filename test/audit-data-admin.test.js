@@ -791,3 +791,85 @@ test('WAKE-P2 人设唤醒词只允许删除；删不存在的词给友好错误
   assert.equal(miss.ok, false)
   assert.match(String(miss.error), /没有「不存在的词」/)
 })
+// ─────────────────────────────────────────────────────────────────────────────
+// 群记忆控制台修复（2026-10-23）：并发 CAS / 写入上限 / dir 逃逸 / 唤醒词脏键
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function memoryHarness(t, cfg = {}) {
+  const h = await boot(t, {
+    config: {
+      pluginConfig: {
+        'gate-wake': { adminQq: ADMIN_QQ },
+        'group-memory': { enabled: true, dir: 'qq-memory', ...cfg },
+      },
+    },
+  })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const memDir = path.join(h.dataDir, 'qq-memory')
+  fs.mkdirSync(memDir, { recursive: true })
+  return { h, endpoints, memDir }
+}
+
+test('群记忆控制台：save 带 ifMtime 时拒绝陈旧覆盖（积累器刚写过）', async (t) => {
+  const { h, endpoints, memDir } = await memoryHarness(t)
+  const file = path.join(memDir, `${GROUP_ID}.md`)
+  fs.writeFileSync(file, '# 群记忆\n## 唤醒与对话风格\n- 旧\n')
+  const read = await endpoints.handle('memory', { op: 'read', group_id: GROUP_ID })
+  assert.equal(read.ok, true)
+  assert.ok(Number(read.mtimeMs) > 0, 'read 应返回 mtimeMs 供前端做 CAS')
+
+  await sleep(20)
+  fs.writeFileSync(file, '# 群记忆\n## 唤醒与对话风格\n- 积累器刚写的新内容\n')
+  const conflict = await endpoints.handle('memory', {
+    op: 'save', group_id: GROUP_ID, content: read.content, ifMtime: read.mtimeMs,
+  })
+  assert.equal(conflict.ok, false)
+  assert.match(String(conflict.error), /已被更新/)
+  assert.match(fs.readFileSync(file, 'utf8'), /积累器刚写的新内容/, '冲突时不能覆盖新内容')
+
+  const fresh = await endpoints.handle('memory', { op: 'read', group_id: GROUP_ID })
+  const saved = await endpoints.handle('memory', {
+    op: 'save', group_id: GROUP_ID, content: '# 群记忆\n## 唤醒与对话风格\n- 手改\n', ifMtime: fresh.mtimeMs,
+  })
+  assert.equal(saved.ok, true)
+  const revs = fs.readdirSync(path.join(memDir, '.revisions'))
+  assert.ok(revs.length >= 1, '保存前应留旧版备份')
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, '主文件权限应为 0600')
+  }
+})
+
+test('群记忆控制台：save 上限跟随 maxBytes（避免保存成功但模型读不到）', async (t) => {
+  const { endpoints } = await memoryHarness(t, { maxBytes: 1000 })
+  const body = `# 群记忆\n## 群里的人\n- ${'很长的内容'.repeat(400)}\n`
+  assert.ok(Buffer.byteLength(body, 'utf8') > 1000)
+  const r = await endpoints.handle('memory', { op: 'save', group_id: GROUP_ID, content: body })
+  assert.equal(r.ok, false)
+  assert.match(String(r.error), /超过单篇读取上限/)
+})
+
+test('群记忆控制台：setcfg 不允许把 dir 改到数据目录之外', async (t) => {
+  const { endpoints } = await memoryHarness(t)
+  const bad = await endpoints.handle('memory', { op: 'setcfg', key: 'group-memory.dir', value: '../evil' })
+  assert.equal(bad.ok, false)
+  assert.match(String(bad.error), /数据目录内/)
+})
+
+test('群记忆控制台：唤醒词里的非群号数字键不会让 list 整页崩掉', async (t) => {
+  const h = await boot(t, {
+    config: {
+      pluginConfig: {
+        'gate-wake': { adminQq: ADMIN_QQ, keywords: '123：太短\n456789：正常群' },
+        'group-memory': { enabled: true, dir: 'qq-memory' },
+      },
+    },
+  })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  fs.mkdirSync(path.join(h.dataDir, 'qq-memory'), { recursive: true })
+  fs.writeFileSync(path.join(h.dataDir, 'qq-memory', '456789.md'), '# 群记忆\n## 唤醒与对话风格\n- x\n')
+  const r = await endpoints.handle('memory', { op: 'list' })
+  assert.equal(r.ok, true)
+  const ids = (r.groups || []).map((g) => g.group_id)
+  assert.ok(ids.includes('456789'))
+  assert.equal(ids.includes('123'), false, '非 4–12 位数字键应被忽略')
+})

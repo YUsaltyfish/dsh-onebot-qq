@@ -1078,7 +1078,7 @@ window.__ModuleLoader__.load({
 				return r ? r.value : undefined
 			}, [ctx])
 
-			// 拉列表；wantId 指定要打开哪个群（默认保持当前选中，其次第一个）
+			// 拉列表；wantId 指定要打开哪个群（默认保持当前选中，其次第一个）。返回是否成功。
 			const load = useCallback(async (wantId) => {
 				try {
 					const d = await call('list')
@@ -1087,7 +1087,8 @@ window.__ModuleLoader__.load({
 					const gs = d.groups || []
 					const pick = wantId || (cur && cur.group_id) || (gs[0] && gs[0].group_id)
 					if (pick) await open(pick, gs)
-				} catch (e) { setMsg(`读取列表失败：${e.message}`) }
+					return true
+				} catch (e) { setMsg(`读取列表失败：${e.message}`); return false }
 			}, [call, cur])
 
 			const open = async (gid, gs) => {
@@ -1096,8 +1097,22 @@ window.__ModuleLoader__.load({
 					const r = await call('read', { group_id: gid })
 					if (r && r.ok === false) throw new Error(r.error)
 					const g = (gs || (data && data.groups) || []).find((x) => x.group_id === gid) || {}
-					setCur({ group_id: gid, name: g.name || '', content: r.content || '', bytes: r.bytes || 0, dirty: false })
+					setCur({
+						group_id: gid, name: g.name || '', content: r.content || '', bytes: r.bytes || 0,
+						mtimeMs: r.mtimeMs || 0, dirty: false,
+					})
 				} catch (e) { setMsg(`读 ${gid} 失败：${e.message}`) } finally { setBusy(false) }
+			}
+
+			// 积累在后台跑：每 3s 拉一次 list（只更新列表/状态，不碰编辑器，避免覆盖未保存内容）
+			const pollStatus = async (tries = 8) => {
+				for (let i = 0; i < tries; i += 1) {
+					await new Promise((r) => setTimeout(r, 3000))
+					let d
+					try { d = await call('list') } catch { return }
+					if (d && d.ok !== false) setData(d)
+					if (!d || !d.accumulate || !d.accumulate.running) return
+				}
 			}
 
 			// 工具配置：按需拉取（不占首屏）；改一项立刻落盘 + 热重载
@@ -1133,17 +1148,28 @@ window.__ModuleLoader__.load({
 			}
 
 			useEffect(() => { load() }, [])   // 只在挂载时拉一次
+			// 挂着页时如果积累在跑，自动跟随状态（跑完显示 lastResult / 失败原因）
+			useEffect(() => {
+				if (data && data.accumulate && data.accumulate.running) pollStatus()
+			}, [data && data.accumulate && data.accumulate.running])
 
 			const save = async () => {
 				if (!cur) return
 				setBusy(true); setMsg('')
 				try {
-					const r = await call('save', { group_id: cur.group_id, content: cur.content })
+					// ifMtime：页面打开后积累器可能已经写过；服务端 mtime 不一致会拒绝，避免旧内容整篇覆盖新要点。
+					const r = await call('save', {
+						group_id: cur.group_id, content: cur.content,
+						...(cur.mtimeMs ? { ifMtime: cur.mtimeMs } : {}),
+					})
 					if (r && r.ok === false) throw new Error(r.error)
 					setMsg(r && r.message ? r.message : '已保存 ✓')
-					setCur(Object.assign({}, cur, { dirty: false }))
+					setCur(Object.assign({}, cur, {
+						dirty: false, bytes: r && r.bytes ? r.bytes : cur.bytes,
+						mtimeMs: r && r.mtimeMs ? r.mtimeMs : cur.mtimeMs,
+					}))
 					const d = await call('list')
-					setData(d)
+					if (d && d.ok !== false) setData(d)
 				} catch (e) { setMsg(`保存 ✗ ${e.message}`) } finally { setBusy(false) }
 			}
 
@@ -1161,7 +1187,11 @@ window.__ModuleLoader__.load({
 				h('div', { style: S.title, key: 't' }, '群记忆 · 每群一篇'),
 
 				h('div', { style: S.row, key: 'top' }, [
-					h('button', { key: 'rf', style: S.btn, disabled: busy, onClick: () => load().then(() => setMsg('已刷新 ✓')), title: '重新读取群记忆文件（别人改了文件也会刷出来）' }, '刷新'),
+					h('button', {
+						key: 'rf', style: S.btn, disabled: busy,
+						title: '重新读取群记忆文件（别人改了文件也会刷出来）',
+						onClick: async () => { if (await load()) setMsg('已刷新 ✓') },
+					}, '刷新'),
 					h('button', {
 						key: 'acc', style: S.btn, disabled: busy,
 						title: '立刻跑一轮积累：读各群最近聊天 → 交给模型更新这几篇文件',
@@ -1179,6 +1209,7 @@ window.__ModuleLoader__.load({
 									const r = await call('refresh', { confirm: true })
 									if (r && r.ok === false) throw new Error(r.error)
 									setMsg(r && r.message ? r.message : '已开始')
+									if (!r || r.started !== false) pollStatus()
 								} catch (e) { setMsg(`积累 ✗ ${e.message}`) } finally { setBusy(false) }
 							},
 						}),

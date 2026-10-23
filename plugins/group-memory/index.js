@@ -90,7 +90,11 @@ export default {
     },
     accumulateRetainRevisions: {
       type: 'int', default: 20, min: 0, max: 200, step: 5, group: '群记忆', label: '保留多少历史版本',
-      hint: '每次改写前把旧版备份到 .revisions/，只保留最近 N 份（0 = 不备份）。',
+      hint: '每次改写前把旧版备份到 .revisions/，只保留最近 N 份（0 = 不备份；控制台手改的 -manual 备份也按这个数清理）。',
+    },
+    accumulateMaxGroupsPerRound: {
+      type: 'int', default: 12, min: 1, max: 200, step: 1, group: '群记忆', label: '单轮最多处理多少个群',
+      hint: '群很多时一轮只处理这么多个群，其余下轮轮转处理（不会永远饿死大号段群）。调大 = 单轮更久、可能拆批。',
     },
   },
 
@@ -101,7 +105,7 @@ export default {
     const dataDirOf = () => String(bot.core?.dataDir || '.')
     const dirOf = () => String(cfg.dir || '').trim() || path.join(dataDirOf(), 'qq-memory')
     const maxBytesOf = () => Math.max(1000, Number(cfg.maxBytes) || 24000)
-    const cache = new Map() // 文件路径 -> { stamp, text }：文件没改就不重复读盘
+    const rawCache = new Map() // 文件路径 -> { stamp, text }：原文（不截断）；读写两侧共用，只读一次盘
     const fallbackSeen = new Map() // 当 bot.state 不可用时的兜底
 
     function getSeen(chatKey) {
@@ -139,25 +143,40 @@ export default {
     const fileOf = (gid) => path.join(dirOf(), `${gid}.md`)
 
     /**
-     * 读一个群的记忆（只读）。返回 `{ text, stamp }`，没有文件返回 null。
-     * `stamp = mtimeMs:size`：文件没改就不重复读盘；改了（积累器原子写回）就自然换新版。
+     * 读原文（只剥 BOM 与行尾记账注释，**不按 maxBytes 截断**）。
+     * `stamp = mtimeMs:size`：文件没改就不重复读盘；改了（积累器/控制台写回）就自然换新版。
+     *
+     * ⚠️ 积累器必须用原文：它的「合并 → 整篇写回」如果拿截断后的文本当基准，
+     *    超过 maxBytes 的尾部每轮都会丢（旧版的 bug，见读写口径分离）。
      */
-    function readMemory(gid) {
+    function loadRaw(gid) {
       const file = fileOf(gid) // gid 已过 4–12 位纯数字校验 → 不会有路径穿越
       let st
       try { st = fs.statSync(file) } catch { return null } // 没文件 = 没记忆
       const stamp = `${st.mtimeMs}:${st.size}`
-      const hit = cache.get(file)
+      const hit = rawCache.get(file)
+      if (hit && hit.stamp === stamp) return hit
       let text
-      if (hit && hit.stamp === stamp) {
-        text = hit.text
-      } else {
-        try { text = stripBom(fs.readFileSync(file, 'utf8')) } catch { return null }
-        // 剥掉条目尾部的记账注释（`<!-- n=3 ... -->`）：机器人不该看到记账信息，也省 token
-        text = text.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
-        cache.set(file, { stamp, text })
-      }
-      return { text: clip(text).trim(), stamp }
+      try { text = stripBom(fs.readFileSync(file, 'utf8')) } catch { return null }
+      // 剥掉条目尾部的记账注释（`<!-- n=3 ... -->`）：机器人不该看到记账信息，也省 token
+      text = text.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
+      const rec = { stamp, text, bytes: Buffer.byteLength(text, 'utf8') }
+      rawCache.set(file, rec)
+      return rec
+    }
+
+    /** 给积累器/备份用：不截断。 */
+    function readRaw(gid) {
+      const r = loadRaw(gid)
+      return r ? { text: r.text, stamp: r.stamp, bytes: r.bytes } : null
+    }
+
+    /** 给模型用：按 maxBytes 截断（只影响进上下文的文本，不影响写盘基准）。 */
+    function readMemory(gid) {
+      const r = loadRaw(gid)
+      if (!r) return null
+      const text = clip(r.text).trim()
+      return { text, stamp: r.stamp, clipped: text.length < r.text.trim().length, bytes: r.bytes }
     }
 
     // ── 入口 ①：before-turn 只推一行指针（首次 / 有更新；未变化 0 字符） ──────────
@@ -208,8 +227,11 @@ export default {
         }
         const mem = readMemory(gid)
         if (!mem) return { ok: true, target, memory: '', hint: '本群还没有记忆文件（积累器还没跑过）' }
-        log.info(`[群记忆] 自读 ${gid} → ${mem.text.length} 字`)
-        return { ok: true, target, group_id: gid, chars: mem.text.length, memory: mem.text }
+        log.info(`[群记忆] 自读 ${gid} → ${mem.text.length} 字${mem.clipped ? '（已按上限截断）' : ''}`)
+        return {
+          ok: true, target, group_id: gid, chars: mem.text.length, memory: mem.text,
+          ...(mem.clipped ? { clipped: true, hint: `记忆原文 ${mem.bytes} 字节，超过读取上限，已按整行截断；需要完整内容请让人在控制台调大 maxBytes 或精简文件` } : {}),
+        }
       },
     })
 
@@ -238,13 +260,18 @@ export default {
       log,
       dataDirOf,
       memoryDirOf: dirOf,
-      readMemoryOf: readMemory,
-      invalidateMemoryOf: (gid) => cache.delete(fileOf(gid)),
+      readMemoryOf: readRaw,
+      invalidateMemoryOf: (gid) => rawCache.delete(fileOf(gid)),
+      maxBytesOf,
     })
     bot.shared.memoryAccumulate = accumulator.manual
     bot.shared.memoryAccumulateStatus = accumulator.status
     bot.shared.memoryAccumulateSync = accumulator.sync
     bot.shared.memoryAccumulateSubmit = accumulator.submit
+    bot.shared.memoryAccumulateStop = accumulator.stop
     accumulator.start()
+    // fiber 卸载时清掉 60s 定时器：旧版 start() 的 timer 直接丢弃，内核 dispose 也不清，
+    // 插件重载会叠出第二个定时器。onDispose 是内核的新能力，老内核没有 → 可选调用。
+    try { bot.onDispose?.(() => { try { accumulator.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
   },
 }

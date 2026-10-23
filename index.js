@@ -406,7 +406,7 @@ export async function apply(ctx, bundleConfig = {}) {
     activeTurns: new Map(), // chatKey → TurnContext（**正在跑**的那一轮：turn/start → turn/end）
     turnBySession: new Map(), // sessionId → TurnContext（同上；工具执行时按 DSH 会话认线）
     pendingTurns: new Map(), // sessionId → TurnContext[]（prompt 已 admission、等 turn/start 的队列）
-    maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口一律拒绝，避免后台任务往群里发消息
+    maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口只放行 MAINT_ALLOWED_TOOLS（memory_append）
     dataDir,
     configPath,
     archive,
@@ -643,8 +643,17 @@ export async function apply(ctx, bundleConfig = {}) {
     keywordTable: kernel.shared.keywordsTable || {},
     tmp,
   })
+  const pluginDisposers = [] // 插件注册的卸载回调（定时器/监听器等），fiber 卸载时逆序执行
   const botProto = {
     get contractVersion() { return CONTRACT_VERSION },
+    /** 注册卸载回调（插件启动的定时器/订阅必须走这里，否则重载会叠实例）。 */
+    onDispose(fn) {
+      if (typeof fn === 'function') pluginDisposers.push(fn)
+      return () => {
+        const i = pluginDisposers.indexOf(fn)
+        if (i >= 0) pluginDisposers.splice(i, 1)
+      }
+    },
     get selfId() { return napcat.selfId },
     get commands() { return kernel.commands },
     get core() { return coreOf() },
@@ -1462,6 +1471,9 @@ export async function apply(ctx, bundleConfig = {}) {
 
   // fiber 卸载时按逆序回收（单例保护的铁律：每条退出路径都要复位）。
   ctx.effect(() => () => {
+    for (const fn of pluginDisposers.splice(0).reverse()) {
+      try { fn() } catch (e) { log.warn(`插件卸载回调异常: ${e.message}`) }
+    }
     try { adminHost?.dispose?.() } catch { /* ignore */ }
     try { compat?.close() } catch { /* ignore */ }
     try { pacing.stop() } catch { /* ignore */ }

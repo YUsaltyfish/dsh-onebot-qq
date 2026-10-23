@@ -880,8 +880,31 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
   // ── memory（群记忆）──────────────────────────────────────────
   const MEMORY_SECTIONS = ['## 唤醒与对话风格', '## 群里的人', '## 其它']
-  const MEMORY_SAVE_MAX = 64 * 1024
-  const stamp17 = () => new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 17)
+  const gmCfg = () => pluginCfgRuntime('group-memory')
+  /** 单篇读取上限（字节）：控制台保存也按它限制，避免“保存成功但模型读不到尾巴”。 */
+  const memoryMaxBytes = () => Math.max(1000, Number(gmCfg().maxBytes) || 24000)
+  /** 历史版本保留份数（和积累器共用同一个配置键；控制台手改的 -manual 备份也按它清）。 */
+  const memoryRetain = () => Math.max(0, Math.min(200, Number(gmCfg().accumulateRetainRevisions ?? 20)))
+  const revisionStamp = () => {
+    const iso = new Date().toISOString().replace(/[-:T.]/g, '')
+    return `${iso.slice(0, 8)}-${iso.slice(8, 14)}`
+  }
+  /** 只留某群最近 keep 份（积累器 `<id>-YYYYMMDD-HHmmss[-n].md` + 控制台 `<id>-...-manual.md` 一起算）。 */
+  function pruneRevisionsFor(id, keep) {
+    if (keep <= 0) return 0
+    const revDir = path.join(memoryDir(), '.revisions')
+    let names = []
+    try { names = fs.readdirSync(revDir) } catch { return 0 }
+    const re = new RegExp(`^${id}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+    const entries = names.filter((n) => re.test(n))
+      .map((n) => ({ n, at: (() => { try { return fs.statSync(path.join(revDir, n)).mtimeMs } catch { return 0 } })() }))
+      .sort((a, b) => a.at - b.at || a.n.localeCompare(b.n))
+    let removed = 0
+    for (const e of entries.slice(0, Math.max(0, entries.length - keep))) {
+      try { fs.unlinkSync(path.join(revDir, e.n)); removed += 1 } catch { /* ignore */ }
+    }
+    return removed
+  }
 
   function memoryDir() {
     const rt = runtimeOf()
@@ -907,6 +930,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       return {
         group_id: id, exists: true, bytes: st.size,
         mtime: new Date(st.mtimeMs).toISOString(),
+        mtimeMs: st.mtimeMs,
         bullets: text.split(/\r?\n/).filter((l) => l.startsWith('- ')).length,
       }
     } catch {
@@ -914,11 +938,12 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
   }
 
-  async function memoryGroupIds() {
-    // 口径（与现网 group-memory 的 discover_groups 一致）：有群线会话的群 ∪ 唤醒词数字键 ∪ 已有文件
+  async function memoryGroupIds(napcatGroupsIn) {
+    // 口径（与现网 group-memory 的 discover_groups 一致）：有群线会话的群 ∪ 唤醒词数字键 ∪ 已有文件。
+    // ⚠️ 唤醒词键可能是 1–3 位/13+ 位纯数字（不是群号）：必须过滤成 4–12 位，否则 memFile 抛错会整页挂掉。
     const ids = new Set()
     for (const gid of (parseKeywordMap(pluginCfg(store.read(), 'gate-wake').keywords).keys())) {
-      if (/^\d+$/.test(gid)) ids.add(gid)
+      if (/^\d{4,12}$/.test(gid)) ids.add(gid)
     }
     const dir = memoryDir()
     try {
@@ -928,7 +953,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
     } catch { /* 目录还没建 */ }
     const lineGids = new Set(sessionKeysOf(kernel).filter((k) => k.startsWith('group:')).map((k) => String(k).slice(6)))
-    const napcatGroups = await fetchGroupList(kernel)
+    const napcatGroups = napcatGroupsIn || await fetchGroupList(kernel)
     for (const g of napcatGroups) if (lineGids.has(g.id)) ids.add(g.id)
     return [...ids].sort((a, b) => Number(a) - Number(b))
   }
@@ -956,6 +981,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       if (keep.length) parts.push(`原始记录保留 ${keep.join(' / ')}`)
       if (acc.running) parts.push('正在积累…')
       if (acc.lastRunAt) parts.push(`上次 ${fmt(acc.lastRunAt)}（${acc.lastResult?.message || '—'}）`)
+      if (acc.lastError) parts.push(`⚠️ 上次失败：${String(acc.lastError).slice(0, 120)}`)
       if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)
       return { cron: '', text: parts.join(' · '), status: acc }
     }
@@ -980,7 +1006,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const napcatGroups = await fetchGroupList(kernel)
       const nameByGid = new Map(napcatGroups.map((g) => [g.id, g.name]))
       const keywordMap = parseKeywordMap(pluginCfg(raw, 'gate-wake').keywords)
-      const ids = await memoryGroupIds()
+      const ids = await memoryGroupIds(napcatGroups)
       const groups = ids.map((id) => ({
         ...memInfo(id),
         name: nameByGid.get(id) || '',
@@ -1006,15 +1032,34 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const content = String(payload.content == null ? '' : payload.content)
       if (!content.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
       const bytes = Buffer.byteLength(content, 'utf8')
-      if (bytes > MEMORY_SAVE_MAX) throw new Error(`内容 ${bytes} 字节，超过上限 ${MEMORY_SAVE_MAX}`)
-      if (fs.existsSync(file)) {
-        // 旧版留档（和本机积累器同一个 .revisions/ 习惯）
+      const limit = memoryMaxBytes()
+      if (bytes > limit) {
+        throw new Error(`内容 ${bytes} 字节，超过单篇读取上限 ${limit} 字节（超过的部分模型读不到）。请精简，或先在「工具配置」调大 maxBytes。`)
+      }
+      // 乐观并发：页面读进来后可能积累器已经写过；带 ifMtime 时不匹配就拒绝，避免旧编辑器整篇覆盖新要点。
+      const ifMtime = payload.ifMtime == null ? null : Number(payload.ifMtime)
+      if (ifMtime != null && Number.isFinite(ifMtime) && fs.existsSync(file)) {
+        let cur = 0
+        try { cur = fs.statSync(file).mtimeMs } catch { cur = 0 }
+        if (cur && Math.abs(cur - ifMtime) > 0.5) {
+          throw new Error('这份记忆在你编辑期间已被更新（可能刚积累过），请点「刷新」看清后再保存，避免覆盖新内容')
+        }
+      }
+      const keep = memoryRetain()
+      if (fs.existsSync(file) && keep > 0) {
+        // 旧版留档：与积累器同一命名/同一保留策略（-manual 后缀也计入 retainRevisions）
         try {
           const revDir = ensureDir(path.join(memoryDir(), '.revisions'))
-          fs.copyFileSync(file, path.join(revDir, `${id}-${stamp17()}-manual.md`))
+          let revFile = path.join(revDir, `${id}-${revisionStamp()}-manual.md`)
+          for (let i = 1; fs.existsSync(revFile) && i < 100; i += 1) {
+            revFile = path.join(revDir, `${id}-${revisionStamp()}-${i}-manual.md`)
+          }
+          fs.copyFileSync(file, revFile)
+          try { fs.chmodSync(revFile, 0o600) } catch { /* Windows 无 chmod 语义 */ }
+          pruneRevisionsFor(id, keep)
         } catch (e) { warn(`记忆旧版留档失败 ${id}: ${e.message}`) }
       }
-      atomicWriteFileSync(file, content.endsWith('\n') ? content : `${content}\n`)
+      atomicWriteFileSync(file, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o600 })
       const missing = MEMORY_SECTIONS.filter((s) => !content.includes(s))
       return {
         ok: true, op, ...memInfo(id),
@@ -1030,6 +1075,15 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const key = toStr(payload.key)
       const entry = findControl(kernel, key)
       if (!entry || entry.plugin !== 'group-memory') throw new Error(`不在群记忆配置白名单里：${key}`)
+      // dir 是唯一能影响读写的路径键：必须落在 dataDir 内（validateConfig 不校验 pluginConfig，
+      // 否则 `../` 可以逃逸到任意目录读写 `<数字>.md`）。
+      if (entry.field === 'dir') {
+        const dirVal = toStr(payload.value).trim()
+        if (dirVal) {
+          const target = resolveDataPath(dirVal, dataDirOf())
+          if (!isInsidePath(dataDirOf(), target)) throw new Error('记忆目录必须位于数据目录内（不允许 ../ 逃逸）')
+        }
+      }
       const next = clone(raw)
       const written = writeValue(kernel, key, payload.value, next)
       const saved = await store.save(next, { what: `群记忆配置 ${key} = ${JSON.stringify(written.value)}`, allowPending: true })
