@@ -404,6 +404,27 @@ export class NapCatAdapter {
   }
 
   /**
+   * 取一条合并转发的内容（OneBot get_forward_msg）。
+   * 返回的 `messages` 每项形如 `{ sender, time, message }`（`message` 是段数组）。
+   * 拿不到返回 null —— 调用方据此降级成「(转发内容取不到)」，不阻塞这一轮。
+   * @returns {Promise<{messages:Array}|null>}
+   */
+  async getForwardMsg(forwardId) {
+    try {
+      const { data } = await this._post('get_forward_msg', { id: String(forwardId) }, 15000)
+      if (data?.status !== 'ok' || !data?.data) return null
+      const d = data.data
+      // NapCat 有的版本把 messages 直接放 data，有的放 data.data
+      const messages = Array.isArray(d.messages) ? d.messages
+        : (Array.isArray(d.data?.messages) ? d.data.messages : null)
+      return messages ? { messages } : null
+    } catch (e) {
+      this.log.debug(`get_forward_msg 失败 (${forwardId}): ${e.message}`)
+      return null
+    }
+  }
+
+  /**
    * 按 file_id 溯源 NapCat 本地文件/直链（OneBot get_file）。
    * 返回的 `file` 可能是 `file://` URL 或原生路径 → 统一经 fromNapCatFileRef() 归一成本地路径，
    * 调用方（入站文件/表情采集）就不用各写一份 URL 解析。

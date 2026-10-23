@@ -355,6 +355,59 @@ function extractCardUrl(seg) {
  *    —— 旧实现两处判据不一致，采集侧把 sub_type 7/11 的表情静默滤掉过。
  *  · 卡片链接抽出来单独放 cards，**不塞进 text**：保持"卡片不算文字"的旧行为，只有链接解析用它。
  */
+/**
+ * 把一条合并转发（get_forward_msg 的返回）渲染成可读文本。
+ *
+ * 为什么单独一个函数：转发是**嵌套结构**（一条转发里还有发送者、时间、以及任意段），
+ * 内联在 extractText 里会和主流程互相纠缠；而且它是**纯函数**，测试不用起 NapCat。
+ *
+ * 取舍：
+ *   · 每条前缀 `[昵称(QQ:号)]: `（跟群上文格式一致，模型认这个形状）
+ *   · 单条正文 clip 到 `perItemChars`，整体 clip 到 `totalChars` —— 一条 200 条的转发
+ *     全塞进去会把上下文撑爆，而模型只需要"大概聊了啥"
+ *   · 超量时明确告诉模型"后面还有 N 条省略"，别让它以为就这些
+ *
+ * @param {{messages:Array}|null} forward  get_forward_msg 的返回
+ * @param {object} [opts]
+ * @param {number} [opts.maxItems]      最多渲染几条（默认 30）
+ * @param {number} [opts.perItemChars]  单条最多多少字（默认 80）
+ * @param {number} [opts.totalChars]    总字数上限（默认 2000）
+ * @returns {string} 渲染结果；forward 为空时返回 ''（调用方据此降级）
+ */
+export function renderForward(forward, opts = {}) {
+  // 两种来源都吃：
+  //   · get_forward_msg 的返回 → { messages: [...] }
+  //   · get_msg 内联的 forward 段 → { content: [...] }（真机走这条，别漏）
+  const list = Array.isArray(forward?.messages) ? forward.messages
+    : Array.isArray(forward?.content) ? forward.content
+      : Array.isArray(forward) ? forward
+        : []
+  if (!list.length) return ''
+  const maxItems = Number(opts.maxItems) > 0 ? Number(opts.maxItems) : 30
+  const perItem = Number(opts.perItemChars) > 0 ? Number(opts.perItemChars) : 80
+  const total = Number(opts.totalChars) > 0 ? Number(opts.totalChars) : 2000
+
+  const shown = list.slice(0, maxItems)
+  const lines = []
+  for (const it of shown) {
+    const uid = it?.sender?.user_id ?? it?.user_id ?? ''
+    const name = String(it?.sender?.card || it?.sender?.nickname || uid || '?')
+    // 每条内容按段解析（不递归 parse 转发 —— 嵌套转发极罕见，且会被 QQ 折叠）
+    // ⚠️ 真机：内层条目的 message 有时是空字符串/空数组，正文只在 raw_message 里
+    const body = clipChars(extractText(it?.message ?? it?.content ?? '', null).text
+      || String(it?.raw_message ?? '').trim()
+      || '[非文字]', perItem)
+      .replace(/\s+/g, ' ')
+      .trim()
+    lines.push(`[${name}${uid ? `(QQ:${uid})` : ''}]: ${body}`)
+  }
+  let text = lines.join('\n')
+  if (text.length > total) text = `${clipChars(text, total)}…`
+  const rest = list.length - shown.length
+  if (rest > 0) text += `\n…（还有 ${rest} 条未列出）`
+  return text
+}
+
 export function extractText(message, selfId) {
   let segments = []
   if (typeof message === 'string') segments = parseCqString(message)
@@ -367,6 +420,7 @@ export function extractText(message, selfId) {
   const quotes = []
   const images = []
   const cards = []
+  const forwards = []   // 合并转发的 id（可能多条）
   let mentioned = false
   for (const seg of segments) {
     const type = seg?.type || ''
@@ -406,9 +460,18 @@ export function extractText(message, selfId) {
       const url = extractCardUrl(seg)
       if (url) cards.push(url)
       parts.push('')
+    } else if (type === 'forward') {
+      // 合并转发。⚠️ 真机实测：NapCat 的 get_msg 已经把转发内容**内联**在
+      //   data.content 里了，而 get_forward_msg(id) 对这类消息常直接失败
+      //   （"消息已过期或者为内层消息"）。所以先把 inline 内容带出去，别白跑一趟。
+      // 纯函数不碰网络：这里只做结构整理，取不到才由 index.js 回退请求。
+      const fid = String(d.id ?? d.resid ?? '')
+      const inline = Array.isArray(d.content) ? d.content : null
+      if (fid || inline) forwards.push({ id: fid, content: inline })
+      parts.push('[合并转发]')
     } else parts.push('') // face / 未知段：忽略
   }
-  return { text: parts.join('').trim(), mentioned, files, quotes, images, cards, rawSegments: segments }
+  return { text: parts.join('').trim(), mentioned, files, quotes, images, cards, forwards, rawSegments: segments }
 }
 
 // ============================================================
@@ -435,7 +498,7 @@ export function normalizeEvent(rawEvent, selfId, adminQq = null) {
   if (uid != null && selfId != null && String(uid) === String(selfId)) return null // 自己发的
   const isGroup = isNotice ? rawEvent.group_id != null : rawEvent.message_type === 'group'
   const x = isNotice
-    ? { text: '', mentioned: false, files: [], quotes: [], images: [], cards: [], rawSegments: [] }
+    ? { text: '', mentioned: false, files: [], quotes: [], images: [], cards: [], forwards: [], rawSegments: [] }
     : extractText(rawEvent.message ?? rawEvent.raw_message ?? '', selfId)
   const ev = createEvent({
     chatKey: isGroup ? `group:${rawEvent.group_id}` : `private:${uid}`,
@@ -457,6 +520,8 @@ export function normalizeEvent(rawEvent, selfId, adminQq = null) {
     files: x.files,
     cards: x.cards,
   })
+  // 合并转发的 id（可能多条）：before-turn 里再取内容（get_forward_msg 要打接口，不在纯函数里做）
+  if (Array.isArray(x.forwards) && x.forwards.length) ev._scratch.forwards = x.forwards
   if (isNotice) {
     ev._scratch.notice = {
       type: rawEvent.notice_type,
