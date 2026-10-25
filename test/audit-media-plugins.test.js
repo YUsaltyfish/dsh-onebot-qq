@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { extractUrls, stripUrls, extractCardUrl, fmtDuration } from '../plugins/link-parser/index.js'
-import { bootKernel, emitRaw, ADMIN_QQ, GROUP_ID, groupAtEvent } from './helpers.mjs'
+import { bootKernel, emitRaw, waitFor, ADMIN_QQ, GROUP_ID, groupAtEvent } from './helpers.mjs'
 
 // 1x1 PNG（最小合法图片字节）
 const PNG_B64 =
@@ -371,3 +371,62 @@ test('imagegen 额外字段：控制台「生图」页有该项（text 多行框
   assert.equal(c.type, 'text', '应是多行文本域')
   assert.equal(c.value, '')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 本机参考图：模型不知道 qq-refs 里有什么 → before-turn 列文件名；相对文件名能直接用
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('imagegen 参考图提示：每轮都列出参考图库（不靠关键词）', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
+  fs.writeFileSync(path.join(refDir, '大肥鱼_正面立绘.jpg'), PNG)
+  installFetchMock(t, () => jsonResponse({ data: [] }))
+  // 关键：这句话里**没有任何画图关键词**，提示照样要出现（让模型自己判断用不用）
+  await emitRaw(h.kernel, groupAtEvent({ text: '换成deepseek的大肥鱼', messageId: 401 }))
+  const prompt = await waitFor(() => h.ctx._prompts?.[0], { label: '普通轮进模型' })
+  const text = prompt.content[0].text
+  assert.ok(text.includes('[参考图库'), `应提示参考图库：${text.slice(-400)}`)
+  assert.ok(text.includes('大肥鱼_三视图.jpg') && text.includes('大肥鱼_正面立绘.jpg'), '应列出文件名')
+})
+
+test('imagegen 参考图：generate_image 传相对文件名 → 自动到 qq-refs 解析并以 multipart 上传', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '改成黑猫', image: '大肥鱼_三视图.jpg', target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+  const edit = calls.find((c) => c.url.endsWith('/images/edits'))
+  assert.ok(edit, '相对文件名应走图生图接口')
+  assert.equal(typeof edit.opts.body.get, 'function', 'edits 走 FormData')
+  assert.ok(edit.opts.body.get('image'), '应带上参考图文件')
+})
+
+test('imagegen 参考图：名字选错 → 报错里回图库清单（判断交给模型，不做代码匹配）', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  // 只写"大肥鱼"（不带文件名）→ 不做模糊匹配，报错并把图库清单交给模型自己重挑
+  await assert.rejects(
+    () => tool.execute({ prompt: '改成黑猫', image: '大肥鱼', target: `group:${GROUP_ID}` }),
+    (e) => /不在参考图库里/.test(e.message) && /大肥鱼_三视图\.jpg/.test(e.message),
+  )
+  assert.equal(calls.length, 0, '选错名字时不应发请求')
+  // 同一轮换成正确文件名就能过（选错不占冷却、不消耗次数）
+  const ok = await tool.execute({ prompt: '改成黑猫', image: '大肥鱼_三视图.jpg', target: `group:${GROUP_ID}` })
+  assert.equal(ok.ok, true)
+})
+
