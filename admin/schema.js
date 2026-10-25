@@ -720,6 +720,23 @@ export function collectSchema(kernel, rawConfig) {
   const raw = isPlainObject(rawConfig) ? rawConfig : (isPlainObject(kernel?.raw) ? kernel.raw : {})
   // 权限/门禁/文件/发图/头像 → 统一并到「其他」页（配置路径不变，只是换分组）
   const entries = allControls(kernel).map((e) => (OTHER_GROUPS.has(e.group) ? { ...e, group: OTHER_LABEL } : e))
+  // 「表情包」页顶部一行实时概况（数量/标签数随时变 → 插件现算后给，不塞进静态 schema 文字）。
+  // 插件没加载 / 没提供统计时静默跳过，控制台照常可用。
+  const stickerStats = (() => {
+    const fn = kernel?.shared?.stickerStats
+    if (typeof fn !== 'function') return null
+    try { return fn() } catch { return null }
+  })()
+  if (stickerStats?.ok) {
+    const at = entries.findIndex((e) => e.group === '表情包')
+    if (at >= 0) {
+      entries.splice(at, 0, {
+        key: 'info.stickers', group: '表情包', type: 'info', kind: 'plugin', plugin: 'stickers',
+        text: `当前表情库：${stickerStats.count} 张（其中 ${stickerStats.tagged} 张打过标签，共 ${stickerStats.tags} 个标签）｜上限 ${stickerStats.max} 张`
+          + `\n收表情（会写索引）：${stickerStats.collect ? '开 —— 会收新图并写 index.json' : '关 —— 库只读，只能挑现有图发'}`,
+      })
+    }
+  }
   const controls = entries.map((e) => controlView(e, raw, kernel))
   const groups = new Map() // group 名 -> Set<来源>（core / 插件 id），保持首次出现顺序
   for (const e of entries) {

@@ -106,7 +106,14 @@ export default {
   order: 80,
 
   configSchema: {
-    enabled: { type: 'bool', default: true, group: '表情包', label: '表情包库（群里自动收 + 挑图发）', hint: '开：自动收集群里的表情包，回话时可以挑一张发；关：不用表情包。' },
+    enabled: { type: 'bool', default: true, group: '表情包', label: '表情包库（总开关）', hint: '开：回话时可以挑图发、控制台能看库；关：整个表情功能停用（连挑图发也不行）。收新图另看「收表情（会写索引）」。' },
+    collect: {
+      type: 'bool', default: false, group: '表情包', label: '收表情（会写索引）',
+      hint: '**默认关**：库只读 —— 机器人照样能从现有表情里挑图发，但不收新图、不改 index.json（采集/打标/清理/记使用全停）。\n'
+        + '打开后才会：把群里新出现表情写进库、更新索引、记录使用次数。\n'
+        + '⚠️ 索引是插件内存里的副本，运行中改 index.json 会被写回覆盖（2026-10-20 标签全丢就是这原因）；'
+        + '**收表情/改库前先停 dsh-web → 改 → 再启动**，或干脆保持这个开关关着。',
+    },
     dir: { type: 'str', default: 'qq-stickers', group: '表情包', label: '库目录',
       hint: '相对路径由内核按数据目录解析；index.json 与图片都在这里。**只由本插件一条串行队列写**，别再让外部脚本写它' },
     max: { type: 'int', default: 200, min: 10, max: 2000, step: 10, group: '表情包', label: '库上限（张）',
@@ -131,6 +138,9 @@ export default {
     // 用的时候乘回毫秒。全文件只有这一处换算 —— 内核若改成存毫秒，只改这一行。
     const cooldownMs = () => Math.max(0, Number(cfg.offerCooldownMs) || 0) * 1000
     const maxPerTurn = () => Math.max(1, Number(cfg.maxPerTurn) || 1)
+    // 「收表情（会写索引）」：默认关 → 库只读。关着时**任何**写索引的路径都不跑
+    //（采集 / 打标 / 清理手删条目 / 挑图时记 uses），只保留读：挑图、清单、统计。
+    const collectOn = () => cfg.collect === true
 
     // 单写者队列。挂到 bot.state 上只是让内核/自检能看见并 await 它；队列本身进程内唯一。
     const queue = new AsyncQueue()
@@ -226,6 +236,7 @@ export default {
 
     /** 打标（tagging=true 时）：节流 + 与采集同一条队列（同一写者）。 */
     function maybeTag() {
+      if (!collectOn()) return // 写索引的路径：收表情关着就不跑
       if (!cfg.tagging || typeof bot.describeImage !== 'function') return
       const now = Date.now()
       if (now - lastTagAt < TAG_INTERVAL_MS) return
@@ -243,6 +254,7 @@ export default {
      * 留着条目就可能挑中一个磁盘上已经没有的路径；哈希进黑名单后同一张再被发进群也收不回来。
      */
     async function pruneLocked(s) {
+      if (!collectOn()) return // 清理=删条目+写索引，只读模式下跳过（条目先留着，不影响挑图）
       const now = Date.now()
       if (now - prunedAt < 60000) return
       prunedAt = now
@@ -251,41 +263,65 @@ export default {
       if (gone.length) log.info(`[表情] 清理 ${gone.length} 条「文件已被手删」的条目（标签一并删掉，hash 已拉黑）：#${gone.map((i) => i.id).join(' #')}`)
     }
 
+    /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 是上游 resolve 的事）。 */
+    const hitOf = (it, p) => ({ id: it.id, file: it.file, path: p, desc: it.desc || '', use: it.use || '', tags: it.tags || [], untagged: !it.tagged })
+
     /** 点名 `#N`：只认库里真有的那张，没找到就 null（**绝不换一张别的** —— 严格性是踩坑换来的）。 */
-    function pickById(s, q) {
+    function pickById(s, q, readOnly = false) {
       const n = Number(String(q).replace(/^#/, '')) // ⚠️ 必须剥 #：Number('#3') 是 NaN
       if (!Number.isFinite(n)) return null
       const it = readIndex(dir).items.find((x) => x.id === n)
       if (!it || it.blocked || it.adult || !it.file) return null
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null
-      if (it.tagged) { const r = s.resolve('#' + it.id); if (r && r.path) return r } // 打过标走上游 → 它记 uses/lastUsed
-      return { id: it.id, file: it.file, path: p, desc: it.desc || '', use: it.use || '', tags: it.tags || [], untagged: !it.tagged }
+      if (it.tagged && !readOnly) { const r = s.resolve('#' + it.id); if (r && r.path) return r } // 打过标走上游 → 它记 uses/lastUsed
+      return hitOf(it, p)
+    }
+
+    /**
+     * 只读关键词挑图：等价于上游 `resolve(词)` 的匹配规则，但**不写 uses/lastUsed**、不落盘。
+     * 只在「收表情（会写索引）」关着时用 —— 索引是只读的，绝不能在挑图这步把内存副本写回去。
+     */
+    function pickByKeywordReadOnly(q) {
+      const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      if (!usable.length) return null
+      const byTag = usable.filter((i) => (i.tags || []).includes(q))
+      const byText = usable.filter((i) => (i.desc && i.desc.includes(q)) || (i.use && i.use.includes(q)))
+      let pool = byTag.length ? byTag : byText
+      if (!pool.length) pool = q.length <= 1 ? usable : []
+      if (!pool.length) return null
+      const top = pool.slice().sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0)).slice(0, 5)
+      const it = top[Math.floor(Math.random() * top.length)]
+      const p = path.join(dir, it.file)
+      if (!fs.existsSync(p)) return null
+      return hitOf(it, p)
     }
 
     /**
      * 随便挑一张**可用**的（真随机，不防重复 —— 表情包重复用也是一种聊天方法）。
      * 池子包含"刚收未打标"的图：上游 usableItems 只算打过标的，照它挑会永远只用旧图（旧实现真踩过）。
      */
-    function pickRandom(s) {
+    function pickRandom(s, readOnly = false) {
       const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
       if (!usable.length) return null
       const it = usable[Math.floor(Math.random() * usable.length)]
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null // 手删的（prune 通常已清掉，这里只挡竞态）
-      if (it.tagged) { const r = s.resolve('#' + it.id); if (r && r.path) return r }
-      return { id: it.id, file: it.file, path: p, desc: '', use: '', tags: [], untagged: true }
+      if (it.tagged && !readOnly) { const r = s.resolve('#' + it.id); if (r && r.path) return r }
+      return hitOf(it, p)
     }
 
     /** 挑一张（在队列里跑）。关键词没命中 → 随便给一张；点名没找到 → 如实说没合适的。 */
     async function pickLocked(s, query) {
-      await pruneLocked(s)
+      const readOnly = !collectOn()
+      if (!readOnly) await pruneLocked(s) // 清理=写索引；只读模式不跑
       const q = String(query || '').trim()
       const pointed = /^#?\d{1,4}$/.test(q) // `#12` / `12` = 点名
       const wantsRandom = !q || q === '随机' || q === '随便'
-      let hit = pointed || wantsRandom ? null : s.resolve(q) // 关键词只在"打过标"的池里找
-      if ((!hit || !hit.path) && pointed) hit = pickById(s, q)
-      if ((!hit || !hit.path) && !pointed) hit = pickRandom(s)
+      let hit = pointed || wantsRandom ? null
+        : (readOnly ? pickByKeywordReadOnly(q) : s.resolve(q)) // 关键词只在"打过标"的池里找
+      if ((!hit || !hit.path) && pointed) hit = pickById(s, q, readOnly)
+      if ((!hit || !hit.path) && !pointed) hit = pickRandom(s, readOnly)
       if (!hit || !hit.path) return { ok: false, reason: '没合适的' }
       return { ok: true, id: hit.id, path: hit.path, untagged: !!hit.untagged, desc: hit.desc || '', use: hit.use || '', tags: hit.tags || [] }
     }
@@ -305,6 +341,24 @@ export default {
 
     /** 随机池大小（只读盘，不排队）：掷骰前置判断"挑得到才提示"。 */
     const pickableCount = () => readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file).length
+
+    /** 控制台「表情包」页顶部那行实时概况（数量随时变 → 由这里现算，不写进 schema 静态文字）。 */
+    bot.shared.stickerStats = () => {
+      const items = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      const tagged = items.filter((i) => i.tagged)
+      const tags = new Set()
+      for (const it of tagged) for (const t of (Array.isArray(it.tags) ? it.tags : [])) tags.add(String(t || '').trim())
+      tags.delete('')
+      return {
+        ok: true,
+        dir,
+        count: items.length,
+        tagged: tagged.length,
+        tags: tags.size,
+        collect: collectOn(),
+        max: Math.max(1, Number(cfg.max) || 200),
+      }
+    }
 
     /** 从上下文里找一个能对上的表情标签（给"主动想起"的提示用；找不到返回 ''） */
     function matchContextTag(ev) {
@@ -342,6 +396,7 @@ export default {
     // ── 入口 ①：旁路采集（fire-and-forget，任何异常只记日志） ──────────────────
     bot.on('passive-tap', (ev) => {
       if (cfg.enabled === false) return
+      if (!collectOn()) return // 收表情开关关着 = 库只读：不采集、不写索引（控制台「表情包 → 收表情」）
       if (cfg.collectGroupsOnly !== false && !ev.isGroup) return
       // 直接从**原始段**读协议字段：这条判据是我们自己钉的，不借道适配器算好的 ev.images[].isSticker（防它改宽）
       const segs = (ev.rawSegments || []).filter((s) => s && s.type === 'image' && isStickerSeg(s))
