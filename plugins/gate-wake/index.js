@@ -336,6 +336,24 @@ async function handlePoke(bot, ev, notice) {
   await bot.deliver(ev.chatKey, pickLine(bot, 'poke', DEFAULT_POKE))
 }
 
+const RECALL_INTERNAL = /Timeout|NTEvent|EventRet|decode failed|recallMsg|result\s*[:=]?\s*7/i
+
+/**
+ * 撤回失败时给群里看的话术：**绝不回显 NapCat 原始报错**（NTEvent/EventRet/decode failed…）。
+ * 2026-10-23 15:37 线上事故：适配器把 `wording` 原样拼进 `res.msg`，gate-wake 又原样贴进群里。
+ */
+function recallFailureNote(res) {
+  const raw = String(res?.raw || '')
+  const msg = String(res?.msg || '')
+  if (RECALL_INTERNAL.test(raw) || RECALL_INTERNAL.test(msg)) {
+    return '撤回没成功：撤回接口超时/返回异常（这条可能已经过期、被删了，或 NapCat 临时抽风）'
+  }
+  if (/超时/.test(msg)) return '撤回没成功：撤回接口超时（这条可能已经过期，或 NapCat 临时故障）'
+  if (/权限|permission|denied/i.test(msg)) return '撤回没成功：本机没有权限撤这条消息'
+  if (msg && msg.length <= 80 && !/[\n{}]/.test(msg)) return msg // 适配器给的人话
+  return '无法撤回（可能不是本机能撤的消息、没权限，或超过时限）'
+}
+
 /**
  * "引用一条消息 + 说撤回" → 撤那一条。返回 true = 已处理（调用方直接 return）。
  * ⚠️ 同一条只试一次：以前批量撤回时对同一条反复重试, 每条都超时, 把群刷爆了。
@@ -360,10 +378,12 @@ async function tryRecall(bot, ev) {
       bot.log.info(`已撤回消息 (${ev.chatKey}, rid=${ev.replyToId})`)
       await bot.deliver(ev.chatKey, '✅ 已撤回那条消息~')
     } else {
-      await bot.deliver(ev.chatKey, `🙅 ${res?.msg || '无法撤回（可能非本机可撤消息/无权限/超过时限）'}\u3000剩下还超时内的可以继续引用着撤～`)
+      bot.log.warn(`[撤回] ${ev.chatKey} rid=${ev.replyToId} 失败：${String(res?.raw || res?.msg || '').slice(0, 500)}`)
+      await bot.deliver(ev.chatKey, `🙅 ${recallFailureNote(res)}\u3000剩下还超时内的可以继续引用着撤～`)
     }
   } catch (e) {
-    await bot.deliver(ev.chatKey, `🙅 无法撤回: ${e.message}\u3000剩下还超时内的可以继续引用着撤～`)
+    bot.log.warn(`[撤回] ${ev.chatKey} rid=${ev.replyToId} 请求异常：${String(e?.message || e).slice(0, 500)}`)
+    await bot.deliver(ev.chatKey, `🙅 ${recallFailureNote({ raw: e?.message })}\u3000剩下还超时内的可以继续引用着撤～`)
   }
   ev.stopped = true
   ev.stopReason = 'gate-wake:recall'

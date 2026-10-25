@@ -47,6 +47,40 @@ function protocolError(protocol, message) {
   return new Error(`生图(${protocol}协议)失败：${message}`)
 }
 
+/**
+ * 控制台的「额外请求字段」→ 对象。
+ * 空/未填 = {}（完全不加字段，行为与旧版一致）；非法 JSON 直接报错（宁可不发，也不静默失效）。
+ */
+function parseExtraBody(raw) {
+  const text = String(raw == null ? '' : raw).trim()
+  if (!text || text === '{}') return {}
+  let parsed
+  try { parsed = JSON.parse(text) } catch (e) {
+    throw new Error(`「额外请求字段」不是合法 JSON（${e.message}）：${text.slice(0, 120)}`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('「额外请求字段」必须是 JSON 对象，例如 {"watermark": false}')
+  }
+  const out = {}
+  for (const [k, v] of Object.entries(parsed)) {
+    if (v === undefined) continue
+    out[k] = v
+  }
+  return out
+}
+
+/** multipart 追加：对象/数组按 JSON 串，布尔用 'true'/'false'（与 OpenAI 兼容接口的习惯一致）。 */
+function appendFormFields(form, extras) {
+  for (const [k, v] of Object.entries(extras || {})) {
+    if (v === undefined || v === null) continue
+    const vals = Array.isArray(v) ? v : [v]
+    for (const one of vals) {
+      if (one === undefined || one === null) continue
+      form.append(k, typeof one === 'object' ? JSON.stringify(one) : String(one))
+    }
+  }
+}
+
 let tmpSeq = 0
 
 /** 生成快照存平台临时目录（用完由内核 best-effort 清理）；按真实文件头定扩展名 */
@@ -174,7 +208,7 @@ async function materializeChatImage(found, timeoutMs, tmp, protocol) {
  * 为什么需要：部分中转站只暴露 chat/completions 出图（models 里给的是 image 模型但走 chat 接口）。
  * 失败一律抛 `生图(openai-chat协议)失败：…`（调用方统一代答 + 禁止重试）。
  */
-async function chatGenerate({ prompt, refs, timeoutMs, creds, tmp }) {
+async function chatGenerate({ prompt, refs, extras = {}, timeoutMs, creds, tmp }) {
   const protocol = 'openai-chat'
   const base = String(creds.baseUrl || '').replace(/\/+$/, '')
   if (!base) throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
@@ -184,7 +218,7 @@ async function chatGenerate({ prompt, refs, timeoutMs, creds, tmp }) {
     const mediaType = detectImageMediaType(buf)
     content.push({ type: 'image_url', image_url: { url: `data:${mediaType};base64,${buf.toString('base64')}` } })
   }
-  const body = { model: creds.model, stream: false, messages: [{ role: 'user', content }] }
+  const body = { model: creds.model, stream: false, messages: [{ role: 'user', content }], ...extras }
   const what = refs.length ? `图生图(${refs.length}张参考)` : '生图'
   let res
   try {
@@ -246,13 +280,13 @@ async function gptGenerate(opts) {
 }
 
 /** openai-images 协议：文生图 JSON，图生图 multipart（重复 `image` 字段 = 多张参考，顺序即传入顺序） */
-async function imagesGenerate({ prompt, refs, size, timeoutMs, creds, tmp }) {
+async function imagesGenerate({ prompt, refs, size, extras = {}, timeoutMs, creds, tmp }) {
   const base = String(creds.baseUrl || '').replace(/\/+$/, '')
   if (!base) throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
   const headers = { authorization: `Bearer ${creds.apiKey}` }
   if (!refs.length) {
-    const body = { model: creds.model, prompt, n: 1 }
-    if (size) body.size = size
+    // 额外字段最后并进去：用户显式写的优先（比如关水印 {"watermark": false}）
+    const body = { model: creds.model, prompt, n: 1, ...(size ? { size } : {}), ...extras }
     const res = await fetchWithTimeout(`${base}/images/generations`, {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body),
     }, timeoutMs, '生图')
@@ -263,6 +297,7 @@ async function imagesGenerate({ prompt, refs, size, timeoutMs, creds, tmp }) {
   form.append('prompt', prompt)
   form.append('n', '1')
   if (size) form.append('size', size)
+  appendFormFields(form, extras)
   refs.forEach((real, i) => {
     const buf = fs.readFileSync(real)
     const mediaType = detectImageMediaType(buf)
@@ -333,6 +368,16 @@ export default {
     cooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 60, group: '生图', label: '全局冷却', hint: '两次生图之间至少隔多久（所有群共用），防止连刷烧额度。' },
     ackCooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 30, group: '生图', label: '「在画了」冷却', hint: '同一会话几秒内只说一次「在画了」，避免每张图都刷这句。' },
     timeoutMs: { type: 'int', unit: '秒', scale: 1000, default: 240, group: '生图', label: '生图超时', hint: '单次生图最多等多久；超时就放弃并回一句失败说明。' },
+    extraBody: {
+      type: 'text', group: '生图', label: '额外请求字段（JSON）', default: '',
+      hint: '不同平台/中转站的请求字段不一样，这里可以自己补。写一个 JSON 对象，留空 = 不加任何额外字段。\n'
+        + '· 文生图：并进 JSON 请求体（可覆盖 model/prompt/size/n 等）；\n'
+        + '· 图生图：逐项追加为 multipart 字段（布尔/数字会转成字符串，数组 = 重复同名字段）；\n'
+        + '· openai-chat 协议：并进 /chat/completions 的 JSON 顶层。\n'
+        + '示例：关掉服务端水印（sensenova／商汤默认开）→ {"watermark": false}；\n'
+        + '　　　别的平台要画质/风格 → {"quality": "hd", "style": "vivid"}。\n'
+        + '注释这种写法不支持（不是合法 JSON 会直接报错、不发请求）。',
+    },
     refDir: { type: 'str', default: 'qq-refs', group: '生图', label: '角色参考图目录', hint: '角色参考图放这个目录（图生图用）；留空 = <数据目录>/qq-refs。' },
     avatarDir: {
       type: 'str', default: 'qq_avatars', group: '头像', label: '头像缓存目录',
@@ -367,6 +412,8 @@ export default {
     const cdMs = () => toMs(cfg.cooldownMs, 60000)
     const ackCdMs = () => toMs(cfg.ackCooldownMs, 30000)
     const timeoutMs = () => toMs(cfg.timeoutMs, 240000)
+    // 额外请求字段：每次现读（控制台改完下一张就生效）；非法 JSON 由 parseExtraBody 抛清晰错误
+    const extrasNow = () => parseExtraBody(cfg.extraBody)
     const inCooldown = () => lastGenAt > 0 && Date.now() - lastGenAt < cdMs()
 
     // 句池取不到时按兜底句发 —— 不能因为句池文件坏了就沉默
@@ -460,6 +507,8 @@ export default {
           throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
         }
         const size = chooseSize(args.size, refs)
+        // 额外请求字段先解析：JSON 写错要**立刻**报错（不占冷却、也不先说「在画了」）
+        const extras = extrasNow()
 
         // ① 全局冷却：被挡的**不生成、不排队、不代答**，只把「被挡 + 还剩多久 + 一句参考话」交回模型
         if (inCooldown()) {
@@ -486,7 +535,9 @@ export default {
         const t0 = Date.now()
         let file
         try {
-          file = await gptGenerate({ prompt, refs, size, timeoutMs: timeoutMs(), creds, tmp: bot.core?.tmp })
+          file = await gptGenerate({
+            prompt, refs, size, extras, timeoutMs: timeoutMs(), creds, tmp: bot.core?.tmp,
+          })
         } catch (e) {
           log.error(`[生图] ${refs.length ? '图生图' : '生图'}失败 (${Date.now() - t0}ms, prompt=${prompt.slice(0, 60)}): ${e.message}`)
           // ③ **失败就到此为止**：本插件自己如实说一句（零 token），并在错误里写明"已代答、别补话、别重试"。
@@ -520,7 +571,7 @@ export default {
         }
         log.info(`[生图] (${out.protocol}) ${out.mode === 'edit' ? '图生图' : '生图'}完成 (${out.ms}ms, ${out.bytes}B, `
           + `请求尺寸=${size}, 实际=${out.actualSize || '?'}${refs.length ? `, ref=${refs.join(' + ')}` : ''}, `
-          + `prompt=${prompt.slice(0, 60)}) → ${file}`)
+          + `${Object.keys(extras).length ? `额外字段=${Object.keys(extras).join(',')}, ` : ''}prompt=${prompt.slice(0, 60)}) → ${file}`)
         if (!canReply) return out
 
         const r = await bot.sendMedia(genTarget, cqImage(file), args.text ? String(args.text) : '')

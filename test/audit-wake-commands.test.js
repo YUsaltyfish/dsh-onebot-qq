@@ -552,3 +552,43 @@ test('FILE-10 策略改成「过门禁都下」→ 没叫它也落盘（passive-
   await sleep(150)
   assert.equal(fs.readdirSync(uploadDir).length, 1, '「都下」策略下没叫也会落盘')
 })
+
+test('WAKE-RECALL 撤回失败：不把 NapCat 原始报错回显到群里（2026-10-23 事故回归）', async (t) => {
+  const h = await boot(t)
+  h.kernel.napcat.recall = async () => ({
+    ok: false,
+    raw: 'Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:\n{"result":7,"errMsg":"decode failed!"}',
+    msg: '撤回失败: Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg EventRet:\n{"result":7,"errMsg":"decode failed!"}',
+  })
+  await emitRaw(h.kernel, {
+    post_type: 'message',
+    message_type: 'group',
+    group_id: GROUP_ID,
+    user_id: MEMBER_QQ,
+    message_id: 31,
+    sender: { user_id: MEMBER_QQ, nickname: '群友' },
+    message: [{ type: 'reply', data: { id: '778' } }, { type: 'text', data: { text: '撤回这条' } }],
+  })
+  await waitFor(() => h.sent.length >= 1, { label: '撤回失败回执' })
+  const wire = h.sent.at(-1).wire
+  assert.ok(wire.includes('撤回没成功'), `应给人话回执：${wire}`)
+  for (const bad of ['NTEvent', 'EventRet', 'decode failed', 'recallMsg', 'onMsgInfoListUpdate']) {
+    assert.equal(wire.includes(bad), false, `不应回显内部报错：${bad}`)
+  }
+})
+
+test('CMD-7b /history 上限 500：请求条数被夹到 500，默认仍是 50', async (t) => {
+  const h = await boot(t)
+  const asked = []
+  h.kernel.napcat.groupHistory = async (gid, count) => {
+    asked.push(count)
+    return [{ message_id: 902, time: Math.floor(Date.now() / 1000) - 60, sender: { user_id: OTHER_QQ, nickname: '群友' }, message: [{ type: 'text', data: { text: '历史一条' } }] }]
+  }
+  await emitRaw(h.kernel, groupAtEvent({ text: '/history 9999', messageId: 61 }))
+  await waitFor(() => asked.length >= 1, { label: '/history 上限' })
+  assert.equal(asked[0], 502, `超过上限应夹到 500（请求 500+2），实际 ${asked[0]}`)
+
+  await emitRaw(h.kernel, groupAtEvent({ text: '/history', messageId: 62 }))
+  await waitFor(() => asked.length >= 2, { label: '/history 默认' })
+  assert.equal(asked[1], 52, `不带参数应默认 50（请求 50+2），实际 ${asked[1]}`)
+})

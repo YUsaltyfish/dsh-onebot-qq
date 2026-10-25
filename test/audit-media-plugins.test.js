@@ -280,3 +280,94 @@ test('avatar：QQ 头像下载 → 缓存复用（第二次不再下载）', asy
   await tool.execute({ target: `group:${GROUP_ID}`, user: '50001' })
   assert.equal(calls, 1, '缓存命中不重复下载')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 额外请求字段（extraBody，JSON）：不同平台字段不同，由用户在控制台自己补
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('imagegen 额外字段：留空时请求体与旧版一致（不多发任何字段）', async (t) => {
+  const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  const body = JSON.parse(String(calls[0].opts.body))
+  assert.deepEqual(Object.keys(body).sort(), ['model', 'n', 'prompt', 'size'], `不应有多余字段：${Object.keys(body)}`)
+  assert.equal('watermark' in body, false)
+})
+
+test('imagegen 额外字段：{"watermark": false} → 文生图 JSON 带上（sensenova 关水印）', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { extraBody: '{"watermark": false}' },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  const gen = calls.find((c) => c.url.endsWith('/images/generations'))
+  assert.equal(JSON.parse(String(gen.opts.body)).watermark, false)
+})
+
+test('imagegen 额外字段：任意平台字段（quality/style/数字）都能并进 JSON 并覆盖默认值', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { extraBody: '{"quality": "hd", "style": "vivid", "n": 2}' },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  const body = JSON.parse(String(calls[0].opts.body))
+  assert.equal(body.quality, 'hd')
+  assert.equal(body.style, 'vivid')
+  assert.equal(body.n, 2, '用户写的值应覆盖默认 n=1')
+})
+
+test('imagegen 额外字段：图生图逐项追加到 multipart（布尔转字符串）', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { extraBody: '{"watermark": false, "quality": "hd"}' },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  const ref = path.join(refDir, 'ref.png')
+  fs.writeFileSync(ref, PNG)
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await tool.execute({ prompt: '改成黑猫', image: ref, target: `group:${GROUP_ID}` })
+  const edit = calls.find((c) => c.url.endsWith('/images/edits'))
+  assert.ok(edit, '应请求 /images/edits')
+  assert.equal(edit.opts.body.get('watermark'), 'false', '布尔应转成字符串 false')
+  assert.equal(edit.opts.body.get('quality'), 'hd')
+  assert.equal(edit.opts.body.get('model'), 'gpt-image-2')
+})
+
+test('imagegen 额外字段：JSON 写错 → 立刻报清晰错误、不打上游、不占冷却', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { extraBody: '{watermark: false' }, // 不是合法 JSON
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` }), /额外请求字段.*JSON/)
+  assert.equal(calls.length, 0, 'JSON 错不能打上游')
+  assert.equal(h.sent.some((s) => s.kind === 'msg'), false, '配置错不代答（不该先说「在画了」）')
+
+  // 修好配置后立刻能画（说明没占冷却）
+  h.raw.pluginConfig.imagegen.extraBody = '{"watermark": false}'
+  await h.kernel.applyRuntimeConfig(h.raw)
+  const r = await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+})
+
+test('imagegen 额外字段：控制台「生图」页有该项（text 多行框，归 imagegen）', async (t) => {
+  const h = await bootImagegen(t)
+  const { collectSchema } = await import('../admin/schema.js')
+  const schema = collectSchema(h.kernel, h.raw)
+  const c = (schema.controls || []).find((x) => x.key === 'imagegen.extraBody')
+  assert.ok(c, '控制台应有 imagegen.extraBody')
+  assert.equal(c.plugin, 'imagegen')
+  assert.equal(c.group, '生图')
+  assert.equal(c.type, 'text', '应是多行文本域')
+  assert.equal(c.value, '')
+})

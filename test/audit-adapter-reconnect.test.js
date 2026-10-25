@@ -53,3 +53,29 @@ test('NapCat 适配器：重连/重复触发后只保留一条 WS（防双回复
   await sleep(300)
   assert.equal(fake.clientCount, 1, `重新 connect 后应只有 1 条 WS，实际 ${fake.clientCount}`)
 })
+
+test('NapCat 适配器：撤回失败不把原始报错放进 msg（raw 只供日志）', async () => {
+  const adapter = new NapCatAdapter({
+    httpUrl: 'http://127.0.0.1:9', log: quiet, avatarDir: path.join(os.tmpdir(), 'qqbot-recall-avatar'),
+  })
+  adapter._post = async () => ({
+    status: 200,
+    data: {
+      status: 'failed',
+      wording: 'Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:\n{\n    "result": 7,\n    "errMsg": "decode failed!"\n}',
+    },
+  })
+  const r = await adapter.recall(123)
+  assert.equal(r.ok, false)
+  assert.equal(/NTEvent|EventRet|decode failed|Timeout|recallMsg/.test(r.msg), false, `msg 不应含内部报错：${r.msg}`)
+  assert.ok(String(r.raw).includes('NTEvent'), 'raw 保留原文给日志/排查')
+
+  adapter._post = async () => {
+    const e = new Error('The operation was aborted due to timeout')
+    e.name = 'TimeoutError'
+    throw e
+  }
+  const r2 = await adapter.recall(124)
+  assert.equal(r2.ok, false)
+  assert.equal(/timeout|aborted|NTEvent/i.test(r2.msg), false, `超时 msg 也不回显原始错误：${r2.msg}`)
+})

@@ -39,6 +39,21 @@ function chatTarget(chatKey) {
   return { type: m[1], id: Number(m[2]) }
 }
 
+/**
+ * 撤回失败的人话：NapCat 的原始报错（NTEvent / EventRet / decode failed…）**只进日志**，
+ * 绝不回显到 QQ 出站或模型上下文——2026-10-23 线上出过整段报错被当回复发出的问题。
+ */
+function recallFailureText(raw, timedOut = false) {
+  const s = String(raw || '')
+  if (timedOut || /Timeout|NTEvent|EventRet|decode failed|recallMsg/i.test(s)) {
+    return '撤回失败：撤回接口超时/返回异常（消息可能已过期、已删除，或 NapCat 临时故障）'
+  }
+  if (/权限|permission|denied|no\s+privilege|not\s+(the\s+)?(admin|owner)/i.test(s)) {
+    return '撤回失败：本机没有权限撤这条消息'
+  }
+  return '撤回失败：NapCat 拒绝了这次撤回（可能已过期或消息不存在）'
+}
+
 export class NapCatAdapter {
   /**
    * @param {{wsUrl?: string, wsToken?: string, httpUrl: string, httpToken?: string, selfId?: number|string|null, log?: object,
@@ -362,9 +377,14 @@ export class NapCatAdapter {
   async recall(messageId) {
     try {
       const { data } = await this._post('delete_msg', { message_id: Number(messageId) }, 15000)
-      return data.status === 'ok' ? { ok: true } : { ok: false, msg: '撤回失败: ' + (data?.wording || data?.message || 'Recall failed') }
+      if (data.status === 'ok') return { ok: true }
+      const raw = String(data?.wording || data?.message || '')
+      this.log.warn(`[撤回] 失败 (message_id=${messageId}): ${raw.slice(0, 500) || '（无原文）'}`)
+      return { ok: false, raw, msg: recallFailureText(raw) }
     } catch (e) {
-      return { ok: false, msg: e.name === 'TimeoutError' ? '撤回超时' : `撤回请求失败: ${e.message}` }
+      const raw = String(e?.message || e)
+      this.log.warn(`[撤回] 请求异常 (message_id=${messageId}): ${raw.slice(0, 500)}`)
+      return { ok: false, raw, msg: recallFailureText(raw, e?.name === 'TimeoutError') }
     }
   }
 

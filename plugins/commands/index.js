@@ -16,8 +16,8 @@
 
 /** /history 不带参数时拉多少条（旧 HISTORY_DEFAULT） */
 const HISTORY_DEFAULT = 50
-/** /history 一次最多拉多少条（防刷屏/烧 token，旧 HISTORY_MAX） */
-const HISTORY_MAX = 200
+/** /history 一次最多拉多少条（防刷屏/烧 token，旧 HISTORY_MAX；2026-10-24 由 200 放宽到 500） */
+const HISTORY_MAX = 500
 
 /** OneBot 历史消息 → 一行文本。只给 /history 用：容错 segment 数组 / CQ 字符串两种形态。 */
 function historyLine(m) {
@@ -287,7 +287,7 @@ export default {
     // ── /history（主人）：**不是纯回复** —— 群历史进 ev.historyBlock，放行给模型 ──
     define('history', {
       permission: 'master',
-      description: '拉本群最近 N 条记录进模型回答（仅主人；默认 50，上限 200）',
+      description: '拉本群最近 N 条记录进模型回答（仅主人；默认 50，上限 500）',
       async run(ev, args) {
         if (await denyUnlessMaster(ev, 'history')) return
         if (!ev.isGroup) {
