@@ -463,6 +463,27 @@ export default {
       return '1024x1024'
     }
 
+    // ── 入口 ⓪：把本机参考图库告诉模型（QQ 线没有文件工具，不告诉它就"看不见"）──
+    // 不做关键词门槛：说"换成 deepseek 的大肥鱼"这种话里可能一个画图词都没有，
+    // 让模型自己判断要不要用参考图；库不大，一行名字 ≈ 几十 token，比误判漏掉划算。
+    const REF_EXT_RE = /\.(png|jpe?g|webp|gif)$/i
+    const refNamesNow = () => {
+      try {
+        return fs.readdirSync(refDirNow())
+          .filter((n) => REF_EXT_RE.test(n))
+          .filter((n) => { try { return fs.statSync(path.join(refDirNow(), n)).isFile() } catch { return false } })
+          .sort((a, b) => a.localeCompare(b, 'zh'))
+          .slice(0, 20)
+      } catch { return [] }
+    }
+    bot.on('before-turn', (ev) => {
+      if (!ev.wake || cfg.enabled === false) return
+      const names = refNamesNow()
+      if (!names.length) return
+      ev.hint.push(`[参考图库:${names.join('、')} —— 要改图/生图时从里面挑文件名传给 generate_image 的 image，`
+        + '多张按顺序 = 图1、图2；库里没有合适的就先跟用户要图]')
+    })
+
     bot.registerTool('generate_image', {
       description:
         '按提示词生成或修改图片。不传 image = 文生图；传了 image = 图生图/改图，以那张图为参考，'
@@ -473,7 +494,8 @@ export default {
       parameters: {
         prompt: { type: 'string', required: true, description: '画面描述（提示词），越具体越好；末尾按提示词纪律带去噪/去涂抹的话。' },
         image: {
-          description: '图生图的参考图：本地图片绝对路径（多张可传字符串数组或用英文逗号分隔，按顺序 = 图1、图2）。不传就是文生图',
+          description: '图生图的参考图：本地图片绝对路径，或**参考图库里的文件名**（每轮提示里有 `[参考图库:…]` 的清单，从里面挑，如 `大肥鱼_三视图.jpg`）。'
+            + '多张传字符串数组（按顺序 = 图1、图2）；不传就是文生图',
           oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
         target: { type: 'string', description: '会话目标 group:123456 或 private:123456；传了就生成后直接发过去，不传只返回本地文件路径' },
@@ -498,9 +520,21 @@ export default {
           return raw.split(/[\r\n,]+/)
         }
         const rawImgs = asRefList(args.image)
-        const refs = rawImgs
-          .map((x) => String(x || '').trim()).filter(Boolean)
-          .map((p) => resolveAllowedImage(p, { ...cfg, refDir: refDirNow(), avatarDir: avatarDirNow() }, bot))
+        const refRoots = { ...cfg, refDir: refDirNow(), avatarDir: avatarDirNow() }
+        const refLib = refNamesNow()
+        const refs = []
+        for (const item of rawImgs.map((x) => String(x || '').trim()).filter(Boolean)) {
+          try {
+            refs.push(resolveAllowedImage(item, refRoots, bot))
+          } catch (e) {
+            // 不做代码侧匹配：把图库清单交回模型，让它自己挑（选错不占冷却：这一步在冷却之前）
+            if (path.isAbsolute(item)) throw e
+            throw new Error(`参考图「${item}」不在参考图库里（可用：${refLib.join('、') || '(空)'}）`
+              + '；请从图库里挑文件名再调一次')
+          }
+        }
+        // 同一张被重复列到时只上一次
+        refs.splice(0, refs.length, ...new Set(refs))
 
         const creds = credsNow()
         if (!creds.apiKey || !creds.baseUrl) {
