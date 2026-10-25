@@ -529,6 +529,10 @@ export function normalizeEvent(rawEvent, selfId, adminQq = null) {
   if (!rawEvent) return null
   const isNotice = rawEvent.post_type === 'notice'
   if (rawEvent.post_type !== 'message' && !isNotice) return null // meta_event / lifecycle / message_sent
+  // 既没有群号也没有 user_id 的 notice = 无法归线的系统事件（点赞通知 profile_like / bot_offline…）：
+  // 直接丢。否则 chatKey 会变成 `private:undefined`，被"私聊永远算被叫"放行 → 空对话进模型、
+  // 还建出 private:undefined 的 DSH 会话（2026-10-25 13:57 事故：两条点赞通知 = 两个空对话）。
+  if (isNotice && rawEvent.user_id == null && rawEvent.group_id == null) return null
   const uid = rawEvent.user_id
   if (uid != null && selfId != null && String(uid) === String(selfId)) return null // 自己发的
   const isGroup = isNotice ? rawEvent.group_id != null : rawEvent.message_type === 'group'

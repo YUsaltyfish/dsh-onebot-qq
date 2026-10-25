@@ -493,6 +493,10 @@ export default {
     // ── wake：唤醒判定（顺序:@ → 引用本机 → 接续窗口 → 关键词） ──
     bot.on('wake', async (ev) => {
       if (ev.stopped || ev.wake) return // 别的插件（/history、自发接话）已经定了就不抢
+      // notice 永远不是"聊天正文"（戳一戳/撤回/入群/点赞通知…）：绝不进模型。
+      // 戳一戳在 intercept 已处理并 stop；其余 notice 到这里直接放弃。
+      // （曾经漏了这条：点赞通知没有 user_id/group_id → 被下面"私聊永远算被叫"放行，造出空对话）
+      if (ev._scratch?.notice) return
 
       // 私聊永远算被叫
       if (!ev.isGroup) {

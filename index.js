@@ -1037,6 +1037,14 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 入站：一条消息走完全部阶段，末端交给 agent ───────────────
   const runTurn = async (ev) => {
     if (!ev.wake) return
+    // 第二道防线：chatKey 必须是 group:<数字> / private:<数字>。异常事件（如无身份的 notice）
+    // 曾造出 `private:undefined` 会话；到这里一律丢弃并留一行错误日志，绝不建会话。
+    if (!/^(group|private):\d{1,12}$/.test(String(ev.chatKey || ''))) {
+      const notice = ev._scratch?.notice
+      log.error(`丢弃非法 chatKey 的入站：chatKey=${JSON.stringify(ev.chatKey)}`
+        + `${notice ? ` notice=${notice.type}/${notice.subType}` : ''}（不建会话、不进模型）`)
+      return
+    }
     // Pipeline.run 已经创建了 ev.turnCtx 并放入 turnStore
     const turnCtx = ev.turnCtx
     turnCtx.quoteAfterMsgs = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
