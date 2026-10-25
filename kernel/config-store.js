@@ -88,6 +88,7 @@ export function defaultConfig() {
           splitProbability: 0.5,
           splitMinLen: 12,
           splitDelayMs: 1000,
+          splitMaxParts: 3,
           stickerEnabled: true,
           stickerProbability: 0.8,
         },
@@ -172,6 +173,7 @@ export function migrateLegacyConfig(old = {}) {
   if (Number(style.splitProbability) >= 0) pv.splitReplyProbability = Math.round(Number(style.splitProbability) * 100)
   if (Number(style.splitMinLen) > 0) pv.splitReplyMinLen = Number(style.splitMinLen)
   if (Number(style.splitDelayMs) >= 0) pv.splitReplyDelayMs = Math.round(Number(style.splitDelayMs))
+  if (Number(style.splitMaxParts) >= 2) pv.splitReplyMaxParts = Math.min(4, Math.round(Number(style.splitMaxParts)))
   if (bridge.quoteEnforce !== undefined) pv.quoteEnforce = Boolean(bridge.quoteEnforce)
   if (Object.keys(pv).length) pluginConfig['persona-voice'] = pv
 

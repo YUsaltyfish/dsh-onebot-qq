@@ -283,6 +283,7 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
       // 只有"模型通过 send_message 工具发的回复"才允许内核自动挂引用。
       // 命令 / 答应声 / 冷却 / 生图失败提示等出站没有自己的回合上下文，挂引用只会引错人。
       autoQuote: opts.autoQuote === true,
+      fromTool: opts.fromTool === true, // 模型经 send_message 发的正文（拆条等"像真人"的加工只对它做）
     }
     for (const fn of [...hooks]) {
       try { await fn(out) } catch (e) { log.error(`[出站] decorate 钩子异常(忽略): ${e.stack || e.message}`) }

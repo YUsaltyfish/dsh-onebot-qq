@@ -90,7 +90,11 @@ export function createEvent(init) {
  * 工具内怎么拿到它：内核把它挂在 `AsyncLocalStorage`，工具调用时自动可取（见 kernel/state-pipeline.js）。
  */
 export function createTurnContext(ev) {
+  // 插件可在更早的阶段（before-turn 等）把自己的标记放进 `ev._scratch.turnExtras`，
+  // 等 TurnContext 建出来时并进去 —— 这样插件不用为了"本轮内的状态"去改内核的字段表。
+  const extras = ev?._scratch?.turnExtras
   return {
+    ...(extras && typeof extras === 'object' ? extras : {}),
     turnId: `${ev.chatKey}#${Date.now().toString(36)}`,
     chatKey: ev.chatKey,
     triggerMsgId: ev.messageId,
@@ -115,6 +119,7 @@ export function createTurnContext(ev) {
  * @property {'plain'|'reply'|'at'|'forward'} mode  最终发送形态
  * @property {boolean} [noForward]   true = 不许套长文卡片（主动接话轮用）
  * @property {object|null} turnCtx  本轮上下文（主动接话轮 = wakeKind 'proactive'）
+ * @property {boolean} fromTool      true = 模型经 send_message 发的正文（拆条等加工只对它做）
  */
 
 /**

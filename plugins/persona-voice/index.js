@@ -20,7 +20,7 @@
  */
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { pickSplitPoint } from '../../kernel/format.js'
+import { splitBubbles } from '../../kernel/format.js'
 import { stripBom } from '../../platform/atomic.js'
 import { activePersona as resolveActivePersona, personaSources } from '../../platform/persona-ref.js'
 
@@ -55,6 +55,12 @@ const LINES_FALLBACK = {
 }
 /** 内置兜底覆盖的五节；linesSource.effective 也按它们 + 文件里出现的节来报 */
 const LINES_SECTIONS = Object.keys(LINES_FALLBACK)
+
+/**
+ * 拆条只针对**聊天短回复**：超过这个字数就交给内核按长文处理（套合并转发卡片 / 单条长消息）。
+ * 不加这道闸的话，几百字的长回复会被拆成两三条平铺，逃掉"长文卡片"这条既有行为（测试踩到）。
+ */
+const SPLIT_MAX_CHARS = 120
 
 /** 解析句池文本 → { 节名: [句子] }（纯函数）。
  *  · `## <节名>` 分节、`#` 注释、未知分节/节外内容忽略（别把说明当句子吃进去）
@@ -122,6 +128,11 @@ export default {
     splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 1, max: 100, group: '回话', label: '拆条概率' },
     splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '回话', label: '拆条最小长度' },
     splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '回话', label: '拆条间隔' },
+    splitReplyMaxParts: {
+      type: 'int', default: 3, min: 2, max: 4, group: '回话', label: '最多拆几条',
+      hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不拦腰砍句；\n'
+        + '句子不够就按实际句数发（2 条就够时不会硬凑）。拆出来的每条之间隔「拆条间隔」秒。',
+    },
     quoteEnforce: {
       type: 'bool', default: true, group: '句池', label: '不引用刚触发回复的那条消息',
       hint: '人话：它回你时不会「引用」你刚说的那句（真人聊天不会这样）。\n开：模型引用刚触发回复的那条消息时自动去掉引用；例外：唤醒后群里又插了 ≥「引用门槛」条消息时，引用才有意义、会保留。\n关：模型想引用就引用，不拦。',
@@ -308,37 +319,45 @@ export default {
         }
       }
 
-      // ── ② 拆条：小概率把"短开头 + 正话"拆成两条发 ──
+      // ── ② 拆条：小概率把一段回复按自然句拆成 2~N 条发（像真人连打几条） ──
       // 只在 mode==='plain'（无 @ / 无引用 / 非卡片）时做：@ 与引用是挂在**单条**上的语义，拆开就散架。
       const prob = toRate(cfg.splitReplyProbability)
       if (cfg.splitReplyEnabled === false || prob <= 0) return
       const minLen = Number(cfg.splitReplyMinLen) > 0 ? Number(cfg.splitReplyMinLen) : 12
       const delayMs = toMs(cfg.splitReplyDelayMs)
+      const maxParts = Math.max(2, Math.min(4, Math.floor(Number(cfg.splitReplyMaxParts) || 3)))
       const text = String(out.text || '')
-      // 先认自己拆出去的第二条（放在 mode 判断前：内核可能已按 turnCtx 给它补了引用）
+      // 先认自己拆出去的后几条（放在 mode 判断前：内核可能已按 turnCtx 给它们补了引用）
       if (pendingTails.get(out.target) === text) { pendingTails.delete(out.target); return }
       if (out.mode !== 'plain') return
+      // 只拆模型经 send_message 写的话（fromTool）：命令回执 / 答应声 / 系统提示 / 生图说明
+      // 这些"非对话正文"不该被拆 —— 拆了命令输出会变成两条，用户看不出哪条是结果（测试踩过）。
+      if (!out.fromTool) return
       if ((out.ats && out.ats.length) || out.replyTo != null) return
-      // CQ 码（图 / 表情 / 合并转发）挂在**单条**上，拆到两条里就是坏消息（sendMedia 也走 deliver）
+      // CQ 码（图 / 表情 / 合并转发）挂在**单条**上，拆成几条就是坏消息（sendMedia 也走 deliver）
       if (text.includes('[CQ:')) return
       if (text.length < minLen) return
+      if (text.length > SPLIT_MAX_CHARS) return // 长文不拆：留给内核走卡片/长消息
       if (Math.random() >= prob) return
       // ⚠️ 拆条失败必须降级成单条发（**话不能吞**）：拆条只是"像真人"的锦上添花，
       //    找不到自然断点（绝不把一句话拦腰砍）或算断点抛错 → 原样单条发，不许把正话弄丢。
       let parts = null
-      try { parts = pickSplitPoint(text) } catch (e) { log.warn(`[拆条] 找断点失败(降级单条): ${e.message}`) }
-      if (!parts) return
-      // 第一条（短反应）交给内核照常发：deliver 跑完 decorate 就发 out.text，改它 = "第一条立刻发"
+      try { parts = splitBubbles(text, { maxParts }) } catch (e) { log.warn(`[拆条] 找断点失败(降级单条): ${e.message}`) }
+      if (!parts || parts.length < 2) return
+      // 第一条交给内核照常发：deliver 跑完 decorate 就发 out.text，改它 = "第一条立刻发"
       out.text = parts[0]
-      // 第二条（正话）隔 delayMs 再发**同一个 target**；走 bot.deliver = 唯一出站口
+      // 后面每一条依次隔 delayMs 发**同一个 target**；走 bot.deliver = 唯一出站口
       // （脱敏 / 留档 / 长文卡片都由内核兜，这里绝不自己发裸消息）
-      setTimeout(async () => {
-        pendingTails.set(out.target, parts[1])
-        try { await bot.deliver(out.target, parts[1], { turnCtx: out.turnCtx || null }) }
-        catch (e) { log.warn(`[拆条] 第二条发送失败 (${out.target}): ${e.message}`) }
-        finally { pendingTails.delete(out.target) }
-      }, delayMs)
-      log.info(`[拆条] ${out.target} → 「${parts[0].slice(0, 20)}」+「${parts[1].slice(0, 20)}」`)
+      parts.slice(1).forEach((part, i) => {
+        const nth = i + 2
+        setTimeout(async () => {
+          pendingTails.set(out.target, part)
+          try { await bot.deliver(out.target, part, { turnCtx: out.turnCtx || null }) }
+          catch (e) { log.warn(`[拆条] 第 ${nth} 条发送失败 (${out.target}): ${e.message}`) }
+          finally { pendingTails.delete(out.target) }
+        }, delayMs * nth)
+      })
+      log.info(`[拆条] ${out.target} → ${parts.map((x) => `「${x.slice(0, 20)}」`).join(' + ')}`)
     })
   },
 }

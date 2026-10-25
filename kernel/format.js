@@ -141,14 +141,49 @@ export function splitLongText(text, opts = {}) {
  * 拆条用：找"短开头 + 正话"的自然断点，找不到返回 null。
  * 只在首句够短（2~13 字、不含换行）且余下 ≥8 字时才拆 —— 绝不把一句话拦腰砍断。
  */
-export function pickSplitPoint(text) {
+/**
+ * 把一段回复按**自然句末**切成 2~maxParts 条（拆条 = 连发几条短消息，像真人打字）。
+ *
+ * 纪律：只在句末标点（。！？!?…～~）或换行处切，**绝不把一句话从中间砍开**；
+ * 单句 / 带 CQ 码 / 切完只剩一条 → 返回 null（调用方降级成单条发，话不能吞）。
+ *
+ * `maxParts` 之外的句子按"最短相邻两条合并"收拢，保证不出现一长串碎句。
+ * @returns {string[]|null} 2..maxParts 段；无法安全拆 → null
+ */
+export function splitBubbles(text, { maxParts = 3, minPartChars = 2 } = {}) {
   const t = toWellFormedText(String(text ?? '')).trim()
-  const m = /^([^。！？!?…～~\n]{1,13}[。！？!?…～~])([\s\S]{8,})$/.exec(t)
-  if (!m) return null
-  const head = m[1].trim()
-  const tail = m[2].trim()
+  if (!t || t.includes('[CQ:')) return null
+  const cap = Math.max(2, Math.min(6, Math.floor(Number(maxParts) || 3)))
+  // 句末标点留在前一句；换行也当硬断点
+  const raw = t.split(/(?<=[。！？!?…～~])|\n+/).map((x) => x.trim()).filter(Boolean)
+  if (raw.length < 2) return null
+  const parts = []
+  for (const seg of raw) {
+    // 过短碎片（"嗯"、孤零零的标点）并进前一条，别单独发一条
+    if (parts.length && seg.length < Math.max(1, Number(minPartChars) || 2)) parts[parts.length - 1] += seg
+    else parts.push(seg)
+  }
+  if (parts.length < 2) return null
+  while (parts.length > cap) {
+    let at = 0
+    let best = Infinity
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const len = parts[i].length + parts[i + 1].length
+      if (len < best) { best = len; at = i }
+    }
+    parts.splice(at, 2, parts[at] + parts[at + 1])
+  }
+  return parts.length >= 2 ? parts : null
+}
+
+/** 旧接口（只拆两条）：等价于 splitBubbles(text, { maxParts: 2 })。 */
+export function pickSplitPoint(text) {
+  const parts = splitBubbles(text, { maxParts: 2 })
+  if (!parts) return null
+  // 老语义还有两条长度约束：首条是短反应（≤13 字），第二条得说满 8 字
+  const [head, tail] = parts
   if (!head || !tail || head.includes('\n')) return null
-  if (head.length < 2 || tail.length < 8) return null
+  if (head.length > 13 || tail.length < 8) return null
   return [head, tail]
 }
 

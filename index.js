@@ -207,6 +207,7 @@ function buildPluginCfg(plugin, runtime, dataDir) {
       if (Number(style.splitProbability) >= 0) cfg.splitReplyProbability = Math.round(Number(style.splitProbability) * 100)
       if (Number(style.splitMinLen) > 0) cfg.splitReplyMinLen = Number(style.splitMinLen)
       if (Number(style.splitDelayMs) >= 0) cfg.splitReplyDelayMs = Math.round(Number(style.splitDelayMs) / 1000)
+      if (Number(style.splitMaxParts) >= 2) cfg.splitReplyMaxParts = Math.min(4, Math.round(Number(style.splitMaxParts)))
     } else if (id === 'stickers') {
       if (Number(style.stickerProbability) >= 0) cfg.offerPercent = Math.round(Number(style.stickerProbability) * 100)
       // 权威开关在顶层 pacing.reply.style.stickerEnabled：关掉 = 不再提醒模型发表情
@@ -595,11 +596,13 @@ export async function apply(ctx, bundleConfig = {}) {
     description:
       '把一条文本消息发到 QQ（群或私聊）。这是给 QQ 用户回话的唯一正确方式：不要在正文里写要发的内容，直接调用本工具。'
       + 'target 用会话开头提示里的 [QQ会话 <target>] 原样传入；引用默认不用你管（内核按回复期间群里插话数自动决定）；'
-      + '只在想引用更早的另一条时才传 reply_to（传 0 = 明确不要挂）；内容会被网关强制脱敏并限长。',
+      + '只在想引用更早的另一条时才传 reply_to（传 0 = 明确不要挂）；内容会被网关强制脱敏并限长。'
+      + '提示里出现 `[表情:…]` 时，给本工具加 sticker 参数就能顺手带一张表情包（比单独调 send_sticker 省一步）。',
     parameters: {
       target: { type: 'string', required: true, description: '会话目标，形如 group:123456 或 private:123456' },
       text: { type: 'string', required: true, description: '要发送的纯文本内容' },
       reply_to: { type: 'integer', description: '要引用回复的消息 ID（可选，传 0 明确不挂）' },
+      sticker: { type: 'string', description: '顺手带一张表情包：心情/关键词（「无语」「夸人」）或 `#12` 点名；只有提示里出现 [表情:…] 时才传，不传 = 不发' },
     },
     async execute(args = {}) {
       const turnCtx = resolveCurrentTurn(args.target)
@@ -608,8 +611,27 @@ export async function apply(ctx, bundleConfig = {}) {
         turnCtx,
         // 只有模型显式调 send_message 的回复才由内核自动挂引用（锚已绑定当前 DSH 回合）
         autoQuote: true,
+        fromTool: true, // 标记"这是模型写给群里的话"：拆条等加工只认它
       })
-      return { ok: true, target: r.target, message_id: r.messageId, mode: r.mode, redacted: r.hits }
+      const out = { ok: true, target: r.target, message_id: r.messageId, mode: r.mode, redacted: r.hits }
+      // 表情包：正文发完后顺手带一张（插件通过 bot.shared.stickerSend 注册；没装/没开就如实说）
+      const wantSticker = String(args.sticker ?? '').trim()
+      if (wantSticker) {
+        const sendSticker = kernel.shared?.stickerSend
+        if (typeof sendSticker !== 'function') out.sticker = { ok: false, reason: '表情包插件未启用（sticker 参数被忽略）' }
+        else {
+          try { out.sticker = await sendSticker({ target: r.target, query: wantSticker, turnCtx }) }
+          catch (e) { out.sticker = { ok: false, reason: e.message } }
+        }
+      } else if (turnCtx?.stickerOffer && !(Number(turnCtx.stickersSent) > 0) && !(Number(turnCtx.stickerNudged) >= 2)) {
+        // 本轮掷骰命中过「可以发一张」但还没发 → 在工具返回里轻推一次（模型一定会读到工具结果）
+        turnCtx.stickerNudged = (Number(turnCtx.stickerNudged) || 0) + 1
+        const tag = String(turnCtx.stickerOffer.tag || '').trim()
+        out.stickerNote = tag
+          ? `本轮本来提醒过表情包还没发：下一条 send_message 加 sticker:"${tag}" 就能带一张（不发也行）`
+          : '本轮本来提醒过表情包还没发：下一条 send_message 加 sticker:"随便挑" 就能带一张（不发也行）'
+      }
+      return out
     },
   })
 

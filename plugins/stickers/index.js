@@ -367,20 +367,51 @@ export default {
       offerAt.set(ev.chatKey, now)
       // 结合语境：能从最近聊天里对上一个标签就点名，比"随便发一张"更容易被用上
       const tag = matchContextTag(ev)
+      // 记进本轮上下文：send_message 的返回里会再轻推一句（模型更容易顺手带上）
+      ev._scratch.turnExtras = { ...(ev._scratch.turnExtras || {}), stickerOffer: { tag: tag || '' } }
+      // 提示要"顺手"，不能只给一个可选工具：直接把参数写出来，省模型一步判断
       ev.hint.push(tag
-        ? `[表情:这轮可以发一张「${tag}」的;想发就调 send_sticker("${tag}")]`
-        : '[表情:这轮要不要发一张?想发就调 send_sticker(词可不填,可配正文)]')
+        ? `[表情:这轮顺手带一张「${tag}」的 —— 发正文时把 sticker:"${tag}" 一起传给 send_message 就行（不用另说一句、不用解释）]`
+        : '[表情:这轮顺手带一张 —— 发正文时给 send_message 加 sticker:"随便挑" 即可（也可以单独调 send_sticker）]')
       log.info(`[表情包] 掷骰命中 (${ev.chatKey}, p=${pct}%, 可挑 ${pool} 张${tag ? `, 语境标签=${tag}` : ''}) → 本轮提示「可以发一张」`)
       maybeTag()
     })
 
     // ── 入口 ③：工具 send_sticker（一轮最多 maxPerTurn 张；target 取当前 TurnContext，不信模型传） ──
+    /**
+     * 发一张表情包（本插件唯一的发送实现）：工具 send_sticker 与内核 send_message 的 sticker 参数都走这里。
+     * target 只认会话键；每轮上限 / 主动接话条数上限都在这里判，避免两套计数。
+     */
+    async function sendStickerTo(target, query = '', turnCtx = null) {
+      if (!/^(group|private):\d{1,12}$/.test(String(target || ''))) return { ok: false, reason: `target 格式不对: ${target}` }
+      const turn = turnCtx || bot.currentTurn(target)
+      const cap = maxPerTurn()
+      if ((turn?.stickersSent || 0) >= cap) return { ok: false, reason: `这轮已经发过 ${turn.stickersSent} 张了（每轮上限 ${cap}）` }
+      // 主动接话一轮最多 2 条（与内核出站钩子同一条规矩；表情包也算一条）
+      if (turn?.wakeKind === 'proactive' && (Number(turn.proactiveMessages) || 0) >= 2) {
+        return { ok: false, reason: '主动接话这轮已经发满 2 条了，别再发' }
+      }
+      const hit = await pick(query)
+      if (!hit.ok) return hit
+      // 说明文字原样交给内核（脱敏 / CQ 转义是 sendMedia → deliver 的事，插件不写第二份）
+      await bot.sendMedia(target, cqImage(hit.path), '')
+      if (turn) {
+        turn.stickersSent = (turn.stickersSent || 0) + 1
+        if (turn.wakeKind === 'proactive') turn.proactiveMessages = (Number(turn.proactiveMessages) || 0) + 1
+      }
+      log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || hit.desc || '无标注'})`)
+      return { ok: true, target, pick: { id: hit.id, desc: hit.desc, use: hit.use, tags: hit.tags, untagged: hit.untagged } }
+    }
+    // 内核 send_message 的 sticker 参数通过这个共享槽拿到"挑图 + 发送"（插件没启用时就没人注册 → 内核如实报）
+    bot.shared.stickerSend = ({ target, query, turnCtx }) => sendStickerTo(target, query, turnCtx)
+
     bot.registerTool('send_sticker', {
       description: '从群里攒下来的表情包库里挑一张发出去（库里的图都是群里真实发过的，带标签）。'
         + '表情包多数时候只是语气（敷衍/赞同/无语/看热闹）或图一乐 —— 想发就发，不必给它找理由。'
         + 'query 给心情/关键词（「无语」「夸人」「震惊」）或 `#12` 点名；什么都不给 = 真随机挑一张；同一张反复用没问题。'
         + '关键词没命中会随便给你一张；只有点名没找到才返回 ok:false —— 那时别改发别的图，也别在正文里解释。'
-        + '提示里出现 `[表情:…]` 就直接发，不必贴合当下语境。一轮最多一张。',
+        + '提示里出现 `[表情:…]` 就发，不必贴合当下语境。'
+        + '**最快的方式是不单独调本工具**：发正文时给 send_message 加 sticker:"关键词" 即可一并带出。一轮最多一张。',
       // DSH `defineTool` 的 parameters 是**扁平**的「属性名 → 值 schema」映射（不是 JSON Schema 的
       // `{type:'object',properties}`）；required 写在属性上 `required: true`。
       parameters: {
@@ -391,20 +422,7 @@ export default {
         const turn = bot.currentTurn()
         const target = turn?.chatKey
         if (!target) return { ok: false, reason: '没有进行中的会话（send_sticker 只能在回话轮里用）' }
-        const cap = maxPerTurn()
-        if ((turn.stickersSent || 0) >= cap) return { ok: false, reason: `这轮已经发过 ${turn.stickersSent} 张了（每轮上限 ${cap}）` }
-        // 主动接话一轮最多 2 条（与内核出站钩子同一条规矩；表情包也算一条）
-        if (turn.wakeKind === 'proactive' && (Number(turn.proactiveMessages) || 0) >= 2) {
-          return { ok: false, reason: '主动接话这轮已经发满 2 条了，别再发' }
-        }
-        const hit = await pick(args?.query ?? args?.mood ?? '')
-        if (!hit.ok) return hit
-        // 说明文字原样交给内核（脱敏 / CQ 转义是 sendMedia → deliver 的事，插件不写第二份）
-        await bot.sendMedia(target, cqImage(hit.path), args?.text || '')
-        turn.stickersSent = (turn.stickersSent || 0) + 1
-        if (turn.wakeKind === 'proactive') turn.proactiveMessages = (Number(turn.proactiveMessages) || 0) + 1
-        log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || hit.desc || '无标注'})`)
-        return { ok: true, target, pick: { id: hit.id, desc: hit.desc, use: hit.use, tags: hit.tags, untagged: hit.untagged } }
+        return sendStickerTo(target, args?.query ?? args?.mood ?? '', turn)
       },
     })
 

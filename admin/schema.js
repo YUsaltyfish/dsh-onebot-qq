@@ -54,7 +54,7 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6
  * 两边都给控件会互相覆盖，所以子插件侧只保留配置、不暴露控件。
  */
 const HIDDEN_PLUGIN_FIELDS = {
-  'persona-voice': new Set(['splitReplyEnabled', 'splitReplyProbability', 'splitReplyMinLen', 'splitReplyDelayMs']),
+  'persona-voice': new Set(['splitReplyEnabled', 'splitReplyProbability', 'splitReplyMinLen', 'splitReplyDelayMs', 'splitReplyMaxParts']),
   stickers: new Set(['offerPercent']),
 }
 
@@ -249,7 +249,13 @@ export const CORE_CONTROLS = [
   {
     key: 'pacing.reply.style.splitDelayMs', group: '主动接话', advanced: true, type: 'int', label: '拆条两条之间的间隔', unit: '秒',
     scale: 1000, min: 0, max: 10, step: 1, default: 1000,
-    hint: '拆出来的第二条隔多久发；调大更像“打完一句再想一句”。',
+    hint: '拆出来的第一条之后，每条隔多久发（拆成 3 条时是 1×间隔、2×间隔）；调大更像“打完一句再想一句”。',
+  },
+  {
+    key: 'pacing.reply.style.splitMaxParts', group: '主动接话', advanced: true, type: 'int', label: '最多拆几条',
+    min: 2, max: 4, step: 1, default: 3,
+    hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不把一句话拦腰砍；\n句数不够就按实际句数发。'
+      + '配「拆条概率」用：概率决定拆不拆、这里决定最多拆几条。',
   },
   {
     key: 'pacing.reply.style.stickerEnabled', group: '主动接话', advanced: true, type: 'bool', label: '回话时允许提醒发表情', default: true,

@@ -41,6 +41,7 @@ export const REPLY_DEFAULTS = {
     splitProbability: 0.5,   // 拆条概率（0~1）
     splitMinLen: 12,
     splitDelayMs: 1000,
+    splitMaxParts: 3,        // 一段回复最多拆几条（2~4）
     stickerEnabled: true,
     stickerProbability: 0.8, // 表情包概率（0~1）
   },
