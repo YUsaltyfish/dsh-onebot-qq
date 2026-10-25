@@ -32,7 +32,7 @@ test('主动接话：基础项不带 advanced，14 个进阶项全部带 advance
   const adv = all.filter((c) => c.advanced)
   assert.ok(basic.some((c) => c.key === 'pacing.reply.enabled'))
   assert.equal(basic.some((c) => c.key.startsWith('pacing.reply.weights.')), false, '语境权重必须折叠')
-  assert.equal(adv.length, 14)
+  assert.equal(adv.length, 15)
   assert.ok(adv.every((c) => c.key.startsWith('pacing.reply.')))
 })
 
@@ -165,4 +165,18 @@ test('「生图」页 1:1：非说明控件全归 imagegen（凭据已从核心�
     if (k.endsWith('apiKey')) assert.equal(c.secret, true, 'API Key 应脱敏')
   }
   assert.equal(schema.controls.filter((c) => c.key === 'credentials.gptImage.apiKey').length, 1, '凭据控件不应重复')
+})
+
+test('表情包页：有「收表情（会写索引）」开关（默认关）+ 实时数量说明', async (t) => {
+  const schema = await schemaOf(t)
+  const c = schema.controls.find((x) => x.key === 'stickers.collect')
+  assert.ok(c, '应有 stickers.collect 开关')
+  assert.equal(c.group, '表情包')
+  assert.equal(c.type, 'bool')
+  assert.equal(c.default, false, '默认关（库只读）')
+  assert.ok(String(c.hint).includes('默认关'), '解释里要写明默认关')
+  const info = schema.controls.find((x) => x.key === 'info.stickers')
+  assert.ok(info, '表情包页应有实时概况行')
+  assert.match(String(info.text), /当前表情库：\d+ 张/, '概况要带数量')
+  assert.match(String(info.text), /收表情（会写索引）：(开|关)/)
 })

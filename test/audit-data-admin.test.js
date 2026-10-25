@@ -409,7 +409,7 @@ test('表情包采集：sub_type=1 入协议判据、按大小写文件；sub_ty
     config: {
       pluginConfig: {
         'gate-wake': { adminQq: ADMIN_QQ },
-        stickers: { enabled: true, dir: 'qq-stickers', skipGif: true, collectGroupsOnly: true },
+        stickers: { enabled: true, dir: 'qq-stickers', skipGif: true, collectGroupsOnly: true, collect: true },
       },
     },
   })
@@ -435,7 +435,7 @@ test('表情包采集：GIF 魔数跳过（扩展名改成 .png 也挡）', asyn
     config: {
       pluginConfig: {
         'gate-wake': { adminQq: ADMIN_QQ },
-        stickers: { enabled: true, dir: 'qq-stickers', skipGif: true, collectGroupsOnly: true },
+        stickers: { enabled: true, dir: 'qq-stickers', skipGif: true, collectGroupsOnly: true, collect: true },
       },
     },
   })
@@ -872,4 +872,32 @@ test('群记忆控制台：唤醒词里的非群号数字键不会让 list 整�
   const ids = (r.groups || []).map((g) => g.group_id)
   assert.ok(ids.includes('456789'))
   assert.equal(ids.includes('123'), false, '非 4–12 位数字键应被忽略')
+})
+
+test('收表情开关（默认关=库只读）：不采集、不写索引；开了才收；控制台有开关和实时数量', async (t) => {
+  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-stk-off-'))
+  const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(2048, 1)])
+  const stickerFile = path.join(srcDir, 'sticker.png')
+  fs.writeFileSync(stickerFile, png)
+
+  // ① 默认（不写 collect）= 关：发一张表情，不该产生索引
+  const off = await boot(t, {
+    config: { pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, stickers: { enabled: true, dir: 'qq-stickers' } } },
+  })
+  const statsOff = off.kernel.shared?.stickerStats?.()
+  assert.equal(statsOff?.collect, false, '没配 collect 时应按默认关')
+  await emitRaw(off.kernel, stickerMessage({ messageId: 3001, subType: 1, file: stickerFile }))
+  await sleep(150)
+  assert.equal(fs.existsSync(path.join(off.dataDir, 'qq-stickers', 'index.json')), false, '关着时不得写索引')
+
+  // ② 打开 collect = 收
+  const on = await boot(t, {
+    config: { pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, stickers: { enabled: true, dir: 'qq-stickers', collect: true } } },
+  })
+  assert.equal(on.kernel.shared?.stickerStats?.().collect, true)
+  await emitRaw(on.kernel, stickerMessage({ messageId: 3002, subType: 1, file: stickerFile }))
+  await waitFor(() => fs.existsSync(path.join(on.dataDir, 'qq-stickers', 'index.json')), { label: '开 collect 后写索引' })
+  const items = JSON.parse(fs.readFileSync(path.join(on.dataDir, 'qq-stickers', 'index.json'), 'utf8')).items || []
+  assert.equal(items.length, 1, '开着时应收进 1 张')
+  assert.equal(on.kernel.shared.stickerStats().count, 1, '统计数量跟着变')
 })

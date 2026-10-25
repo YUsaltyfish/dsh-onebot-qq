@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { pickSplitPoint } from '../kernel/format.js'
+import { pickSplitPoint, splitBubbles } from '../kernel/format.js'
 import { bootKernel, emitRaw, waitFor, ADMIN_QQ, GROUP_ID, MEMBER_QQ, groupAtEvent, privateEvent } from './helpers.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -64,8 +64,34 @@ test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 
   await emitRaw(h.kernel, groupAtEvent({ text: '在吗', messageId: 101 }))
   await waitFor(() => h.sent.length >= 2, { label: '拆成两条' })
   await sleep(80)
-  assert.equal(h.sent.length, 2, '拆条 = 两条出站（第二条走 bot.deliver）')
+  assert.equal(h.sent.length, 2, '拆条 = 两条出站（后面每条走 bot.deliver）')
   assert.ok(h.sent[0].wire && h.sent[1].wire, '两条都有实际内容')
+
+  // 多句 → 按「最多拆几条」发 3 条（默认 3）
+  const h3 = await boot(t, {
+    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 6, splitDelayMs: 0 } } },
+  })
+  const send3 = h3.ctx._registeredTools.get('mcp__qq__send_message')
+  h3.ctx.setPromptHandler(async (req) => {
+    await send3.execute({ target: `group:${GROUP_ID}`, text: '行。东西都留在本机。哪天想接着调再喊咱' }, { agent: { session: { id: req.sessionId } } })
+  })
+  await emitRaw(h3.kernel, groupAtEvent({ text: '在吗', messageId: 111 }))
+  await waitFor(() => h3.sent.length >= 3, { label: '拆成三条' })
+  await sleep(80)
+  assert.equal(h3.sent.length, 3, '三句应拆成三条（不是固定两条）')
+
+  // 上限 2：同样三句只拆两条
+  const h4 = await boot(t, {
+    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 6, splitDelayMs: 0, splitMaxParts: 2 } } },
+  })
+  const send4 = h4.ctx._registeredTools.get('mcp__qq__send_message')
+  h4.ctx.setPromptHandler(async (req) => {
+    await send4.execute({ target: `group:${GROUP_ID}`, text: '行。东西都留在本机。哪天想接着调再喊咱' }, { agent: { session: { id: req.sessionId } } })
+  })
+  await emitRaw(h4.kernel, groupAtEvent({ text: '在吗', messageId: 112 }))
+  await waitFor(() => h4.sent.length >= 2, { label: '上限两条' })
+  await sleep(80)
+  assert.equal(h4.sent.length, 2, 'splitMaxParts=2 → 只拆两条')
 
   // 短回复不拆
   const h2 = await boot(t, {
@@ -150,6 +176,17 @@ test('两条线并发：工具按 DSH 会话 id 认线，target 写错时按会�
   await emitRaw(h.kernel, privateEvent({ text: '私聊一句', messageId: 110 }))
   await waitFor(() => h.sent.length >= 1, { label: '私聊出站' })
   assert.equal(h.sent.at(-1).target, `private:${ADMIN_QQ}`, '按会话纠正 target，不串到群里')
+})
+
+test('splitBubbles：按自然句拆 2~N 条；无断点/带 CQ → null；超上限合并最短相邻', () => {
+  assert.deepEqual(splitBubbles('行。东西都留在本机。哪天想接着调再喊咱'), ['行。', '东西都留在本机。', '哪天想接着调再喊咱'])
+  assert.deepEqual(splitBubbles('行。东西都留在本机。哪天想接着调再喊咱', { maxParts: 2 }).length, 2, 'maxParts=2 只拆两条')
+  assert.equal(splitBubbles('这一整句没有句末标点所以拆不了'), null, '无自然断点不拆')
+  assert.equal(splitBubbles('[CQ:image,file=a.png] 看图'), null, '带 CQ 码不拆')
+  assert.equal(splitBubbles('嗯'), null, '单句不拆')
+  const p = splitBubbles('好。行。那就这样。明天见。', { maxParts: 3 })
+  assert.equal(p.length, 3, '四句按上限收到三条')
+  assert.equal(p.join(''), '好。行。那就这样。明天见。', '拆完拼回去不能丢字')
 })
 
 test('pickSplitPoint 边界：短开头+正话才拆；首句过长/单句/带 CQ → null（降级单条）', () => {

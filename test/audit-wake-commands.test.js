@@ -592,3 +592,54 @@ test('CMD-7b /history 上限 500：请求条数被夹到 500，默认仍是 50',
   await waitFor(() => asked.length >= 2, { label: '/history 默认' })
   assert.equal(asked[1], 52, `不带参数应默认 50（请求 50+2），实际 ${asked[1]}`)
 })
+
+test('send_message 的 sticker 参数：插件没装/没开 → 如实说被忽略；装了 → 走 shared 钩子发出', async (t) => {
+  const h = await boot(t)
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  const turn = { chatKey: `group:${GROUP_ID}` }
+  const r1 = await send.execute({ target: `group:${GROUP_ID}`, text: '正文一句', sticker: '无语' }, { agent: { session: { id: 'sid-x' } } })
+  assert.equal(r1.ok, true)
+  // 默认 boot 里 stickers 插件在但库是空的：sticker 会说没挑到（不是静默吞掉参数）
+  assert.equal(r1.sticker?.ok, false, '挑不到表情包时应如实报')
+  assert.ok(String(r1.sticker?.reason || '').length > 0, '要给一句原因')
+
+  const sent = []
+  h.kernel.shared.stickerSend = async ({ target, query }) => {
+    sent.push({ target, query })
+    return { ok: true, pick: { id: 1 } }
+  }
+  const r2 = await send.execute({ target: `group:${GROUP_ID}`, text: '再来一句', sticker: '#1' }, { agent: { session: { id: 'sid-x' } } })
+  assert.deepEqual(r2.sticker, { ok: true, pick: { id: 1 } }, '装了就走 shared 钩子')
+  assert.deepEqual(sent, [{ target: `group:${GROUP_ID}`, query: '#1' }])
+  void turn
+})
+
+test('WAKE-NOTICE 无身份 notice（点赞 profile_like / bot_offline）：不建会话、不进模型、不留出站', async (t) => {
+  const h = await boot(t)
+  // 2026-10-25 13:57 事故原样：NapCat 的点赞通知只有 operator_id，没有 user_id/group_id
+  await emitRaw(h.kernel, {
+    post_type: 'notice',
+    notice_type: 'notify',
+    sub_type: 'profile_like',
+    operator_id: MEMBER_QQ,
+    operator_nick: '群友',
+    times: 1,
+    time: Math.floor(Date.now() / 1000),
+  })
+  await emitRaw(h.kernel, { post_type: 'notice', notice_type: 'bot_offline', user_id: 3505422215 })
+  await sleep(150)
+  assert.equal(h.ctx._prompts.length, 0, 'notice 不进模型')
+  assert.equal(h.ctx._sessions.size, 0, '不建 DSH 会话（曾经的 private:undefined）')
+  assert.equal(h.sent.length, 0, '不产生出站')
+})
+
+test('normalizeEvent：无 user_id/group_id 的 notice 直接丢；正常 poke/入群不受影响', async () => {
+  const { normalizeEvent } = await import('../kernel/format.js')
+  assert.equal(normalizeEvent({ post_type: 'notice', notice_type: 'notify', sub_type: 'profile_like', operator_id: 1 }, 3505422215), null)
+  assert.equal(normalizeEvent({ post_type: 'notice', notice_type: 'bot_offline' }, 3505422215), null)
+  const poke = normalizeEvent({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', group_id: GROUP_ID, user_id: MEMBER_QQ, target_id: 3505422215 }, 3505422215)
+  assert.ok(poke, '群戳一戳仍要进管线（intercept 回戳）')
+  assert.equal(poke.chatKey, `group:${GROUP_ID}`)
+  const inc = normalizeEvent({ post_type: 'notice', notice_type: 'group_increase', group_id: GROUP_ID, user_id: MEMBER_QQ }, 3505422215)
+  assert.ok(inc, '入群通知仍要进管线（group-welcome 用）')
+})
