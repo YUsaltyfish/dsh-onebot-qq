@@ -109,7 +109,7 @@ test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 
 
 test('主动接话轮硬约束：不 @、不引用、不套长文卡片（代码强制，不靠提示词）', async (t) => {
   const h = await boot(t)
-  const turnCtx = { wakeKind: 'proactive', chatKey: `group:${GROUP_ID}`, triggerMsgId: null, proactiveMessages: 0 }
+  const turnCtx = { wakeKind: 'proactive', chatKey: `group:${GROUP_ID}`, triggerMsgId: null }
   const r = await h.kernel.deliver(`group:${GROUP_ID}`, '[AT:qq=555555] 随口插一句', { replyTo: 50, turnCtx })
   assert.equal(r.ats.length, 0, '主动接话剥掉 @')
   assert.equal(r.replyTo, null, '主动接话剥掉引用')
