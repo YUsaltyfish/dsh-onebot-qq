@@ -487,18 +487,11 @@ export default {
       const turn = turnCtx || bot.currentTurn(target)
       const cap = maxPerTurn()
       if ((turn?.stickersSent || 0) >= cap) return { ok: false, reason: `这轮已经发过 ${turn.stickersSent} 张了（每轮上限 ${cap}）` }
-      // 主动接话一轮最多 2 条（与内核出站钩子同一条规矩；表情包也算一条）
-      if (turn?.wakeKind === 'proactive' && (Number(turn.proactiveMessages) || 0) >= 2) {
-        return { ok: false, reason: '主动接话这轮已经发满 2 条了，别再发' }
-      }
       const hit = await pick(query)
       if (!hit.ok) return hit
       // 说明文字原样交给内核（脱敏 / CQ 转义是 sendMedia → deliver 的事，插件不写第二份）
       await bot.sendMedia(target, cqImage(hit.path), '')
-      if (turn) {
-        turn.stickersSent = (turn.stickersSent || 0) + 1
-        if (turn.wakeKind === 'proactive') turn.proactiveMessages = (Number(turn.proactiveMessages) || 0) + 1
-      }
+      if (turn) turn.stickersSent = (turn.stickersSent || 0) + 1
       noteSent(hit.id)
       log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || '无标注'})`)
       return { ok: true, target, pick: { id: hit.id, tags: hit.tags, untagged: hit.untagged } }

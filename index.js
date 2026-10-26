@@ -490,7 +490,7 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 内置出站钩子①：主动接话轮的硬约束（代码强制，不靠提示词）──
   //   · 不 @、不引用：主动接话不指人、不挂"我在回你"的语义
   //   · 不套长文卡片：群友随口接一句不该甩一张卡片（deliver 认 noForward 字段）
-  //   · 一轮最多 2 条：拆条正好 2 条；模型想发第三条就报错，别刷屏
+  //   · 一轮发几条：拆条数目在控制台动态修改（`pacing.reply.style.splitMaxParts`），内核不再按固定条数拦
   deliver.onDecorate((out) => {
     const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
     if (!turnCtx || turnCtx.wakeKind !== 'proactive') return
@@ -500,12 +500,6 @@ export async function apply(ctx, bundleConfig = {}) {
       out.replyTo = null
     }
     out.noForward = true
-    turnCtx.proactiveMessages = (Number(turnCtx.proactiveMessages) || 0) + 1
-    if (turnCtx.proactiveMessages > 2) {
-      out.blocked = true
-      out.blockReason = '主动接话一轮最多 2 条（本轮已经发过 2 条），这条不发，也别再调任何发送工具'
-      return
-    }
     const maxChars = Number(pacing.config?.reply?.maxChars) || 120
     if (out.text.length > maxChars) {
       log.warn(`[主动接话] 超字数 ${out.text.length}/${maxChars} 字（照发；提示里已要求精简）`)

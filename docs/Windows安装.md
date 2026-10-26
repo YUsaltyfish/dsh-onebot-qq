@@ -72,7 +72,7 @@ dsh plugin --profile web add link:C:\path\to\dsh-onebot-qq
 **重启 dsh-web**（Ctrl+C 后重新 `dsh web`），日志出现 `dsh-onebot-qq` 输出即挂载成功；还没填 QQ 号会进入「待配置模式」，按 §六 填即可：
 
 ```
-[onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 8，命令 7）
+[onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
 ```
 
 ## 五、创建数据目录（含默认人设）
@@ -117,7 +117,7 @@ dsh web
    日志会看到（此时**没有**「NapCat WS 已连接」是预期）：
    ```
    [onebot-qq:kernel] 实例配置未完成（缺 adminQq）…控制台可继续配置
-   [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 8，命令 7）
+   [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
    ```
 2. **打开控制台填写**：浏览器打开 <http://127.0.0.1:3080> → **设置 → QQ 控制台**：
    - **总览 → 新手向导**：逐项 ✅/❌（配置文件 / 主人 QQ / NapCat 连接 / 人设 / 生图），每项一句「怎么做」；

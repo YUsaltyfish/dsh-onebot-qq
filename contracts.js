@@ -101,7 +101,6 @@ export function createTurnContext(ev) {
     wakeKind: ev.wake?.kind ?? 'private',
     arrivedDuringTurn: 0,     // 本轮开始后同群又来了几条（>0 才自动挂引用）
     stickersSent: 0,          // 本轮已发几张表情包（上限 1）
-    proactiveMessages: 0,     // 主动接话轮已发几条（上限 2；普通回话不计数）
     imagegenUsed: 0,          // 本轮已生图几次
     startedAt: Date.now(),
     promptText: '',           // before-turn 结束后由内核填最终文本
