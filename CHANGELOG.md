@@ -21,10 +21,13 @@
 - **撤回失败不再回显 NapCat 原始报错**：适配器把 `NTEvent / EventRet / decode failed` 原文只写日志、对外返回人话；`gate-wake` 的撤回失败回执也只发人话。修复 2026-10-23 15:37 把整段内部报错发进群的问题。
 - **`/history` 上限 200 → 500**：`plugins/commands/index.js` 的 `HISTORY_MAX` 放宽（默认仍 50）；500 条约 23KB / 7.6K token，拉取仍在适配器 8s 超时内。
 - **修复点赞通知制造空对话**：NapCat 的点赞通知（`profile_like`）没有 `user_id`/`group_id`，归一后 chatKey 变成 `private:undefined`，又被「私聊永远算被叫」放行 → 出现两个空模型回合、并建出 `private:undefined` 的 DSH 会话。现在：无身份 notice 直接丢弃（format）、notice 一律不进模型（gate-wake）、非法 chatKey 在 runTurn 第二道防线丢弃。
+- **删除表情包「删除黑名单」（`blocked-hashes.txt`）**：本机不需要"删掉的表情别再收回来"这套账本 —— 删一张 = 删文件 + 删索引条目。`vendor/dsh-sticker-shelf.mjs` 里 `loadBlocked/addBlocked/isBlockedHash` 及其调用（harvest ×2、remove ×1）一并移除（记为该文件的「本地补丁 2」，升级覆盖后需重打）。
+- **表情索引瘦身：只记标签**：去掉 `desc`（画面描述）/`use`（什么场合发）/`summary`/`fromNick`/`fromUid`/`seenCount`/`lastSeen`，每条只留 `id/hash/file/tags/tagged/blocked/tagVer/uses/lastUsed/ts`（index.json 97KB → 39KB）；关键词挑图只按标签匹配；`sticker_catalog` 清单变成「编号 · 标签」；控制台数量改为「只算磁盘上真实存在的图」，并单独提示「N 条索引指向已删文件」。
+- **修复表情包总是发同一张**：`matchContextTag` 会用整段上下文（含内核注入的 `[群聊上文]` 脚手架）匹配标签 → 命中库里唯一带「群聊」标签的那张（`#107`「正在严肃对群友哈气」），提示词因此 58/64 次点名「群聊」、模型照抄 44 次。现在：① 匹配前剥掉脚手架行；② 元标签（群聊/表情包/二次元…）不参与点名；③ 同名标签取最长的（更具体）；④ 只读模式加进程内"最近发过"轮换，同一个词不会连发同一张；⑤ 提示句式轮换并允许模型自己换词。
 - **表情包新增「收表情（会写索引）」开关，默认关**：关着时库只读（不采集/不打标/不清理/不记使用，`index.json` 一个字节都不写），机器人仍能挑现有图发；控制台「表情包」页顶部显示库数量/标签数，并说明当前是只读还是可写。默认关是为了防「运行中改索引被内存副本覆盖」（2026-10-20 标签丢失的根因）。
 - **拆条支持 2~N 条**：`pacing.reply.style.splitMaxParts`（默认 3，控制台「主动接话 → 高级」），按自然句末拆、绝不拦腰砍句；只对模型经 `send_message` 写的正文生效，命令回执/答应声不拆；>120 字的长文仍走长文卡片。
 - **表情包实际发出率**：`send_message` 新增 `sticker` 参数（发正文时顺手带一张，省一步工具调用）；提示词改成「顺手带一张 + 给出现成参数」；若本轮掷骰命中但还没发，`send_message` 的返回里会再轻推一次（最多 2 次）。
-- **生图参考图对模型可见**：`before-turn` 每轮列一行 `[参考图库:…]`（不做关键词门槛），`generate_image` 的 `image` 可直接写图库里的文件名；**不做代码侧模糊匹配** —— 选哪张由模型判断，名字不在库里就报错并附清单，让模型自己重挑（选错在冷却之前，不花钱）。绝对路径仍只走白名单。
+- **新增 `list_images` 工具 + 去掉每轮参考图提示**：`[参考图库:…]` 每轮拼进用户消息正文（约 100~350 token、看着烦）已删；改成按需工具 `list_images`，可列 `refs`（角色参考图）/`workspace`（QQ 工作区）/`uploads`（QQ 发来的文件）/`avatars`（头像缓存）/`all` 下的图片，返回绝对路径、文件名、字节数、尺寸（默认 30 张、最多 100）。`generate_image` 的 `image` 支持清单里的路径或文件名；名字找不到时报错并指引先调 `list_images`。白名单未放宽（仍只允许白名单目录内的真实图片）。
 - **生图新增「额外请求字段（JSON）」**：`pluginConfig.imagegen.extraBody`（多行文本，默认空），控制台「生图」页可改。不同平台字段不同，由用户自己补：文生图并进 JSON 请求体、图生图逐项追加为 multipart 字段、`openai-chat` 协议并进 `/chat/completions` 顶层。典型用法：sensenova／商汤默认给图加水印，填 `{"watermark": false}` 关掉。留空 = 与旧版行为完全一致；非法 JSON 直接报错、不发请求。
 
 ### 测试

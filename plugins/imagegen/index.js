@@ -253,8 +253,18 @@ async function chatGenerate({ prompt, refs, extras = {}, timeoutMs, creds, tmp }
  * 根目录 = 配置的参考图/头像目录 + 数据目录 + 平台临时根（内核注入），不写死任何机器路径。
  */
 function resolveAllowedImage(file, cfg, bot) {
-  const p = path.isAbsolute(file) ? file : path.join(cfg.refDir, file)
-  if (!fs.existsSync(p)) throw new Error(`图片文件不存在: ${file}`)
+  const raw = String(file ?? '').trim()
+  const dataDir = bot?.core?.dataDir ? String(bot.core.dataDir) : ''
+  // 相对路径依次试：参考图目录（最常用）→ 数据目录（list_images 给的相对路径/工作区/上传目录）→ 头像目录
+  const candidates = path.isAbsolute(raw)
+    ? [raw]
+    : [
+      path.join(cfg.refDir, raw),
+      ...(dataDir ? [path.join(dataDir, raw)] : []),
+      ...(cfg.avatarDir ? [path.join(cfg.avatarDir, raw)] : []),
+    ]
+  const p = candidates.find((c) => { try { return fs.existsSync(c) } catch { return false } })
+  if (!p) throw new Error(`图片文件不存在: ${raw}`)
   const real = fs.realpathSync(p)
   const roots = [...new Set([
     cfg.refDir,
@@ -463,10 +473,46 @@ export default {
       return '1024x1024'
     }
 
-    // ── 入口 ⓪：把本机参考图库告诉模型（QQ 线没有文件工具，不告诉它就"看不见"）──
-    // 不做关键词门槛：说"换成 deepseek 的大肥鱼"这种话里可能一个画图词都没有，
-    // 让模型自己判断要不要用参考图；库不大，一行名字 ≈ 几十 token，比误判漏掉划算。
+    // ── 入口 ⓪：图片清单工具 list_images ────────────────────────────────────
+    // 为什么不再每轮往 prompt 里塞图库清单（2026-10-26 主人要求）：
+    //   `ev.hint` 会拼进**用户消息正文**，每轮都出现（库大时 300+ token），看着烦也白烧。
+    //   改成按需查询：模型要画图/找图时自己调一次，平时 0 成本、0 噪音。
     const REF_EXT_RE = /\.(png|jpe?g|webp|gif)$/i
+    const dataDirNow = () => String(bot.core?.dataDir || '.')
+    const IMG_SCOPES = {
+      refs: { label: '角色参考图', dir: () => refDirNow() },
+      avatars: { label: '头像缓存', dir: () => avatarDirNow() },
+      uploads: { label: 'QQ 发来的文件', dir: () => path.join(dataDirNow(), 'qq_uploads') },
+      workspace: { label: 'QQ 工作区', dir: () => path.join(dataDirNow(), 'workspace') },
+    }
+    const DEFAULT_SCOPES = ['refs', 'workspace', 'uploads', 'avatars']
+
+    /** 递归列某个根下的图片（深度 ≤3，跳过隐藏目录/node_modules；最多扫 800 个文件）。 */
+    const scanImages = (root, { limit, scanned = { n: 0 } }) => {
+      const out = []
+      const walk = (dir, depth) => {
+        if (out.length >= limit || scanned.n >= 800) return
+        let entries
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+        for (const ent of entries) {
+          if (out.length >= limit || scanned.n >= 800) return
+          const name = ent.name
+          if (name.startsWith('.') || name === 'node_modules') continue
+          const full = path.join(dir, name)
+          let st
+          try { st = fs.lstatSync(full) } catch { continue }
+          if (st.isSymbolicLink()) continue
+          if (st.isDirectory()) { if (depth < 3) walk(full, depth + 1); continue }
+          if (!st.isFile() || !REF_EXT_RE.test(name)) continue
+          scanned.n += 1
+          out.push({ path: full, name, bytes: st.size })
+        }
+      }
+      walk(root, 1)
+      return out
+    }
+
+    /** 参考图目录里的图片名（给 generate_image 的报错文案用；只列文件名，不递归）。 */
     const refNamesNow = () => {
       try {
         return fs.readdirSync(refDirNow())
@@ -476,12 +522,62 @@ export default {
           .slice(0, 20)
       } catch { return [] }
     }
-    bot.on('before-turn', (ev) => {
-      if (!ev.wake || cfg.enabled === false) return
-      const names = refNamesNow()
-      if (!names.length) return
-      ev.hint.push(`[参考图库:${names.join('、')} —— 要改图/生图时从里面挑文件名传给 generate_image 的 image，`
-        + '多张按顺序 = 图1、图2；库里没有合适的就先跟用户要图]')
+
+    bot.registerTool('list_images', {
+      description:
+        '列出本机白名单目录里的图片文件（角色参考图、QQ 工作区、QQ 发来的文件、头像缓存）。'
+        + 'QQ 线**没有文件工具**，看不到本机目录 —— 想知道有哪些图可用、或用户提到某张图但你不知道文件名时，先调这个工具查。'
+        + '返回的 `path` 可以直接当 generate_image 的 image 参数（也支持只传文件名）。',
+      parameters: {
+        where: {
+          type: 'string',
+          description: '在哪个范围找：refs(角色参考图) / workspace(QQ 工作区) / uploads(QQ 发来的文件) / avatars(头像缓存) / all(全部，默认)',
+        },
+        dir: { type: 'string', description: '可选：子目录（相对所选范围，如 `stroke_anim`），留空 = 该范围根目录' },
+        limit: { type: 'number', description: '最多返回几张（默认 30，最多 100）' },
+      },
+      execute: async (args = {}) => {
+        const where = String(args.where || '').trim().toLowerCase()
+        const limit = Math.max(1, Math.min(100, Math.floor(Number(args.limit) || 30)))
+        const scopes = where && where !== 'all'
+          ? (IMG_SCOPES[where] ? [where] : null)
+          : DEFAULT_SCOPES
+        if (!scopes) throw new Error(`where 只能是 ${['all', ...Object.keys(IMG_SCOPES)].join(' / ')}`)
+        const roots = scopes.map((k) => {
+          const base = IMG_SCOPES[k].dir()
+          const sub = String(args.dir || '').trim()
+          const target = sub ? path.resolve(base, sub) : path.resolve(base)
+          if (!isInsidePath(path.resolve(base), fs.existsSync(target) ? (() => { try { return fs.realpathSync(target) } catch { return target } })() : target)) {
+            throw new Error(`dir 不能跳出「${IMG_SCOPES[k].label}」目录: ${sub}`)
+          }
+          return { key: k, label: IMG_SCOPES[k].label, dir: target }
+        })
+        const scanned = { n: 0 }
+        const items = []
+        for (const r of roots) {
+          if (items.length >= limit) break
+          for (const it of scanImages(r.dir, { limit: limit - items.length, scanned })) {
+            let px = null
+            try {
+              if (it.bytes <= 8 * 1024 * 1024) {
+                const buf = fs.readFileSync(it.path)
+                const p = imagePixelSize(buf)
+                if (p) px = `${p.w}x${p.h}`
+              }
+            } catch { /* 读不到就不给尺寸，不影响列清单 */ }
+            items.push({ ...it, where: r.key, label: r.label, size: px })
+          }
+        }
+        const truncated = items.length >= limit
+        log.info(`[图片] list_images ${where || 'all'}${args.dir ? `/${args.dir}` : ''} → ${items.length} 张${truncated ? '（已截断）' : ''}`)
+        return {
+          ok: true,
+          count: items.length,
+          truncated,
+          items,
+          note: truncated ? `只列了前 ${limit} 张，要更多就传更大的 limit 或指定 where/dir` : undefined,
+        }
+      },
     })
 
     bot.registerTool('generate_image', {
@@ -494,7 +590,8 @@ export default {
       parameters: {
         prompt: { type: 'string', required: true, description: '画面描述（提示词），越具体越好；末尾按提示词纪律带去噪/去涂抹的话。' },
         image: {
-          description: '图生图的参考图：本地图片绝对路径，或**参考图库里的文件名**（每轮提示里有 `[参考图库:…]` 的清单，从里面挑，如 `大肥鱼_三视图.jpg`）。'
+          description: '图生图的参考图：本地图片绝对路径，或**文件名**（如 `大肥鱼_三视图.jpg`；插件会到参考图目录/数据目录里找）。'
+            + '不知道有哪些图可用时**先调 `list_images`** 查（QQ 线没有文件工具，看不到目录）。'
             + '多张传字符串数组（按顺序 = 图1、图2）；不传就是文生图',
           oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
@@ -527,10 +624,11 @@ export default {
           try {
             refs.push(resolveAllowedImage(item, refRoots, bot))
           } catch (e) {
-            // 不做代码侧匹配：把图库清单交回模型，让它自己挑（选错不占冷却：这一步在冷却之前）
+            // 不做代码侧匹配：把清单交回模型，让它自己挑（选错不占冷却：这一步在冷却之前）
             if (path.isAbsolute(item)) throw e
-            throw new Error(`参考图「${item}」不在参考图库里（可用：${refLib.join('、') || '(空)'}）`
-              + '；请从图库里挑文件名再调一次')
+            const known = refLib.length ? `参考图目录里有：${refLib.join('、')}` : '参考图目录是空的'
+            throw new Error(`找不到图片「${item}」（${known}）`
+              + '；先调 list_images 看有哪些图，再挑文件名传给 image')
           }
         }
         // 同一张被重复列到时只上一次
