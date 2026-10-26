@@ -373,41 +373,68 @@ test('imagegen 额外字段：控制台「生图」页有该项（text 多行框
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 本机参考图：模型不知道 qq-refs 里有什么 → before-turn 列文件名；相对文件名能直接用
+// 图片清单：不再每轮塞正文（2026-10-26 主人要求），改成按需工具 list_images
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('imagegen 参考图提示：每轮都列出参考图库（不靠关键词）', async (t) => {
+test('不再把参考图清单塞进每轮正文（改成按需 list_images）', async (t) => {
   const h = await bootImagegen(t, {
     credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
   })
   const refDir = path.join(h.dataDir, 'qq-refs')
   fs.mkdirSync(refDir, { recursive: true })
   fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
-  fs.writeFileSync(path.join(refDir, '大肥鱼_正面立绘.jpg'), PNG)
   installFetchMock(t, () => jsonResponse({ data: [] }))
-  // 关键：这句话里**没有任何画图关键词**，提示照样要出现（让模型自己判断用不用）
   await emitRaw(h.kernel, groupAtEvent({ text: '换成deepseek的大肥鱼', messageId: 401 }))
   const prompt = await waitFor(() => h.ctx._prompts?.[0], { label: '普通轮进模型' })
   const text = prompt.content[0].text
-  assert.ok(text.includes('[参考图库'), `应提示参考图库：${text.slice(-400)}`)
-  assert.ok(text.includes('大肥鱼_三视图.jpg') && text.includes('大肥鱼_正面立绘.jpg'), '应列出文件名')
+  assert.equal(text.includes('[参考图库'), false, '正文里不应再出现参考图库清单')
+  assert.equal(text.includes('大肥鱼_三视图.jpg'), false, '正文里不应出现文件名')
 })
 
-test('imagegen 参考图：generate_image 传相对文件名 → 自动到 qq-refs 解析并以 multipart 上传', async (t) => {
-  const h = await bootImagegen(t, {
-    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
-  })
+test('list_images：列出参考图目录的图片（含尺寸），路径可直接喂给 generate_image', async (t) => {
+  const h = await bootImagegen(t, {})
   const refDir = path.join(h.dataDir, 'qq-refs')
   fs.mkdirSync(refDir, { recursive: true })
   fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
-  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
-  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
-  const r = await tool.execute({ prompt: '改成黑猫', image: '大肥鱼_三视图.jpg', target: `group:${GROUP_ID}` })
+  fs.writeFileSync(path.join(refDir, 'notes.txt'), '不是图片')
+  fs.mkdirSync(path.join(refDir, 'sub'), { recursive: true })
+  fs.writeFileSync(path.join(refDir, 'sub', '另一张.png'), PNG)
+  const tool = h.ctx._registeredTools.get('mcp__qq__list_images')
+  assert.ok(tool, 'list_images 应注册')
+  const r = await tool.execute({ where: 'refs' })
   assert.equal(r.ok, true)
-  const edit = calls.find((c) => c.url.endsWith('/images/edits'))
-  assert.ok(edit, '相对文件名应走图生图接口')
-  assert.equal(typeof edit.opts.body.get, 'function', 'edits 走 FormData')
-  assert.ok(edit.opts.body.get('image'), '应带上参考图文件')
+  const names = r.items.map((x) => x.name).sort()
+  assert.deepEqual(names, ['另一张.png', '大肥鱼_三视图.jpg'].sort(), '应列出图片、忽略非图片、含子目录')
+  const one = r.items.find((x) => x.name === '大肥鱼_三视图.jpg')
+  assert.equal(one.size, '1x1', '应带尺寸')
+  assert.ok(one.path.startsWith(h.dataDir), '应给绝对路径')
+  assert.equal(one.where, 'refs')
+})
+
+test('list_images：limit 截断 + 非法 where / 越界 dir 报错', async (t) => {
+  const h = await bootImagegen(t, {})
+  const refDir = path.join(h.dataDir, 'qq-refs')
+  fs.mkdirSync(refDir, { recursive: true })
+  for (let i = 0; i < 5; i += 1) fs.writeFileSync(path.join(refDir, `图${i}.png`), PNG)
+  const tool = h.ctx._registeredTools.get('mcp__qq__list_images')
+  const r = await tool.execute({ where: 'refs', limit: 2 })
+  assert.equal(r.items.length, 2)
+  assert.equal(r.truncated, true)
+  await assert.rejects(() => tool.execute({ where: 'nope' }), /where 只能是/)
+  await assert.rejects(() => tool.execute({ where: 'refs', dir: '../../etc' }), /不能跳出/)
+})
+
+test('list_images：默认 all 覆盖 workbooks/workspace/uploads/avatars 里存在的目录', async (t) => {
+  const h = await bootImagegen(t, {})
+  fs.mkdirSync(path.join(h.dataDir, 'qq-refs'), { recursive: true })
+  fs.mkdirSync(path.join(h.dataDir, 'workspace'), { recursive: true })
+  fs.writeFileSync(path.join(h.dataDir, 'qq-refs', 'a.jpg'), PNG)
+  fs.writeFileSync(path.join(h.dataDir, 'workspace', 'b.png'), PNG)
+  const tool = h.ctx._registeredTools.get('mcp__qq__list_images')
+  const r = await tool.execute({})
+  const byName = Object.fromEntries(r.items.map((x) => [x.name, x.where]))
+  assert.equal(byName['a.jpg'], 'refs')
+  assert.equal(byName['b.png'], 'workspace')
 })
 
 test('imagegen 参考图：名字选错 → 报错里回图库清单（判断交给模型，不做代码匹配）', async (t) => {
@@ -419,10 +446,10 @@ test('imagegen 参考图：名字选错 → 报错里回图库清单（判断交
   fs.writeFileSync(path.join(refDir, '大肥鱼_三视图.jpg'), PNG)
   const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
   const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
-  // 只写"大肥鱼"（不带文件名）→ 不做模糊匹配，报错并把图库清单交给模型自己重挑
+  // 只写"大肥鱼"（不带扩展名）→ 不做模糊匹配，报错并指向 list_images
   await assert.rejects(
     () => tool.execute({ prompt: '改成黑猫', image: '大肥鱼', target: `group:${GROUP_ID}` }),
-    (e) => /不在参考图库里/.test(e.message) && /大肥鱼_三视图\.jpg/.test(e.message),
+    (e) => /找不到图片「大肥鱼」/.test(e.message) && /list_images/.test(e.message),
   )
   assert.equal(calls.length, 0, '选错名字时不应发请求')
   // 同一轮换成正确文件名就能过（选错不占冷却、不消耗次数）

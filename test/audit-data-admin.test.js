@@ -901,3 +901,113 @@ test('收表情开关（默认关=库只读）：不采集、不写索引；开�
   assert.equal(items.length, 1, '开着时应收进 1 张')
   assert.equal(on.kernel.shared.stickerStats().count, 1, '统计数量跟着变')
 })
+
+/** 造一个最小表情库：items 各自带 tags，图片是真实存在的 2KB png（挑图要 existsSync 通过）。 */
+function makeStickerLib(dataDir, items) {
+  const dir = path.join(dataDir, 'qq-stickers')
+  fs.mkdirSync(dir, { recursive: true })
+  const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(2048, 1)])
+  const full = items.map((it, i) => {
+    const file = `${it.id || i + 1}-test.png`
+    fs.writeFileSync(path.join(dir, file), png)
+    return {
+      id: it.id || i + 1, hash: 'h' + (it.id || i + 1), file, summary: '[动画表情]',
+      fromNick: 'test', fromUid: '1', ts: Date.now(), uses: 0, lastUsed: 0,
+      tags: it.tags || [], tagged: Boolean((it.tags || []).length), blocked: false, seenCount: 1,
+      desc: it.desc || '', use: it.use || '',
+    }
+  })
+  fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ items: full, nextId: full.length + 1 }))
+  return dir
+}
+
+test('表情提示不吃脚手架标签：上下文里的「[群聊上文]」不能点名库里的「群聊」标签', async (t) => {
+  const h = await boot(t, {
+    // 掷骰概率的权威值在 pacing.reply.style（内核启动时同步覆盖插件 offerPercent）→ 测试里要设 1 才确定命中
+    pacing: { reply: { style: { stickerProbability: 1 } } },
+    config: {
+      pluginConfig: {
+        'gate-wake': { adminQq: ADMIN_QQ },
+        stickers: { enabled: true, dir: 'qq-stickers', offerPercent: 100, offerCooldownMs: 0 },
+      },
+    },
+  })
+  // 一张只带元标签「群聊」（旧库里的 #107 就是这种），一张正常情绪标签
+  makeStickerLib(h.dataDir, [{ id: 107, tags: ['阴阳怪气', '装凶', '群聊'] }, { id: 45, tags: ['面无表情'] }])
+  h.ctx.setPromptHandler(async () => {})
+  const ev = groupAtEvent({ text: '随便说一句', messageId: 4001 })
+  ev.message = [{ type: 'at', data: { qq: '999999' } }, { type: 'text', data: { text: '随便说一句' } }]
+  await emitRaw(h.kernel, ev)
+  await waitFor(() => h.ctx._prompts[0], { label: '进模型' })
+  const prompt = h.ctx._prompts[0].content.map((c) => c.text).join('\n')
+  assert.ok(!prompt.includes('sticker:"群聊"'), '不能用元标签「群聊」点名（它就是"总发同一张"的根因）')
+  assert.ok(prompt.includes('[表情:'), '仍要有表情提示')
+})
+
+test('表情挑图轮换：同一个词连发两次不重复（只读模式不写索引也能轮换）', async (t) => {
+  const h = await boot(t, {
+    config: {
+      pluginConfig: {
+        'gate-wake': { adminQq: ADMIN_QQ },
+        stickers: { enabled: true, dir: 'qq-stickers', collect: false },
+      },
+    },
+  })
+  const dir = makeStickerLib(h.dataDir, [
+    { id: 1, tags: ['无语'] }, { id: 2, tags: ['无语'] }, { id: 3, tags: ['无语'] }, { id: 4, tags: ['无语'] },
+  ])
+  const indexFile = path.join(dir, 'index.json')
+  const before = fs.readFileSync(indexFile, 'utf8')
+  const pick = h.kernel.shared.stickerSend
+  const got = []
+  for (let i = 0; i < 3; i += 1) {
+    const r = await pick({ target: `group:${GROUP_ID}`, query: '无语' })
+    assert.equal(r.ok, true)
+    got.push(r.pick.id)
+  }
+  assert.equal(new Set(got).size, got.length, `连发三次应各不相同，实际 ${got.join(',')}`)
+  assert.equal(fs.readFileSync(indexFile, 'utf8'), before, '只读模式下不得写 index.json')
+})
+
+test('控制台数量跟着磁盘走：手删一张图 → 数量立刻 -1，并报"索引指向已删文件"', async (t) => {
+  const h = await boot(t, {
+    config: { pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, stickers: { enabled: true, dir: 'qq-stickers' } } },
+  })
+  const dir = makeStickerLib(h.dataDir, [{ id: 1, tags: ['无语'] }, { id: 2, tags: ['得意'] }])
+  assert.equal(h.kernel.shared.stickerStats().count, 2)
+  assert.equal(h.kernel.shared.stickerStats().dead, 0)
+  fs.unlinkSync(path.join(dir, '2-test.png'))
+  const st = h.kernel.shared.stickerStats()
+  assert.equal(st.count, 1, '删掉图后数量应变为 1')
+  assert.equal(st.dead, 1, '要如实报出"索引里还有 1 条指向已删文件"')
+})
+
+test('索引只记标签：挑图结果不带 desc/use，关键词只按标签匹配', async (t) => {
+  const h = await boot(t, {
+    config: { pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, stickers: { enabled: true, dir: 'qq-stickers', collect: false } } },
+  })
+  // 索引只留标签：即使旧字段（desc/use）还在，也不能再当匹配依据
+  makeStickerLib(h.dataDir, [
+    { id: 1, tags: ['无语'] },
+    { id: 2, tags: ['摆烂'], desc: '无语到极点', use: '无语的时候发' },
+  ])
+  const pick = h.kernel.shared.stickerSend
+  const hit = await pick({ target: `group:${GROUP_ID}`, query: '无语' })
+  assert.equal(hit.ok, true)
+  assert.equal(hit.pick.id, 1, '关键词只按标签匹配（#2 的 desc/use 里有"无语"也不该被命中）')
+  assert.deepEqual(Object.keys(hit.pick).sort(), ['id', 'tags', 'untagged'], '挑图结果只带 id/tags/untagged')
+})
+
+test('删除不再写黑名单：清理手删条目只删索引条目，不生成 blocked-hashes.txt', async (t) => {
+  const h = await boot(t, {
+    config: { pluginConfig: { 'gate-wake': { adminQq: ADMIN_QQ }, stickers: { enabled: true, dir: 'qq-stickers', collect: true } } },
+  })
+  const dir = makeStickerLib(h.dataDir, [{ id: 1, tags: ['无语'] }, { id: 2, tags: ['得意'] }])
+  fs.unlinkSync(path.join(dir, '2-test.png')) // 手删一张图
+  const r = await h.kernel.shared.stickerSend({ target: `group:${GROUP_ID}`, query: '#1' })
+  assert.equal(r.ok, true)
+  await sleep(150) // prune 在串行队列里跑，等它落盘
+  assert.equal(fs.existsSync(path.join(dir, 'blocked-hashes.txt')), false, '不该再生成 blocked-hashes.txt')
+  const items = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).items
+  assert.deepEqual(items.map((i) => i.id), [1], '手删文件的那条应被清掉')
+})
