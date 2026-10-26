@@ -1,7 +1,7 @@
 // ⚠️ 这是**第三方代码**，不是我们写的 —— 原样 vendor，不要在这里改逻辑（要改就提 issue / 换版本）。
 // 来源：https://github.com/JackZo400/dsh-sticker-library  （MIT，见同目录 dsh-sticker-library.LICENSE）
 // 文件：src/shelf.js   取得日期：2026-10-12   拉取渠道：cdn.jsdelivr.net @main（内容 sha1 前 16 位 b84e4dd2a55c40f8）
-// 它做什么：表情包库核心 —— 内容哈希去重 / 删除黑名单 / 大小闸 / index.json / TAG_VER / catalog+resolve。
+// 它做什么：表情包库核心 —— 内容哈希去重 / 大小闸 / index.json / TAG_VER / catalog+resolve。
 // 它不做什么：不发送、不依赖 dsh、不依赖 IM 协议（README 明说可单独用）→ 我们只包一层 QQ 采集与发送。
 // 升级方式：重新从上游 src/shelf.js 拉这个文件覆盖，并把上面的日期/sha1 改掉，然后跑 selfcheck-sticker-shelf.cjs。
 // 🔧 **本地补丁（升级覆盖后必须重打）**：`applyTagResult()` 里那两道**按字兜底**正则（adult 的
@@ -22,8 +22,8 @@
  *      被压成「可爱 / 卖萌 / 无语」三类，等于没有区分度，挑图基本等于随机。
  *      让视觉模型自己写「画的是什么 / 什么场合发 / 关键词」，它才真的能挑。
  *
- *   3. **删了就得真删干净**。只把索引里的条目删掉是没用的 —— 去重看的是内容哈希，
- *      同一张图再被发一次，它会被原样收回来。所以删除要**内容哈希进黑名单**。
+ *   3. **删了就删了**。（本机已移除上游的"内容哈希黑名单"补丁，见文件头「本地补丁 2」）
+ *      删除 = 删文件 + 删索引条目；同一张图再被发进群会被重新收回来。
  *
  *   4. **两条安全线**：脏（脏话/性暗示）和烂（低质烂梗素材）。命中就在入库那一刻拦掉，
  *      别指望下游的模型每次都记得别发。
@@ -70,7 +70,6 @@ const noop = () => {}
  * @param {function} options.describe   **必填**：`(filePath, prompt) => Promise<string>`，
  *                                      把一张本地图片交给视觉模型，拿回上面那五行文本。
  * @param {string} [options.indexFile]  索引 JSON 路径，默认 `<dir>/index.json`
- * @param {string} [options.blockedFile] 删除黑名单路径，默认 `<dir>/blocked-hashes.txt`
  * @param {number} [options.maxItems]   库上限
  * @param {number} [options.maxBytes]   单张上限（默认 4MB：聊天软件里的贴图基本都在这以下）
  * @param {number} [options.minBytes]   单张下限（挡掉 icon 那种几十字节的垃圾）
@@ -83,7 +82,6 @@ export function createShelf(options = {}) {
   if (typeof options.describe !== 'function') throw new Error('createShelf: 需要 describe(filePath, prompt)')
 
   const indexFile = options.indexFile || join(dir, 'index.json')
-  const blockedFile = options.blockedFile || join(dir, 'blocked-hashes.txt')
   const maxItems = Number(options.maxItems) || 200
   const maxBytes = Number(options.maxBytes) || 4 * 1024 * 1024
   const minBytes = Number(options.minBytes) || 200
@@ -135,38 +133,6 @@ export function createShelf(options = {}) {
   const touch = () => {
     dirty = true
   }
-
-  // ---------------- 删除黑名单 ----------------
-  // 记的是**内容哈希**，不是编号：编号会被重新分配，哈希不会。
-
-  function loadBlocked() {
-    try {
-      return new Set(
-        readFileSync(blockedFile, 'utf8')
-          .split(/\s+/)
-          .map((s) => s.trim())
-          .filter(Boolean),
-      )
-    } catch {
-      return new Set()
-    }
-  }
-
-  function addBlocked(hash, why) {
-    const h = String(hash || '').trim()
-    if (!h) return false
-    try {
-      ensureDir()
-      if (loadBlocked().has(h)) return true
-      appendFileSync(blockedFile, h + (why ? '  # ' + String(why).replace(/\s+/g, ' ').slice(0, 80) : '') + '\n')
-      return true
-    } catch (e) {
-      log('黑名单写入失败:', e.message)
-      return false
-    }
-  }
-
-  const isBlockedHash = (hash) => (hash ? loadBlocked().has(String(hash)) : false)
 
   // ---------------- 收 ----------------
 
@@ -221,11 +187,6 @@ export function createShelf(options = {}) {
           continue
         }
         const hash = sha1(buf)
-        if (isBlockedHash(hash)) {
-          log('跳过已删除的贴图', hash)
-          skipped++
-          continue
-        }
         const exists = cache.items.find((i) => i.hash === hash)
         if (exists) {
           exists.seenCount = (exists.seenCount || 1) + 1
@@ -275,11 +236,11 @@ export function createShelf(options = {}) {
    *
    * `harvest()` 那条路要靠 IM 的段结构（`emoji_id` / `sub_type`）+ 一个下载回调；
    * 没有 IM 的场合（写脚本批量整理、把某个目录里的图倒进来、别的通道插件自己下好图了）
-   * 用这个 —— 去重、黑名单、大小闸、编号全跟 harvest 走同一套。
+   * 用这个 —— 去重、大小闸、编号全跟 harvest 走同一套。
    *
    * @param {Array<string|{path?:string,buf?:Buffer,summary?:string}>|string} inputs 文件路径 / Buffer / 它们的混合数组
    * @param {{nick?:string,uid?:string}} [meta] 来源信息（谁发的），只用于记档
-   * @returns {{added:number, seen:number, skipped:number}} 新增 / 之前见过 / 跳过（太小、太大、认不出格式、在黑名单里）
+   * @returns {{added:number, seen:number, skipped:number}} 新增 / 之前见过 / 跳过（太小、太大、认不出格式）
    */
   function saveFiles(inputs, meta = {}) {
     load()
@@ -301,11 +262,6 @@ export function createShelf(options = {}) {
           continue
         }
         const hash = sha1(buf)
-        if (isBlockedHash(hash)) {
-          log('跳过已删除的贴图', hash)
-          skipped++
-          continue
-        }
         const exists = cache.items.find((i) => i.hash === hash)
         if (exists) {
           exists.seenCount = (exists.seenCount || 1) + 1
@@ -519,7 +475,7 @@ export function createShelf(options = {}) {
 
   // ---------------- 删 / 整理 ----------------
 
-  /** 删一张：文件真删 + 哈希进黑名单（否则同一张图下次又被收回来）。 */
+  /** 删一张：文件真删 + 索引条目删掉（不再记黑名单：删掉的图下次被发进群会重新收进来）。 */
   function remove(id, why) {
     load()
     const n = Number(String(id).replace(/^#/, ''))
@@ -531,7 +487,6 @@ export function createShelf(options = {}) {
     } catch (e) {
       log('删文件失败 #' + n + ':', String((e && e.message) || e).slice(0, 80))
     }
-    addBlocked(it.hash, why || 'removed ' + new Date().toISOString().slice(0, 10))
     cache.items = cache.items.filter((x) => x.id !== n)
     dirty = true
     save()
@@ -603,8 +558,6 @@ export function createShelf(options = {}) {
     stats,
     get,
     isSticker,
-    isBlockedHash,
-    addBlocked,
     // 给测试/迁移用
     _load: load,
     _save: save,

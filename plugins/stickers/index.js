@@ -1,7 +1,7 @@
 /**
  * stickers — 表情包子插件（id: 'stickers'，order: 80）
  *
- * 上游核心是随包的 vendor `dsh-sticker-shelf.mjs`（哈希去重 / 删除黑名单 / 大小闸 / index.json /
+ * 上游核心是随包的 vendor `dsh-sticker-shelf.mjs`（哈希去重 / 大小闸 / index.json /
  * catalog+resolve），我们只补它不做的三件事：① QQ 入站采集；② GIF 按魔数过滤；
  * ③ 失败降级（任何异常都不打扰聊天）。
  *
@@ -259,8 +259,8 @@ export default {
     }
 
     /**
-     * 清理「文件被手删」的条目（节流 60s）。必须连标签、连哈希一起删 —— 上游可用判据不查文件是否存在，
-     * 留着条目就可能挑中一个磁盘上已经没有的路径；哈希进黑名单后同一张再被发进群也收不回来。
+     * 清理「文件被手删」的条目（节流 60s）。上游可用判据不查文件是否存在，
+     * 留着条目就可能挑中一个磁盘上已经没有的路径 → 挑图会报"没合适的"。
      */
     async function pruneLocked(s) {
       if (!collectOn()) return // 清理=删条目+写索引，只读模式下跳过（条目先留着，不影响挑图）
@@ -269,7 +269,7 @@ export default {
       prunedAt = now
       const gone = readIndex(dir).items.filter((i) => i.file && !fs.existsSync(path.join(dir, i.file)))
       for (const it of gone) s.remove(it.id, '本地文件被手动删了')
-      if (gone.length) log.info(`[表情] 清理 ${gone.length} 条「文件已被手删」的条目（标签一并删掉，hash 已拉黑）：#${gone.map((i) => i.id).join(' #')}`)
+      if (gone.length) log.info(`[表情] 清理 ${gone.length} 条「文件已被手删」的索引条目：#${gone.map((i) => i.id).join(' #')}`)
     }
 
     /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 是上游 resolve 的事）。 */
