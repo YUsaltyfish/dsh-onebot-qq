@@ -273,7 +273,8 @@ export default {
     }
 
     /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 是上游 resolve 的事）。 */
-    const hitOf = (it, p) => ({ id: it.id, file: it.file, path: p, desc: it.desc || '', use: it.use || '', tags: it.tags || [], untagged: !it.tagged })
+    // 索引只存标签（没有 desc/use 了）→ 挑图结果也只带标签，别再透传空字段
+    const hitOf = (it, p) => ({ id: it.id, file: it.file, path: p, tags: it.tags || [], untagged: !it.tagged })
 
     // 最近发过的 id（最新在前）。只影响"挑哪张"，不影响点名 `#N`（点名要严格听模型的）。
     const recentSent = []
@@ -310,9 +311,7 @@ export default {
     function pickByKeywordReadOnly(q) {
       const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
       if (!usable.length) return null
-      const byTag = usable.filter((i) => (i.tags || []).includes(q))
-      const byText = usable.filter((i) => (i.desc && i.desc.includes(q)) || (i.use && i.use.includes(q)))
-      let pool = byTag.length ? byTag : byText
+      let pool = usable.filter((i) => (i.tags || []).includes(q)) // 只有标签，没有 desc/use 可匹配
       if (!pool.length) pool = q.length <= 1 ? usable : []
       if (!pool.length) return null
       // 只读模式没有 uses/lastUsed 可依据 → 用进程内"最近发过"做轮换，避免同一个词永远一张
@@ -350,7 +349,7 @@ export default {
       if ((!hit || !hit.path) && pointed) hit = pickById(s, q, readOnly)
       if ((!hit || !hit.path) && !pointed) hit = pickRandom(s, readOnly)
       if (!hit || !hit.path) return { ok: false, reason: '没合适的' }
-      return { ok: true, id: hit.id, path: hit.path, untagged: !!hit.untagged, desc: hit.desc || '', use: hit.use || '', tags: hit.tags || [] }
+      return { ok: true, id: hit.id, path: hit.path, untagged: !!hit.untagged, tags: hit.tags || [] }
     }
 
     /** 清单（模型主动问时才给）：刚收未打标的排最前，后面接上游那份（旧图照旧）。 */
@@ -371,7 +370,10 @@ export default {
 
     /** 控制台「表情包」页顶部那行实时概况（数量随时变 → 由这里现算，不写进 schema 静态文字）。 */
     bot.shared.stickerStats = () => {
-      const items = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      // 数量必须和磁盘对得上：只算文件真实存在的条目（手删图片后控制台立刻少一张）
+      const all = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      const items = all.filter((i) => fs.existsSync(path.join(dir, i.file)))
+      const dead = all.length - items.length
       const tagged = items.filter((i) => i.tagged)
       const tags = new Set()
       for (const it of tagged) for (const t of (Array.isArray(it.tags) ? it.tags : [])) tags.add(String(t || '').trim())
@@ -382,6 +384,7 @@ export default {
         count: items.length,
         tagged: tagged.length,
         tags: tags.size,
+        dead, // 索引里有、磁盘上已没了的条目数（只读模式不会自动清）
         collect: collectOn(),
         max: Math.max(1, Number(cfg.max) || 200),
       }
@@ -497,8 +500,8 @@ export default {
         if (turn.wakeKind === 'proactive') turn.proactiveMessages = (Number(turn.proactiveMessages) || 0) + 1
       }
       noteSent(hit.id)
-      log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || hit.desc || '无标注'})`)
-      return { ok: true, target, pick: { id: hit.id, desc: hit.desc, use: hit.use, tags: hit.tags, untagged: hit.untagged } }
+      log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || '无标注'})`)
+      return { ok: true, target, pick: { id: hit.id, tags: hit.tags, untagged: hit.untagged } }
     }
     // 内核 send_message 的 sticker 参数通过这个共享槽拿到"挑图 + 发送"（插件没启用时就没人注册 → 内核如实报）
     bot.shared.stickerSend = ({ target, query, turnCtx }) => sendStickerTo(target, query, turnCtx)
@@ -526,7 +529,7 @@ export default {
 
     // ── 入口 ④：工具 sticker_catalog（先看看有什么，不占每轮 token） ─────────────
     bot.registerTool('sticker_catalog', {
-      description: '列出库里可用表情包的清单（编号 · 画面 · 什么场合用 · 关键词）与库现状。'
+      description: '列出库里可用表情包的清单（编号 · 标签/关键词）与库现状。'
         + '想先看看有什么再挑、或要按编号点名（send_sticker 传 query:"#12"）时用它；不用每轮都看。',
       parameters: {
         limit: { type: 'number', description: '最多列几条，默认 30' },

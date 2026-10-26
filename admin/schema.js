@@ -733,6 +733,7 @@ export function collectSchema(kernel, rawConfig) {
       entries.splice(at, 0, {
         key: 'info.stickers', group: '表情包', type: 'info', kind: 'plugin', plugin: 'stickers',
         text: `当前表情库：${stickerStats.count} 张（其中 ${stickerStats.tagged} 张打过标签，共 ${stickerStats.tags} 个标签）｜上限 ${stickerStats.max} 张`
+          + (stickerStats.dead > 0 ? `\n⚠️ 另有 ${stickerStats.dead} 条索引指向已被删除的图片（挑到会跳过；打开「收表情」后会自动清理）` : '')
           + `\n收表情（会写索引）：${stickerStats.collect ? '开 —— 会收新图并写 index.json' : '关 —— 库只读，只能挑现有图发'}`,
       })
     }
