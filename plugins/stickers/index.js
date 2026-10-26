@@ -1,9 +1,9 @@
 /**
  * stickers — 表情包子插件（id: 'stickers'，order: 80）
  *
- * 上游核心是随包的 vendor `dsh-sticker-shelf.mjs`（哈希去重 / 大小闸 / index.json /
- * catalog+resolve），我们只补它不做的三件事：① QQ 入站采集；② GIF 按魔数过滤；
- * ③ 失败降级（任何异常都不打扰聊天）。
+ * 存储核心在 `./shelf.js`（自己写的：索引读写 / 哈希去重 / 大小闸 / 挑图 / 清单），
+ * 本文件只做三件事：① QQ 入站采集；② GIF 按魔数过滤；③ 提醒/工具/失败降级。
+ * （2026-10-26 起不再随包携带第三方 vendor；打标/黑名单/画面描述这些用不上的能力一并删了。）
  *
  * 四条纪律（旧代码注释与事故记录，别改）：
  *  ① **判据只看协议字段**：`emoji_id` 有值 或 `sub_type != 0`；**绝不看 summary 字符串** ——
@@ -16,33 +16,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { readJsonFile } from '../../platform/atomic.js'
 import { cqImage } from '../../platform/cq-file.js'
-
-// 用随包自带的 vendor 核心（保证移植时零外部路径依赖），可通过环境变量覆盖（本地调试上游用）。
-const BUNDLED_VENDOR = fileURLToPath(new URL('../../vendor/dsh-sticker-shelf.mjs', import.meta.url))
-const VENDOR = process.env.QQ_STICKER_VENDOR || BUNDLED_VENDOR
-const TAG_INTERVAL_MS = 15 * 60 * 1000 // 打标节流：旧实现靠 cron */15；这里被聊天顺带触发，节奏一样
-const TAG_BATCH = 3 // 一次最多 3 张（一张 ≈ 一次看图往返，别堵队列）
-
-/** 打标提示词：只有「看/用/词」三行，**不带安全线**（群聊场景不需要额外的内容过滤词）。 */
-const TAG_PROMPT =
-  '这是一张 QQ 群里用的表情包（可能是动图，按整体感觉判断）。请严格按三行输出，不要解释、不要编号：\n' +
-  '看：这张图上画的是什么（40 字以内，图上的字照抄；看清是笑还是哭、什么表情再写）\n' +
-  '用：什么场合、什么心情下会发它（20 字以内）\n' +
-  '词：2-4 个中文关键词，用逗号分隔，要落在**情绪/氛围/场合/梗**上（如 无语、震惊、夸人、摆烂、投降、撒娇、阴阳怪气、看戏、狗头），' +
-  '每个词覆盖不同角度（画面动作 / 情绪 / 场合梗），彼此不能同义重复（「崩溃/破防/泪目」只能留一个）；' +
-  '不要用「可爱/搞笑/表情包/二次元」这类没有区分度的万能词'
-
-// 上游 tagPending 自带 BLOCK 闸（/BLOCK|真人照片|色情|违法/i 命中就永久 block）；我们不要安全线 →
-// 在把模型答案交给它之前把触发词中性化（改 vendor 就没法跟上游同步了）。
-const BLOCK_NEUTRALIZE = [[/真人照片/gi, '真人素材'], [/色情/gi, '成人向'], [/违法/gi, '违规'], [/\bblock\b/gi, '（无）']]
-function sanitizeTag(text) {
-  let t = String(text || '')
-  for (const [re, to] of BLOCK_NEUTRALIZE) t = t.replace(re, to)
-  return t
-}
+import { createShelf, readIndex } from './shelf.js'
 
 /** 是不是 GIF（GIF87a / GIF89a）。**按内容魔数判，不看扩展名** —— 扩展名改成 .jpg 也拦得住。 */
 function isGif(buf) {
@@ -54,7 +29,7 @@ function isGif(buf) {
 /**
  * 「这一段是不是一张表情」的**唯一判据**（采集与提示共用）。
  * 判据 = **协议字段**：`emoji_id` 有值 / `sub_type` 非 0（QQ 实测 1=动画表情、7/11=收藏表情类）。
- * 不用上游 `isSticker()`：它只认 `sub_type === '1'`（字符串），7/11 会被静默滤掉。
+ * 早先的实现只认 `sub_type === '1'`（字符串），7/11 会被静默滤掉 —— 所以判据按数值判。
  * **不看 summary 字符串**：真人照片/截图也带 `[文件名]` 式 summary，靠字符串猜会把照片灌进库。
  */
 function isStickerSeg(seg) {
@@ -64,18 +39,6 @@ function isStickerSeg(seg) {
   return Number.isFinite(st) && st !== 0
 }
 
-/**
- * 交给上游 `harvest()` 前把段"翻译"成它认的形态（它只认 `sub_type === '1'` / `emoji_id`）。
- * ⚠️ 必须是**拷贝**：原事件对象后面还要拼 prompt / 发引用，不许被改脏。
- */
-function normalizeForUpstream(segs) {
-  return (Array.isArray(segs) ? segs : []).map((seg) => {
-    if (!seg || seg.type !== 'image' || !isStickerSeg(seg)) return seg
-    const d = seg.data || {}
-    if ((d.emoji_id != null && String(d.emoji_id) !== '') || String(d.sub_type) === '1') return seg
-    return { ...seg, data: { ...d, sub_type: '1' } }
-  })
-}
 
 /**
  * 串行队列 = **单写者**。index.json 整个库只有一份索引 → 队列必须**进程内唯一**
@@ -90,15 +53,6 @@ class AsyncQueue {
   }
 }
 
-/** 只读索引（写侧是 vendor 的原子替换；读侧剥 BOM，Windows 编辑器另存不会把库读崩）。 */
-function readIndex(dir) {
-  try {
-    const data = readJsonFile(path.join(dir, 'index.json'))
-    return data && typeof data === 'object' ? data : { items: [] }
-  } catch {
-    return { items: [] }
-  }
-}
 
 /** 元标签：描述的是"图源/场合大类"，不是情绪，拿它点名只会永远发同一张 → 不许用来匹配提示。 */
 const META_TAGS = new Set(['群聊', '表情包', '二次元', '搞笑', '可爱', '梗图', '网络', '日常', '图片', '动画表情'])
@@ -127,8 +81,7 @@ export default {
       hint: '相对路径由内核按数据目录解析；index.json 与图片都在这里。**只由本插件一条串行队列写**，别再让外部脚本写它' },
     max: { type: 'int', default: 200, min: 10, max: 2000, step: 10, group: '表情包', label: '库上限（张）',
       hint: '满了跳过新图（不淘汰旧的）；要换血就手动删几张' },
-    // 「自动打标」依赖内核注入 bot.describeImage（当前内核没有）→ 不在控制台暴露，避免死开关；
-    // 运行时代码仍读 cfg.tagging，内核将来补上后把这一项加回来即可。
+    // 不做自动打标：内核没有看图能力（bot.describeImage），索引也只记标签 —— 不加死开关。
     skipGif: { type: 'bool', default: true, group: '表情包', label: '跳过 GIF（只收静态图）',
       hint: '按内容魔数判（GIF87a/GIF89a），扩展名改成 .jpg 也拦得住；只挡新收的图' },
     collectGroupsOnly: { type: 'bool', default: true, group: '表情包', label: '只在群里收', hint: '开：只收群聊里的表情；关：私聊里的也收。' },
@@ -155,39 +108,17 @@ export default {
     const queue = new AsyncQueue()
     if (bot.state && typeof bot.state === 'object') bot.state.stickersQueue = queue
 
-    let shelfPromise = null
-    let lastTagAt = 0
     let prunedAt = 0
     const offerAt = new Map() // chatKey -> 上次提醒时间（丢了也只会早提醒一次，不值得进 ChatState）
 
-    if (cfg.tagging && typeof bot.describeImage !== 'function') {
-      log.warn('[表情] 打标已开，但内核没注入看图能力（bot.describeImage）→ 只收不打；这是契约缺口，找内核补')
-    }
-
-    /** 懒加载上游核心；初始化失败就永久降级（返回 null），绝不影响聊天。 */
-    function shelf() {
-      if (!shelfPromise) {
-        shelfPromise = import(pathToFileURL(VENDOR).href)
-          .then((m) => m.createShelf({
-            dir,
-            // 打标要"看图"：契约的 bot 上没有视觉方法 → 内核要支持打标就注入 bot.describeImage(file, prompt)。
-            describe: async (file, prompt) => {
-              if (typeof bot.describeImage !== 'function') throw new Error('内核未注入看图能力 bot.describeImage')
-              return sanitizeTag(await bot.describeImage(file, prompt))
-            },
-            prompt: TAG_PROMPT,
-            maxItems: Math.max(1, Number(cfg.max) || 200),
-            maxBytes: 2 * 1024 * 1024, // 单张 ≤2MB（旧实现同值；表情常见 1~2MB）
-            minBytes: 1024, // 挡掉 icon 那种几十字节的垃圾
-            log: (...a) => log.info('[表情] ' + a.join(' ')),
-          }))
-          .catch((e) => {
-            log.warn(`[表情] 库初始化失败，本功能降级（聊天不受影响）: ${e.message}`)
-            return null
-          })
-      }
-      return shelfPromise
-    }
+    // 存储核心（自己的实现，见 ./shelf.js）。单写者 = 本插件那条串行队列。
+    const shelf = createShelf({
+      dir,
+      maxItems: Math.max(1, Number(cfg.max) || 200),
+      maxBytes: 2 * 1024 * 1024, // 单张 ≤2MB（表情常见 1~2MB）
+      minBytes: 1024, // 挡掉 icon 那种几十字节的垃圾
+      log: (...a) => log.info('[表情] ' + a.join(' ')),
+    })
 
     /**
      * 取图字节：① 段里的 file 是现成本地文件就直接读；② 原始 url 直链兜底。
@@ -223,19 +154,17 @@ export default {
 
     /** 采集一批表情段（已在队列里跑）。 */
     async function harvest(segs, ev) {
-      const s = await shelf()
-      if (!s) return
       const nick = String(ev.sender?.name || ev.sender?.card || '')
-      let gifSkipped = 0 // 我们自己挡掉的 gif（上游只回总数，扣掉它免得"有表情没入库"重复报一遍）
-      const r = await s.harvest(normalizeForUpstream(segs), { nick, uid: String(ev.sender?.qq ?? '') }, async (seg) => {
+      let gifSkipped = 0 // 我们自己挡掉的 gif（shelf 只回总数，扣掉它免得"有表情没入库"重复报一遍）
+      const r = await shelf.harvest(segs, { nick, uid: String(ev.sender?.qq ?? '') }, async (seg) => {
         const d = (seg && seg.data) || {}
         const bytes = await fetchBytes(d.file, d.url)
-        // 返回 null = 上游按「跳过」计数（不写索引、不报警告、不算错）
+        // 返回 null = 按「跳过」计数（不写索引、不报警告、不算错）
         if (cfg.skipGif !== false && isGif(bytes)) { log.debug('[表情] 跳过 gif（设置了不收动图）'); gifSkipped++; return null }
         return bytes
       })
       if (!r.added && !r.seen) {
-        // 静默丢弃路径要留声（旧实现踩过：sub_type 7/11 被上游滤掉、日志一个字都没有）
+        // 静默丢弃路径要留声（旧实现踩过：sub_type 7/11 被滤掉、日志一个字都没有）
         const other = r.skipped - gifSkipped
         if (other > 0) log.debug(`[表情] 有表情但没入库：跳过 ${other} 张（取字节失败 / 超出 1KB~2MB 闸 / 格式不认识）`)
         return
@@ -243,36 +172,21 @@ export default {
       log.info(`[表情] 入库 +${r.added}（已有 ${r.seen}，跳过 ${r.skipped}）${nick ? ' ← ' + nick : ''}`)
     }
 
-    /** 打标（tagging=true 时）：节流 + 与采集同一条队列（同一写者）。 */
-    function maybeTag() {
-      if (!collectOn()) return // 写索引的路径：收表情关着就不跑
-      if (!cfg.tagging || typeof bot.describeImage !== 'function') return
-      const now = Date.now()
-      if (now - lastTagAt < TAG_INTERVAL_MS) return
-      lastTagAt = now
-      queue.push(async () => {
-        const s = await shelf()
-        if (!s) return
-        const n = await s.tagPending(TAG_BATCH)
-        if (n) log.info(`[表情] 打标 ${n} 张`)
-      }).catch((e) => log.warn(`[表情] 打标失败（不影响聊天）: ${e.message}`))
-    }
-
     /**
-     * 清理「文件被手删」的条目（节流 60s）。上游可用判据不查文件是否存在，
+     * 清理「文件被手删」的条目（节流 60s）。索引不查文件是否存在，
      * 留着条目就可能挑中一个磁盘上已经没有的路径 → 挑图会报"没合适的"。
      */
-    async function pruneLocked(s) {
+    async function pruneLocked(s = shelf) {
       if (!collectOn()) return // 清理=删条目+写索引，只读模式下跳过（条目先留着，不影响挑图）
       const now = Date.now()
       if (now - prunedAt < 60000) return
       prunedAt = now
       const gone = readIndex(dir).items.filter((i) => i.file && !fs.existsSync(path.join(dir, i.file)))
-      for (const it of gone) s.remove(it.id, '本地文件被手动删了')
+      for (const it of gone) s.remove(it.id)
       if (gone.length) log.info(`[表情] 清理 ${gone.length} 条「文件已被手删」的索引条目：#${gone.map((i) => i.id).join(' #')}`)
     }
 
-    /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 是上游 resolve 的事）。 */
+    /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 由 shelf.recordUse 负责）。 */
     // 索引只存标签（没有 desc/use 了）→ 挑图结果也只带标签，别再透传空字段
     const hitOf = (it, p) => ({ id: it.id, file: it.file, path: p, tags: it.tags || [], untagged: !it.tagged })
 
@@ -297,19 +211,19 @@ export default {
       const n = Number(String(q).replace(/^#/, '')) // ⚠️ 必须剥 #：Number('#3') 是 NaN
       if (!Number.isFinite(n)) return null
       const it = readIndex(dir).items.find((x) => x.id === n)
-      if (!it || it.blocked || it.adult || !it.file) return null
+      if (!it || it.blocked || !it.file) return null
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null
-      if (it.tagged && !readOnly) { const r = s.resolve('#' + it.id); if (r && r.path) return r } // 打过标走上游 → 它记 uses/lastUsed
+      if (!readOnly) s.recordUse(it.id) // 可写模式：记一次使用（uses/lastUsed）
       return hitOf(it, p)
     }
 
     /**
-     * 只读关键词挑图：等价于上游 `resolve(词)` 的匹配规则，但**不写 uses/lastUsed**、不落盘。
+     * 只读关键词挑图：与 `shelf.resolve(词)` 的匹配规则一致（只按标签），但**不写 uses/lastUsed**、不落盘。
      * 只在「收表情（会写索引）」关着时用 —— 索引是只读的，绝不能在挑图这步把内存副本写回去。
      */
     function pickByKeywordReadOnly(q) {
-      const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      const usable = readIndex(dir).items.filter((i) => !i.blocked && i.file)
       if (!usable.length) return null
       let pool = usable.filter((i) => (i.tags || []).includes(q)) // 只有标签，没有 desc/use 可匹配
       if (!pool.length) pool = q.length <= 1 ? usable : []
@@ -324,16 +238,16 @@ export default {
 
     /**
      * 随便挑一张**可用**的（真随机，不防重复 —— 表情包重复用也是一种聊天方法）。
-     * 池子包含"刚收未打标"的图：上游 usableItems 只算打过标的，照它挑会永远只用旧图（旧实现真踩过）。
+     * 池子包含"刚收未打标"的图：shelf 的清单只列打过标签的，全靠它挑会永远只用旧图（旧实现真踩过）。
      */
     function pickRandom(s, readOnly = false) {
-      const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      const usable = readIndex(dir).items.filter((i) => !i.blocked && i.file)
       if (!usable.length) return null
       const fresh = preferFresh(usable) // 随机也避开刚发过的那几张（库里只有几张时自动退化成纯随机）
       const it = fresh[Math.floor(Math.random() * fresh.length)]
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null // 手删的（prune 通常已清掉，这里只挡竞态）
-      if (it.tagged && !readOnly) { const r = s.resolve('#' + it.id); if (r && r.path) return r }
+      if (!readOnly) s.recordUse(it.id) // 可写模式：记一次使用
       return hitOf(it, p)
     }
 
@@ -352,12 +266,12 @@ export default {
       return { ok: true, id: hit.id, path: hit.path, untagged: !!hit.untagged, tags: hit.tags || [] }
     }
 
-    /** 清单（模型主动问时才给）：刚收未打标的排最前，后面接上游那份（旧图照旧）。 */
+    /** 清单（模型主动问时才给）：刚收未打标的排最前，后面接 shelf 那份（旧图照旧）。 */
     async function catalogLocked(s, limit) {
       const lim = Number(limit) || 30
       await pruneLocked(s)
       const fresh = readIndex(dir).items
-        .filter((i) => !i.blocked && !i.adult && i.file && !i.tagged)
+        .filter((i) => !i.blocked && i.file && !i.tagged)
         .sort((a, b) => (b.ts || 0) - (a.ts || 0))
         .slice(0, Math.max(1, Math.round(lim / 3)))
         .map((i) => `#${i.id} （刚收的，还没打标 · 可当语气图随便用）`)
@@ -366,12 +280,12 @@ export default {
     }
 
     /** 随机池大小（只读盘，不排队）：掷骰前置判断"挑得到才提示"。 */
-    const pickableCount = () => readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file).length
+    const pickableCount = () => readIndex(dir).items.filter((i) => !i.blocked && i.file).length
 
     /** 控制台「表情包」页顶部那行实时概况（数量随时变 → 由这里现算，不写进 schema 静态文字）。 */
     bot.shared.stickerStats = () => {
       // 数量必须和磁盘对得上：只算文件真实存在的条目（手删图片后控制台立刻少一张）
-      const all = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
+      const all = readIndex(dir).items.filter((i) => !i.blocked && i.file)
       const items = all.filter((i) => fs.existsSync(path.join(dir, i.file)))
       const dead = all.length - items.length
       const tagged = items.filter((i) => i.tagged)
@@ -403,7 +317,7 @@ export default {
       try { items = readIndex(dir).items } catch { return '' }
       const hit = new Set()
       for (const it of items) {
-        if (!it || it.blocked || it.adult || !it.file) continue
+        if (!it || it.blocked || !it.file) continue
         for (const t of (Array.isArray(it.tags) ? it.tags : [])) {
           const w = String(t || '').trim()
           if (w.length < 2 || META_TAGS.has(w)) continue // 元标签/单字：没有区分度，不许点名
@@ -419,9 +333,7 @@ export default {
     async function pick(query) {
       if (cfg.enabled === false) return { ok: false, reason: '表情库没开' }
       return queue.push(async () => {
-        const s = await shelf()
-        if (!s) return { ok: false, reason: '表情库不可用' }
-        try { return await pickLocked(s, query) } catch (e) {
+        try { return await pickLocked(shelf, query) } catch (e) {
           log.warn(`[表情] 挑图失败: ${e.message}`)
           return { ok: false, reason: '挑图出错' }
         }
@@ -437,7 +349,6 @@ export default {
       const segs = (ev.rawSegments || []).filter((s) => s && s.type === 'image' && isStickerSeg(s))
       if (!segs.length) return
       queue.push(() => harvest(segs, ev)).catch((e) => log.warn(`[表情] 采集失败（不影响聊天）: ${e.message}`))
-      maybeTag()
     })
 
     // ── 入口 ②：主动想起（内核管概率、模型管语境、本插件管挑图） ───────────────
@@ -474,7 +385,6 @@ export default {
         ]
       ev.hint.push(lead[Math.floor(Math.random() * lead.length)])
       log.info(`[表情包] 掷骰命中 (${ev.chatKey}, p=${pct}%, 可挑 ${pool} 张${tag ? `, 语境标签=${tag}` : ''}) → 本轮提示「可以发一张」`)
-      maybeTag()
     })
 
     // ── 入口 ③：工具 send_sticker（一轮最多 maxPerTurn 张；target 取当前 TurnContext，不信模型传） ──
@@ -528,14 +438,12 @@ export default {
         limit: { type: 'number', description: '最多列几条，默认 30' },
       },
       execute: async (args) => queue.push(async () => {
-        const s = await shelf()
-        if (!s) return { ok: true, catalog: '', stats: { enabled: cfg.enabled !== false, dir, ok: false } }
         try {
-          await pruneLocked(s)
+          await pruneLocked(shelf)
           return {
             ok: true,
-            catalog: await catalogLocked(s, args?.limit),
-            stats: { enabled: cfg.enabled !== false, dir, ok: true, ...s.stats(), pickable: pickableCount() },
+            catalog: await catalogLocked(shelf, args?.limit),
+            stats: { enabled: cfg.enabled !== false, dir, ok: true, ...shelf.stats(), pickable: pickableCount() },
           }
         } catch (e) {
           return { ok: true, catalog: '', stats: { enabled: cfg.enabled !== false, dir, ok: false, err: e.message } }

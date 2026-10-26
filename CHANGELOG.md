@@ -21,6 +21,7 @@
 - **撤回失败不再回显 NapCat 原始报错**：适配器把 `NTEvent / EventRet / decode failed` 原文只写日志、对外返回人话；`gate-wake` 的撤回失败回执也只发人话。修复 2026-10-23 15:37 把整段内部报错发进群的问题。
 - **`/history` 上限 200 → 500**：`plugins/commands/index.js` 的 `HISTORY_MAX` 放宽（默认仍 50）；500 条约 23KB / 7.6K token，拉取仍在适配器 8s 超时内。
 - **修复点赞通知制造空对话**：NapCat 的点赞通知（`profile_like`）没有 `user_id`/`group_id`，归一后 chatKey 变成 `private:undefined`，又被「私聊永远算被叫」放行 → 出现两个空模型回合、并建出 `private:undefined` 的 DSH 会话。现在：无身份 notice 直接丢弃（format）、notice 一律不进模型（gate-wake）、非法 chatKey 在 runTurn 第二道防线丢弃。
+- **表情库改为自研存储，删除第三方 vendor**：不再随包携带 `vendor/dsh-sticker-shelf.mjs`（MIT，JackZo400/dsh-sticker-library，2026-10-12 引入）。按实际用到的能力重写为 `plugins/stickers/shelf.js`（索引读写/哈希去重/大小闸/挑图/清单/统计，约 280 行），并删掉用不上的打标（`tagPending`/看图回调/BLOCK 安全线）、删除黑名单、adult/lowq/renumber 等。`package.json.files` 去掉 `vendor`，`docs/开发指南.md` 目录表同步。
 - **删除表情包「删除黑名单」（`blocked-hashes.txt`）**：本机不需要"删掉的表情别再收回来"这套账本 —— 删一张 = 删文件 + 删索引条目。`vendor/dsh-sticker-shelf.mjs` 里 `loadBlocked/addBlocked/isBlockedHash` 及其调用（harvest ×2、remove ×1）一并移除（记为该文件的「本地补丁 2」，升级覆盖后需重打）。
 - **表情索引瘦身：只记标签**：去掉 `desc`（画面描述）/`use`（什么场合发）/`summary`/`fromNick`/`fromUid`/`seenCount`/`lastSeen`，每条只留 `id/hash/file/tags/tagged/blocked/tagVer/uses/lastUsed/ts`（index.json 97KB → 39KB）；关键词挑图只按标签匹配；`sticker_catalog` 清单变成「编号 · 标签」；控制台数量改为「只算磁盘上真实存在的图」，并单独提示「N 条索引指向已删文件」。
 - **修复表情包总是发同一张**：`matchContextTag` 会用整段上下文（含内核注入的 `[群聊上文]` 脚手架）匹配标签 → 命中库里唯一带「群聊」标签的那张（`#107`「正在严肃对群友哈气」），提示词因此 58/64 次点名「群聊」、模型照抄 44 次。现在：① 匹配前剥掉脚手架行；② 元标签（群聊/表情包/二次元…）不参与点名；③ 同名标签取最长的（更具体）；④ 只读模式加进程内"最近发过"轮换，同一个词不会连发同一张；⑤ 提示句式轮换并允许模型自己换词。
