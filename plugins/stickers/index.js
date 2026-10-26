@@ -100,6 +100,15 @@ function readIndex(dir) {
   }
 }
 
+/** 元标签：描述的是"图源/场合大类"，不是情绪，拿它点名只会永远发同一张 → 不许用来匹配提示。 */
+const META_TAGS = new Set(['群聊', '表情包', '二次元', '搞笑', '可爱', '梗图', '网络', '日常', '图片', '动画表情'])
+
+/**
+ * 最近发过的图（进程内，最多 30 个 id，最新在前）：只用于**避开重复**，不写索引。
+ * 只读模式下 `uses/lastUsed` 不更新，没有这层轮换时"同一个词"会永远挑到同一张。
+ */
+const RECENT_SENT_MAX = 30
+
 export default {
   id: 'stickers',
   title: '表情包',
@@ -266,6 +275,22 @@ export default {
     /** 把索引条目变成挑图结果（只读；写 uses/lastUsed 是上游 resolve 的事）。 */
     const hitOf = (it, p) => ({ id: it.id, file: it.file, path: p, desc: it.desc || '', use: it.use || '', tags: it.tags || [], untagged: !it.tagged })
 
+    // 最近发过的 id（最新在前）。只影响"挑哪张"，不影响点名 `#N`（点名要严格听模型的）。
+    const recentSent = []
+    const noteSent = (id) => {
+      const n = Number(id)
+      if (!Number.isFinite(n)) return
+      const at = recentSent.indexOf(n)
+      if (at >= 0) recentSent.splice(at, 1)
+      recentSent.unshift(n)
+      if (recentSent.length > RECENT_SENT_MAX) recentSent.length = RECENT_SENT_MAX
+    }
+    /** 把最近发过的排到后面（全都发过就保持原样 —— 库小的时候只能重复）。 */
+    const preferFresh = (list) => {
+      const fresh = list.filter((it) => !recentSent.includes(it.id))
+      return fresh.length ? fresh : list
+    }
+
     /** 点名 `#N`：只认库里真有的那张，没找到就 null（**绝不换一张别的** —— 严格性是踩坑换来的）。 */
     function pickById(s, q, readOnly = false) {
       const n = Number(String(q).replace(/^#/, '')) // ⚠️ 必须剥 #：Number('#3') 是 NaN
@@ -290,8 +315,9 @@ export default {
       let pool = byTag.length ? byTag : byText
       if (!pool.length) pool = q.length <= 1 ? usable : []
       if (!pool.length) return null
-      const top = pool.slice().sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0)).slice(0, 5)
-      const it = top[Math.floor(Math.random() * top.length)]
+      // 只读模式没有 uses/lastUsed 可依据 → 用进程内"最近发过"做轮换，避免同一个词永远一张
+      const fresh = preferFresh(pool)
+      const it = fresh[Math.floor(Math.random() * fresh.length)]
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null
       return hitOf(it, p)
@@ -304,7 +330,8 @@ export default {
     function pickRandom(s, readOnly = false) {
       const usable = readIndex(dir).items.filter((i) => !i.blocked && !i.adult && i.file)
       if (!usable.length) return null
-      const it = usable[Math.floor(Math.random() * usable.length)]
+      const fresh = preferFresh(usable) // 随机也避开刚发过的那几张（库里只有几张时自动退化成纯随机）
+      const it = fresh[Math.floor(Math.random() * fresh.length)]
       const p = path.join(dir, it.file)
       if (!fs.existsSync(p)) return null // 手删的（prune 通常已清掉，这里只挡竞态）
       if (it.tagged && !readOnly) { const r = s.resolve('#' + it.id); if (r && r.path) return r }
@@ -362,22 +389,27 @@ export default {
 
     /** 从上下文里找一个能对上的表情标签（给"主动想起"的提示用；找不到返回 ''） */
     function matchContextTag(ev) {
-      let ctx = String(ev?.text || '')
-      if (ev?.historyBlock) ctx += '\n' + String(ev.historyBlock)
+      // 只拿**真实聊天内容**匹配：先剥掉内核注入的脚手架行（`[群聊上文]`、`[群历史: …]`）。
+      // 不剥的话「[群聊上文]」里的「群聊」会命中库里带「群聊」标签的那张，
+      // 于是每轮提示都是同一个词、永远发同一张图（2026-10-26 实测 58/64 次点名「群聊」）。
+      const strip = (t) => String(t || '').replace(/^\s*\[(?:群聊上文|群历史)[^\]]*\]\s*$/gm, '')
+      let ctx = strip(ev?.text)
+      if (ev?.historyBlock) ctx += '\n' + strip(ev.historyBlock)
       if (!ctx.trim()) return ''
       let items = []
       try { items = readIndex(dir).items } catch { return '' }
-      const seen = new Set()
-      const tags = []
+      const hit = new Set()
       for (const it of items) {
         if (!it || it.blocked || it.adult || !it.file) continue
         for (const t of (Array.isArray(it.tags) ? it.tags : [])) {
           const w = String(t || '').trim()
-          if (w.length >= 2 && !seen.has(w)) { seen.add(w); tags.push(w) }
+          if (w.length < 2 || META_TAGS.has(w)) continue // 元标签/单字：没有区分度，不许点名
+          if (ctx.includes(w)) hit.add(w)
         }
       }
-      for (const w of tags) if (ctx.includes(w)) return w
-      return ''
+      if (!hit.size) return ''
+      // 取**最长**的那个（更具体：「阴阳怪气」优于「好用」），同长度取字典序靠前的，结果稳定
+      return [...hit].sort((a, b) => b.length - a.length || a.localeCompare(b))[0]
     }
 
     /** 挑图（工具与自检共用；所有触碰索引的动作都走这条队列）。 */
@@ -424,10 +456,20 @@ export default {
       const tag = matchContextTag(ev)
       // 记进本轮上下文：send_message 的返回里会再轻推一句（模型更容易顺手带上）
       ev._scratch.turnExtras = { ...(ev._scratch.turnExtras || {}), stickerOffer: { tag: tag || '' } }
-      // 提示要"顺手"，不能只给一个可选工具：直接把参数写出来，省模型一步判断
-      ev.hint.push(tag
-        ? `[表情:这轮顺手带一张「${tag}」的 —— 发正文时把 sticker:"${tag}" 一起传给 send_message 就行（不用另说一句、不用解释）]`
-        : '[表情:这轮顺手带一张 —— 发正文时给 send_message 加 sticker:"随便挑" 即可（也可以单独调 send_sticker）]')
+      // 提示要"顺手"，但**不能写成唯一答案**：句式轮换 + 明确许可自选词，
+      // 否则模型会把同一句照抄 40 多次、每轮都发同一张（2026-10-26 实测）。
+      const lead = tag
+        ? [
+          `[表情:这轮可以顺手带一张「${tag}」的 —— 发正文时给 send_message 加 sticker:"${tag}" 就行]`,
+          `[表情:这轮想配图的话，「${tag}」那张挺合适（send_message 加 sticker:"${tag}"）]`,
+          `[表情:要是想配个表情，「${tag}」这个词对得上（sticker:"${tag}"，也可以按你此刻的心情自己换个词）]`,
+        ]
+        : [
+          '[表情:这轮可以顺手带一张 —— send_message 加 sticker:"随便挑"，或按当下心情自己给个词]',
+          '[表情:想配图的话，库里随便挑一张就行（sticker:"随便挑"；也可以自己给个词）]',
+          '[表情:这轮要不要带张表情？sticker:"随便挑" 或你喜欢的词都行]',
+        ]
+      ev.hint.push(lead[Math.floor(Math.random() * lead.length)])
       log.info(`[表情包] 掷骰命中 (${ev.chatKey}, p=${pct}%, 可挑 ${pool} 张${tag ? `, 语境标签=${tag}` : ''}) → 本轮提示「可以发一张」`)
       maybeTag()
     })
@@ -454,6 +496,7 @@ export default {
         turn.stickersSent = (turn.stickersSent || 0) + 1
         if (turn.wakeKind === 'proactive') turn.proactiveMessages = (Number(turn.proactiveMessages) || 0) + 1
       }
+      noteSent(hit.id)
       log.info(`[表情] 发出 #${hit.id}${hit.untagged ? '(新收未打标)' : ''} → ${target} (${(hit.tags || []).join('/') || hit.desc || '无标注'})`)
       return { ok: true, target, pick: { id: hit.id, desc: hit.desc, use: hit.use, tags: hit.tags, untagged: hit.untagged } }
     }
