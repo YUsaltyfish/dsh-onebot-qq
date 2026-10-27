@@ -96,7 +96,7 @@ test('5. user-questions/request：只拦截 QQ 会话；网页会话必须 next(
 test('6. fetchGroupContext 增量水位：不重复旧消息、排除本条、按水位只给新增', async (t) => {
   const h = await boot(t)
   const now = Math.floor(Date.now() / 1000)
-  h.kernel.napcat.groupHistory = async () => [
+  h.kernel.onebot.groupHistory = async () => [
     { message_id: 11, time: now - 100, sender: { user_id: MEMBER_QQ, nickname: '群友' }, message: [{ type: 'text', data: { text: '旧消息一' } }] },
     { message_id: 12, time: now - 90, sender: { user_id: ADMIN_QQ, nickname: '主人' }, message: [{ type: 'text', data: { text: '旧消息二' } }] },
     { message_id: 13, time: now - 10, sender: { user_id: MEMBER_QQ, nickname: '群友' }, message: [{ type: 'text', data: { text: '新消息' } }] },
@@ -120,8 +120,8 @@ test('7. syncSessionTitles：标题同步成「群名 (群号)」；失败不中
   assert.ok(session, '会话存在')
   assert.ok(String(session.title).includes('测试群') && String(session.title).includes(String(GROUP_ID)), `标题=${session.title}`)
 
-  h.kernel.napcat.groupList = async () => {
-    throw new Error('napcat down')
+  h.kernel.onebot.groupList = async () => {
+    throw new Error('onebot down')
   }
   const r = await h.kernel.dsh.syncSessionTitles({ force: true })
   assert.equal(typeof r, 'object', '取群名失败也不抛（降级）')

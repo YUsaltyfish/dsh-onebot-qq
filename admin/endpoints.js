@@ -3,14 +3,14 @@
  *
  *   schema  控制表 + 子插件 + 动作按钮 + 当前值
  *   status  健康 / QQ 线 / 群管控 / 人设 / 句池 / 主动接话 / 迎宾 / 子插件 / 服务
- *           + 新手引导（meta / onboarding / napcat / imagegen；**绝不回显任何 key**）
+ *           + 新手引导（meta / onboarding / onebot / imagegen；**绝不回显任何 key**）
  *   set     写一个白名单配置键（热生效）
  *   module  子插件启停（写 pluginConfig.<id>.enabled）
  *   group   群管控：ignore / allowlist / blocklist / keywords / spont / welcome 的 add/remove/toggle/ensure
  *   memory  群记忆：list / read / save / config / setcfg / refresh
  *   persona 人设：list / switch（platform/persona-ref.js，跨平台软链→复制降级）
  *   action  动作：reply-preset / reset-session / welcome-images / welcome-test / clear-qq-sessions
- *           + 新手引导（napcat-check / napcat-reconnect / imagegen-check）
+ *           + 新手引导（onebot-check / onebot-reconnect / imagegen-check）
  *           + 运维诊断（diagnose → admin/diagnostics.js，生成脱敏报告）
  *           + 运维动作（selfcheck / cleanup-tmp / dedup-baks）→ ops provider，没有则“本机未配置”
  *
@@ -200,9 +200,9 @@ function sessionIdOf(kernel, chatKey) {
 }
 
 async function fetchGroupList(kernel) {
-  if (typeof kernel?.napcat?.groupList !== 'function') return []
+  if (typeof kernel?.onebot?.groupList !== 'function') return []
   try {
-    const list = await withTimeout(kernel.napcat.groupList(), 4000)
+    const list = await withTimeout(kernel.onebot.groupList(), 4000)
     return (Array.isArray(list) ? list : [])
       .map((g) => ({ id: String(g.id), name: toStr(g.name) }))
       .filter((g) => /^\d+$/.test(g.id))
@@ -366,16 +366,16 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   /**
-   * 测一次 OneBot 协议端连接：优先内核 `kernel.checkNapcat()`（A 提供，函数名沿用旧名）；
+   * 测一次 OneBot 协议端连接：优先内核 `kernel.checkOneBot()`（A 提供，函数名沿用旧名）；
    * 老内核退回「health + get_login_info（5s 超时）」。
    */
-  async function checkNapcatNow() {
-    if (typeof kernel?.checkNapcat === 'function') {
-      const r = await safeAsync(() => kernel.checkNapcat(), null)
+  async function checkOneBotNow() {
+    if (typeof kernel?.checkOneBot === 'function') {
+      const r = await safeAsync(() => kernel.checkOneBot(), null)
       if (r && typeof r === 'object') return r
-      return { ok: false, linked: false, error: 'OneBot 连接自检失败（checkNapcat 抛错，详见内核日志）' }
+      return { ok: false, linked: false, error: 'OneBot 连接自检失败（checkOneBot 抛错，详见内核日志）' }
     }
-    const health = safe(() => kernel?.napcat?.health?.(), {}) || {}
+    const health = safe(() => kernel?.onebot?.health?.(), {}) || {}
     const base = {
       linked: Boolean(health.linked),
       stale: Boolean(health.stale),
@@ -386,8 +386,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     if (!base.linked) return { ok: false, ...base, error: 'OneBot 未连接（检查协议端是否启动、WS 地址/token 是否正确）' }
     const t0 = Date.now()
     try {
-      if (typeof kernel?.napcat?.wsApi !== 'function') return { ok: true, ...base, latencyMs: 0 }
-      const raw = await withTimeout(kernel.napcat.wsApi('get_login_info', {}), 5000)
+      if (typeof kernel?.onebot?.wsApi !== 'function') return { ok: true, ...base, latencyMs: 0 }
+      const raw = await withTimeout(kernel.onebot.wsApi('get_login_info', {}), 5000)
       const info = raw?.data?.data ?? raw?.data ?? raw ?? {}
       return {
         ok: true,
@@ -428,8 +428,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   /** 协议端连接配置快照（token 只报"有没有填"，不回显）。 */
-  function napcatStateOf(raw, health) {
-    const nap = isPlainObject(raw?.napcat) ? raw.napcat : {}
+  function onebotStateOf(raw, health) {
+    const nap = isPlainObject(raw?.onebot) ? raw.onebot : {}
     return {
       wsUrl: toStr(nap.wsUrl),
       httpUrl: toStr(nap.httpUrl),
@@ -460,7 +460,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         hint: adminQq > 0 ? `已填 ${adminQq}` : '在「群聊」页顶部填上你的 QQ（必填）',
       },
       {
-        id: 'napcat', label: 'OneBot 连接', required: true, ok: napOk,
+        id: 'onebot', label: 'OneBot 连接', required: true, ok: napOk,
         hint: napOk ? '已连接' : '在「OneBot 连接」页填地址 → 点「测试 OneBot 连接」',
       },
       {
@@ -503,7 +503,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   async function status() {
     const raw = store.read()
     const rt = runtimeOf()
-    const napcatHealth = safe(() => kernel?.napcat?.health?.(), {}) || {}
+    const onebotHealth = safe(() => kernel?.onebot?.health?.(), {}) || {}
     const dshHealth = safe(() => kernel?.dsh?.health?.(), {}) || {}
     const lines = { mapped: 0, group: [], private: [] }
     for (const key of sessionKeysOf(kernel)) {
@@ -523,8 +523,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const welcomeCfg = pluginCfg(raw, 'group-welcome')
     const welcomeGroups = toStrList(welcomeCfg.groups)
 
-    const napcatGroups = await fetchGroupList(kernel)
-    const nameByGid = new Map(napcatGroups.map((g) => [g.id, g.name]))
+    const onebotGroups = await fetchGroupList(kernel)
+    const nameByGid = new Map(onebotGroups.map((g) => [g.id, g.name]))
     const lineGids = lines.group.map((k) => String(k).replace(/^group:/, ''))
 
     // 群清单口径（与现网一致）：屏蔽 ∪ 名单 ∪ 唤醒词 ∪ 欢迎群 ∪ 已有群会话
@@ -567,7 +567,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     // 新手引导 / 连接状态（契约 §3.2）：路径、配置完成度、OneBot 连接、生图（key 永不回显）
     const paths = pathsOf()
     const imagegen = imagegenStateOf(raw)
-    const napcat = napcatStateOf(raw, napcatHealth)
+    const onebot = onebotStateOf(raw, onebotHealth)
     const meta = {
       version: toStr(kernel?.version) || PKG_VERSION,
       dataDir: paths.dataDir,
@@ -576,7 +576,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       platform: toStr(safe(() => process.platform, '')),
       node: toStr(safe(() => process.version, '')),
     }
-    const onboarding = onboardingOf(raw, persona, napcatHealth, imagegen)
+    const onboarding = onboardingOf(raw, persona, onebotHealth, imagegen)
 
     const modules = collectModules(kernel, raw)
     const longForward = (() => {
@@ -600,15 +600,15 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         dshMode: toStr(dshHealth.mode) || 'in-process',
         follows: Number(dshHealth.follows ?? dshSessions) || 0,
         sessions: dshSessions,
-        napcatLinked: Boolean(napcatHealth.linked),
-        napcatStale: Boolean(napcatHealth.stale),
-        napcatLastFrameAgoMs: napcatHealth.lastFrameAgoMs ?? null,
-        lastFrameAgo: napcatHealth.lastFrameAgoMs ?? null,
-        selfId: napcatHealth.selfId ?? null,
-        selfNickname: toStr(napcatHealth.selfNickname),
-        qqLoggedIn: napcatHealth.qqLoggedIn ?? null,
-        qqLoginCheckedAt: napcatHealth.qqLoginCheckedAt ?? null,
-        qqLoginError: toStr(napcatHealth.qqLoginError),
+        onebotLinked: Boolean(onebotHealth.linked),
+        onebotStale: Boolean(onebotHealth.stale),
+        onebotLastFrameAgoMs: onebotHealth.lastFrameAgoMs ?? null,
+        lastFrameAgo: onebotHealth.lastFrameAgoMs ?? null,
+        selfId: onebotHealth.selfId ?? null,
+        selfNickname: toStr(onebotHealth.selfNickname),
+        qqLoggedIn: onebotHealth.qqLoggedIn ?? null,
+        qqLoginCheckedAt: onebotHealth.qqLoginCheckedAt ?? null,
+        qqLoginError: toStr(onebotHealth.qqLoginError),
         plugins: {
           total: modules.length,
           loaded: modules.filter((m) => m.loaded).length,
@@ -618,7 +618,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       services,
       meta,
       onboarding,
-      napcat,
+      onebot,
       imagegen,
       lines,
       groups: {
@@ -938,7 +938,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
   }
 
-  async function memoryGroupIds(napcatGroupsIn) {
+  async function memoryGroupIds(onebotGroupsIn) {
     // 口径（与现网 group-memory 的 discover_groups 一致）：有群线会话的群 ∪ 唤醒词数字键 ∪ 已有文件。
     // ⚠️ 唤醒词键可能是 1–3 位/13+ 位纯数字（不是群号）：必须过滤成 4–12 位，否则 memFile 抛错会整页挂掉。
     const ids = new Set()
@@ -953,8 +953,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
     } catch { /* 目录还没建 */ }
     const lineGids = new Set(sessionKeysOf(kernel).filter((k) => k.startsWith('group:')).map((k) => String(k).slice(6)))
-    const napcatGroups = napcatGroupsIn || await fetchGroupList(kernel)
-    for (const g of napcatGroups) if (lineGids.has(g.id)) ids.add(g.id)
+    const onebotGroups = onebotGroupsIn || await fetchGroupList(kernel)
+    for (const g of onebotGroups) if (lineGids.has(g.id)) ids.add(g.id)
     return [...ids].sort((a, b) => Number(a) - Number(b))
   }
 
@@ -1003,10 +1003,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const accumulate = memoryAccumulateStatus()
       const schedule = memorySchedule(accumulate)
       const dir = memoryDir()
-      const napcatGroups = await fetchGroupList(kernel)
-      const nameByGid = new Map(napcatGroups.map((g) => [g.id, g.name]))
+      const onebotGroups = await fetchGroupList(kernel)
+      const nameByGid = new Map(onebotGroups.map((g) => [g.id, g.name]))
       const keywordMap = parseKeywordMap(pluginCfg(raw, 'gate-wake').keywords)
-      const ids = await memoryGroupIds(napcatGroups)
+      const ids = await memoryGroupIds(onebotGroups)
       const groups = ids.map((id) => ({
         ...memInfo(id),
         name: nameByGid.get(id) || '',
@@ -1320,8 +1320,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
 
     // ── 新手引导：OneBot 连接自检 / 重连 ────────────────────────
-    if (id === 'napcat-check') {
-      const result = await checkNapcatNow()
+    if (id === 'onebot-check') {
+      const result = await checkOneBotNow()
       const ok = result.ok !== false
       const who = result.nickname ? `${result.nickname}${result.selfId ? `（${result.selfId}）` : ''}` : (result.selfId ? `QQ ${result.selfId}` : '')
       const detail = result.latencyMs != null ? `（${result.latencyMs}ms）` : ''
@@ -1334,7 +1334,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
     }
 
-    if (id === 'napcat-reconnect') {
+    if (id === 'onebot-reconnect') {
       if (typeof kernel?.reconnectNapcat !== 'function') {
         return { ok: false, error: '内核未提供 reconnectNapcat（请升级内核或检查装配）' }
       }

@@ -195,7 +195,7 @@ function pickLine(bot, pool, fallback) {
 
 /**
  * 反查被引消息的发送者（唤醒判定用；只看发送者，不下载图）。
- * 优先用内核 before-turn 已反查好的 `ev._scratch.quote`（省一次接口），其次 napcat.msgById，
+ * 优先用内核 before-turn 已反查好的 `ev._scratch.quote`（省一次接口），其次 onebot.msgById，
  * 最后从群历史里找。全拿不到 = 当没叫本机（宁可漏唤醒，不越界插话）。
  */
 async function quotedSenderOf(bot, ev) {
@@ -204,7 +204,7 @@ async function quotedSenderOf(bot, ev) {
   if (ev._scratch?.quote?.senderId != null) return ev._scratch.quote.senderId
   if (!ev.replyToId) return null
   try {
-    const msg = await bot.napcat.msgById?.(ev.replyToId)
+    const msg = await bot.onebot.msgById?.(ev.replyToId)
     const uid = msg?.sender?.user_id ?? msg?.user_id
     if (uid != null) return uid
   } catch (e) {
@@ -212,7 +212,7 @@ async function quotedSenderOf(bot, ev) {
   }
   try {
     if (!ev.isGroup || !ev.groupId) return null
-    const list = await bot.napcat.groupHistory(ev.groupId, 50)
+    const list = await bot.onebot.groupHistory(ev.groupId, 50)
     const hit = (Array.isArray(list) ? list : []).find((m) => String(m?.message_id ?? m?.messageId) === String(ev.replyToId))
     return hit?.sender?.user_id ?? hit?.sender?.qq ?? null
   } catch {
@@ -221,7 +221,7 @@ async function quotedSenderOf(bot, ev) {
 }
 
 function selfIdOf(bot, ev) {
-  return bot.napcat?.selfId ?? bot.selfId ?? ev.selfId ?? null
+  return bot.onebot?.selfId ?? bot.selfId ?? ev.selfId ?? null
 }
 
 async function isQuotingSelf(bot, ev) {
@@ -325,7 +325,7 @@ async function handlePoke(bot, ev, notice) {
     return
   }
   try {
-    if (typeof bot.napcat?.poke === 'function' && await bot.napcat.poke(ev.chatKey, poker)) {
+    if (typeof bot.onebot?.poke === 'function' && await bot.onebot.poke(ev.chatKey, poker)) {
       bot.log.info(`[戳一戳] ${ev.chatKey} user=${poker} 戳了本机 → 回戳`)
       return
     }
@@ -372,7 +372,7 @@ async function tryRecall(bot, ev) {
   tried.add(key)
   // 适配器 recall() 返回 `{ok, msg}` 且**不抛错**（超时也包成 ok:false）；改成抛错的实现也一并认。
   try {
-    const res = await bot.napcat.recall(ev.replyToId)
+    const res = await bot.onebot.recall(ev.replyToId)
     const ok = res === true || res?.ok === true
     if (ok) {
       bot.log.info(`已撤回消息 (${ev.chatKey}, rid=${ev.replyToId})`)

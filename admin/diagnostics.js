@@ -245,17 +245,17 @@ function checkTools(kernel, runtime) {
   )
 }
 
-async function checkNapcat(kernel, runtime) {
-  const wsUrl = sanitizeUrl(runtime?.napcat?.wsUrl)
-  const httpUrl = sanitizeUrl(runtime?.napcat?.httpUrl)
+async function checkOneBot(kernel, runtime) {
+  const wsUrl = sanitizeUrl(runtime?.onebot?.wsUrl)
+  const httpUrl = sanitizeUrl(runtime?.onebot?.httpUrl)
   const where = [wsUrl ? `WS ${wsUrl}` : '', httpUrl ? `HTTP ${httpUrl}` : ''].filter(Boolean).join('；')
   let r = null
-  if (typeof kernel?.checkNapcat === 'function') {
-    r = await safeAsync(() => withTimeout(kernel.checkNapcat(), 5000), null)
+  if (typeof kernel?.checkOneBot === 'function') {
+    r = await safeAsync(() => withTimeout(kernel.checkOneBot(), 5000), null)
   }
   if (!r) {
     // 老内核 / 超时兜底：只看 health
-    const health = safe(() => (typeof kernel?.napcat?.health === 'function' ? kernel.napcat.health() : null), null) || {}
+    const health = safe(() => (typeof kernel?.onebot?.health === 'function' ? kernel.onebot.health() : null), null) || {}
     r = health.linked
       ? { ok: true, linked: true, selfId: health.selfId, stale: Boolean(health.stale), latencyMs: null }
       : { ok: false, linked: false, stale: Boolean(health.stale), error: 'OneBot 未连接' }
@@ -267,7 +267,7 @@ async function checkNapcat(kernel, runtime) {
     ? `已连接（selfId ${selfId}${latency}）${where ? `；${where}` : ''}`
     : `未连接：${toStr(r.error) || 'OneBot 未连接'}${where ? `；${where}` : ''}`
   return makeCheck(
-    'napcat', 'OneBot 连接', true, ok, detail,
+    'onebot', 'OneBot 连接', true, ok, detail,
     ok ? '' : '确认 OneBot 协议端已启动并开启 OneBot v11 HTTP（常见默认 3000）/ 正向 WS（常见默认 3001）；在控制台「OneBot 连接」页核对地址/token 后点「测试 OneBot 连接」',
   )
 }
@@ -482,7 +482,7 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
     checks.push(await checkAgentPreset(kernel, runtime))
     checks.push(checkTools(kernel, runtime))
     // ③ OneBot 连接 / 人设 / 目录
-    checks.push(await checkNapcat(kernel, runtime))
+    checks.push(await checkOneBot(kernel, runtime))
     checks.push(checkPersona(kernel))
     checks.push(checkDirs(kernel))
     // ④ 可选能力 + 运行信息

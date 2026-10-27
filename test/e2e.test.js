@@ -18,7 +18,7 @@ import path from 'node:path'
 
 import { apply, Config } from '../index.js'
 import { createConfigStore } from '../admin/store.js'
-import { createFakeNapCat } from './fake-napcat.mjs'
+import { createFakeOneBot } from './fake-onebot.mjs'
 import { createMockCtx as createSharedMockCtx } from './helpers.mjs'
 
 const ADMIN_QQ = 10001
@@ -28,14 +28,14 @@ function tmpDir(tag = 'e2e') {
   return fs.mkdtempSync(path.join(os.tmpdir(), `qqbot-${tag}-`))
 }
 
-function writeInstanceConfig(dataDir, napcatUrls, overrides = {}) {
+function writeInstanceConfig(dataDir, onebotUrls, overrides = {}) {
   const raw = {
     version: 2,
     adminQq: ADMIN_QQ,
-    napcat: {
-      wsUrl: napcatUrls.wsUrl,
+    onebot: {
+      wsUrl: onebotUrls.wsUrl,
       wsToken: '',
-      httpUrl: napcatUrls.httpUrl,
+      httpUrl: onebotUrls.httpUrl,
       httpToken: '',
     },
     dsh: { agentPreset: '', qqWorkspacePath: 'workspace', sessionsFile: 'state/sessions.json' },
@@ -66,7 +66,7 @@ async function waitFor(fn, { timeoutMs = 8000, label = '条件' } = {}) {
 }
 
 test('e2e：假协议端 全链路（装配 / 群@入站→模型→工具→出站脱敏 / 私聊豁免 / 命令零token / 会话落盘）', async (t) => {
-  const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
+  const fake = createFakeOneBot({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const urls = await fake.start()
   const dataDir = tmpDir('e2e')
   writeInstanceConfig(dataDir, urls)
@@ -102,7 +102,7 @@ test('e2e：假协议端 全链路（装配 / 群@入站→模型→工具→出
 
   // 等 WS 连上 + 登录信息就绪（selfId 由假协议端 的 get_login_info 提供）
   await fake.waitForClient()
-  await waitFor(() => kernel.napcat.health().linked && kernel.napcat.selfId, { label: '协议端 WS 已连接/selfId' })
+  await waitFor(() => kernel.onebot.health().linked && kernel.onebot.selfId, { label: '协议端 WS 已连接/selfId' })
   const sendTool = ctx._registeredTools.get('mcp__qq__send_message')
 
   // ── 2. 群消息 @ 本机 → 唤醒 → mock 模型调工具 → 出站（脱敏）────
@@ -165,7 +165,7 @@ test('e2e：假协议端 全链路（装配 / 群@入站→模型→工具→出
 })
 
 test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连协议端）；控制台写入后 configReady=true 并自动连接', async (t) => {
-  const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
+  const fake = createFakeOneBot({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const urls = await fake.start()
   const dataDir = tmpDir('e2e-pending')
   writeInstanceConfig(dataDir, urls, { adminQq: 0 })
@@ -194,10 +194,10 @@ test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连协
 
   // 不连协议端：等一拍再确认没有 WS 客户端 / health 未连接
   await new Promise((r) => setTimeout(r, 300))
-  assert.equal(fake.clientCount, 0, '待配置模式不应发起 NapCat 连接')
-  assert.equal(kernel.napcat.health().linked, false)
-  const checkBefore = await kernel.checkNapcat()
-  assert.equal(checkBefore.ok, false, '未连接时 checkNapcat 返回 ok:false')
+  assert.equal(fake.clientCount, 0, '待配置模式不应发起 OneBot 连接')
+  assert.equal(kernel.onebot.health().linked, false)
+  const checkBefore = await kernel.checkOneBot()
+  assert.equal(checkBefore.ok, false, '未连接时 checkOneBot 返回 ok:false')
   assert.match(String(checkBefore.error), /未连接/)
 
   // 模拟控制台写配置：config store = 备份 + 原子写 + reloadConfig（真实写入路径）
@@ -208,14 +208,14 @@ test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连协
   assert.equal(saved.ok, true)
   assert.equal(kernel.configReady, true, '配置就绪后 configReady=true')
   await fake.waitForClient(8000)
-  await waitFor(() => kernel.napcat.health().linked, { label: '配置就绪后自动连接协议端' })
-  const checkAfter = await kernel.checkNapcat()
-  assert.equal(checkAfter.ok, true, '连接后 checkNapcat 走 get_login_info 实测')
+  await waitFor(() => kernel.onebot.health().linked, { label: '配置就绪后自动连接协议端' })
+  const checkAfter = await kernel.checkOneBot()
+  assert.equal(checkAfter.ok, true, '连接后 checkOneBot 走 get_login_info 实测')
   assert.equal(checkAfter.selfId, 999999)
 })
 
 test('e2e：待配置模式下 reload 先热应用 协议端地址（不连接），补 adminQq 后自动连接', async (t) => {
-  const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
+  const fake = createFakeOneBot({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const fakeUrls = await fake.start()
   const dataDir = tmpDir('e2e-pending-reload')
   // 初始：协议端地址是占位死地址（非空，合法），只缺 adminQq → 待配置模式
@@ -235,21 +235,21 @@ test('e2e：待配置模式下 reload 先热应用 协议端地址（不连接�
   const kernel = ctx.get('qqBot')?.kernel
   assert.ok(kernel)
   assert.equal(kernel.configReady, false)
-  assert.equal(kernel.napcat.wsUrl, 'ws://127.0.0.1:1', '初始地址是占位死地址')
+  assert.equal(kernel.onebot.wsUrl, 'ws://127.0.0.1:1', '初始地址是占位死地址')
 
   // 第 2 步：用户先填 协议端地址（仍缺 adminQq）→ reload 应热应用地址、保持待配置、不连接
   const rawFile = path.join(dataDir, 'config.json')
   const raw = JSON.parse(fs.readFileSync(rawFile, 'utf8'))
-  raw.napcat.wsUrl = fakeUrls.wsUrl
-  raw.napcat.httpUrl = fakeUrls.httpUrl
+  raw.onebot.wsUrl = fakeUrls.wsUrl
+  raw.onebot.httpUrl = fakeUrls.httpUrl
   fs.writeFileSync(rawFile, `${JSON.stringify(raw, null, 4)}\n`)
   const r = await kernel.reloadConfig()
   assert.equal(r.ok, true)
   assert.equal(r.pending, true, '只缺 adminQq 的 reload 应返回 pending 而不是抛错')
   assert.equal(r.configReady, false, '仍缺 adminQq → configReady=false')
   assert.deepEqual(r.pendingErrors, ['adminQq 未配置：请在实例配置里填主人 QQ（必填项，无默认）'])
-  assert.equal(kernel.napcat.wsUrl, fakeUrls.wsUrl, '待配置模式也热应用 协议端地址')
-  assert.equal(kernel.napcat.httpUrl, fakeUrls.httpUrl)
+  assert.equal(kernel.onebot.wsUrl, fakeUrls.wsUrl, '待配置模式也热应用 协议端地址')
+  assert.equal(kernel.onebot.httpUrl, fakeUrls.httpUrl)
   await new Promise((resolve) => setTimeout(resolve, 300))
   assert.equal(fake.clientCount, 0, '待配置模式不自动连接协议端')
 
@@ -262,8 +262,8 @@ test('e2e：待配置模式下 reload 先热应用 协议端地址（不连接�
   assert.equal(r2.configReady, true)
   assert.equal(kernel.configReady, true)
   await fake.waitForClient(8000)
-  await waitFor(() => kernel.napcat.health().linked, { label: '补 adminQq 后自动连接' })
-  const check = await kernel.checkNapcat()
+  await waitFor(() => kernel.onebot.health().linked, { label: '补 adminQq 后自动连接' })
+  const check = await kernel.checkOneBot()
   assert.equal(check.ok, true)
 })
 
@@ -271,7 +271,7 @@ test('e2e：配置缺失必填项（其它必填项也缺）→ apply 抛中文�
   const dataDir = tmpDir('e2e-badcfg')
   fs.writeFileSync(
     path.join(dataDir, 'config.json'),
-    JSON.stringify({ version: 2, adminQq: 0, napcat: { wsUrl: '', httpUrl: '' } }, null, 2),
+    JSON.stringify({ version: 2, adminQq: 0, onebot: { wsUrl: '', httpUrl: '' } }, null, 2),
   )
   const ctx = createSharedMockCtx()
   await assert.rejects(
@@ -283,7 +283,7 @@ test('e2e：配置缺失必填项（其它必填项也缺）→ apply 抛中文�
 })
 
 test('e2e：单例保护（重复 apply 返回同一 kernel）', async () => {
-  const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
+  const fake = createFakeOneBot({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const urls = await fake.start()
   const dataDir = tmpDir('e2e-single')
   writeInstanceConfig(dataDir, urls)

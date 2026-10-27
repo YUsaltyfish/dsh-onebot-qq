@@ -195,13 +195,15 @@ test('群聊页「入站条数上限」：标签写明是上限、解释讲清"�
   assert.equal(c.max, 50)
 })
 
-test('控制台命名：协议端页签名是「OneBot 连接」，不再出现「NapCat 连接」', async (t) => {
+test('控制台命名：协议端页签名是「OneBot 连接」，且不再残留旧实现名', async (t) => {
   const schema = await schemaOf(t)
   const groups = schema.groups.map((g) => g.name)
   assert.ok(groups.includes('OneBot 连接'), '应有「OneBot 连接」页')
-  assert.equal(groups.includes('NapCat 连接'), false, '旧页名「NapCat 连接」不应再出现')
-  // 运维页两个按钮：名字改了，id 不变（对外契约）
+  // 全量 schema 里不该再出现旧实现名（守卫用例：正则里保留旧名正是为了检测它不再出现）
+  const dump = JSON.stringify(schema)
+  assert.equal(/NapCat|napcat/i.test(dump), false, '旧实现名不应再出现在 schema 里')
+  // 运维页两个按钮：名字与 id 都是 OneBot
   const ids = new Map(schema.actions.map((a) => [a.id, a.label]))
-  assert.equal(ids.get('napcat-check'), '🔌 测试 OneBot 连接')
-  assert.equal(ids.get('napcat-reconnect'), '↻ 重新连接 OneBot')
+  assert.equal(ids.get('onebot-check'), '🔌 测试 OneBot 连接')
+  assert.equal(ids.get('onebot-reconnect'), '↻ 重新连接 OneBot')
 })

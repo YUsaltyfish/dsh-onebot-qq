@@ -1,6 +1,6 @@
 /**
- * 回归：NapCat 重连不能叠出第二条 WS（否则每条消息处理两次、双回复）。
- * 用 test/fake-napcat.mjs 的真实 WS 服务端验证：close/forceReconnect/重复触发后，连接数始终收敛到 1。
+ * 回归：OneBot 重连不能叠出第二条 WS（否则每条消息处理两次、双回复）。
+ * 用 test/fake-onebot.mjs 的真实 WS 服务端验证：close/forceReconnect/重复触发后，连接数始终收敛到 1。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,8 +8,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { NapCatAdapter } from '../kernel/napcat-adapter.js'
-import { createFakeNapCat } from './fake-napcat.mjs'
+import { OneBotAdapter } from '../kernel/onebot-adapter.js'
+import { createFakeOneBot } from './fake-onebot.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const quiet = { info() {}, warn() {}, error() {}, debug() {} }
@@ -24,10 +24,10 @@ async function waitFor(fn, timeoutMs = 8000, label = '条件') {
 }
 
 test('协议端适配器：重连/重复触发后只保留一条 WS（防双回复）', async (t) => {
-  const fake = createFakeNapCat()
+  const fake = createFakeOneBot()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-reconnect-'))
-  const adapter = new NapCatAdapter({
+  const adapter = new OneBotAdapter({
     wsUrl: urls.wsUrl, httpUrl: urls.httpUrl, log: quiet, avatarDir: path.join(dataDir, 'avatars'),
   })
   t.after(async () => {
@@ -55,7 +55,7 @@ test('协议端适配器：重连/重复触发后只保留一条 WS（防双回�
 })
 
 test('协议端适配器：撤回失败不把原始报错放进 msg（raw 只供日志）', async () => {
-  const adapter = new NapCatAdapter({
+  const adapter = new OneBotAdapter({
     httpUrl: 'http://127.0.0.1:9', log: quiet, avatarDir: path.join(os.tmpdir(), 'qqbot-recall-avatar'),
   })
   adapter._post = async () => ({
@@ -81,10 +81,10 @@ test('协议端适配器：撤回失败不把原始报错放进 msg（raw 只供
 })
 
 test('协议端适配器：群历史同时带 message_id/message_seq（多数实现认 seq，SnowLuma 认 id）', async (t) => {
-  const fake = createFakeNapCat()
+  const fake = createFakeOneBot()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-history-'))
-  const adapter = new NapCatAdapter({
+  const adapter = new OneBotAdapter({
     wsUrl: urls.wsUrl, httpUrl: urls.httpUrl, log: quiet, avatarDir: path.join(dataDir, 'avatars'),
   })
   t.after(async () => {
@@ -103,10 +103,10 @@ test('协议端适配器：群历史同时带 message_id/message_seq（多数实
 })
 
 test('协议端适配器：get_status 明确 online=false/good=false 优先判异常；心跳 good 进 health', async (t) => {
-  const fake = createFakeNapCat()
+  const fake = createFakeOneBot()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-status-'))
-  const adapter = new NapCatAdapter({
+  const adapter = new OneBotAdapter({
     wsUrl: urls.wsUrl, httpUrl: urls.httpUrl, log: quiet, avatarDir: path.join(dataDir, 'avatars'),
   })
   t.after(async () => {
@@ -130,7 +130,7 @@ test('协议端适配器：get_status 明确 online=false/good=false 优先判�
   assert.equal(offline.ok, false)
   assert.match(String(offline.error), /离线/)
 
-  // 心跳里的 status.good 也记进 health（SnowLuma 30s 一发；NapCat 没字段就保持 null）
+  // 心跳里的 status.good 也记进 health（SnowLuma 30s 一发；OneBot 没字段就保持 null）
   fake.pushEvent({ post_type: 'meta_event', meta_event_type: 'heartbeat', status: { online: true, good: false } })
   await sleep(150)
   assert.equal(adapter.health().qqReceiveGood, false)

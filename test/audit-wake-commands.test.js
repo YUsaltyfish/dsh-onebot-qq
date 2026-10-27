@@ -215,7 +215,7 @@ test('WAKE-S @别人但正文含唤醒词 → 按内容唤醒（不因 @ 别人�
 
 test('WAKE-D/E 引用本机消息 → quote 唤醒；引用别人 → 不越界', async (t) => {
   const h = await boot(t)
-  h.kernel.napcat.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: 999999, nickname: '测试机器人' }, message: '我上一条' })
+  h.kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: 999999, nickname: '测试机器人' }, message: '我上一条' })
   await emitRaw(h.kernel, {
     post_type: 'message',
     message_type: 'group',
@@ -228,7 +228,7 @@ test('WAKE-D/E 引用本机消息 → quote 唤醒；引用别人 → 不越界'
   assert.equal(h.tap.last().wake.kind, 'quote')
 
   const h2 = await boot(t)
-  h2.kernel.napcat.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: OTHER_QQ, nickname: '别人' }, message: '别人说的' })
+  h2.kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: OTHER_QQ, nickname: '别人' }, message: '别人说的' })
   await emitRaw(h2.kernel, {
     post_type: 'message',
     message_type: 'group',
@@ -244,7 +244,7 @@ test('WAKE-D/E 引用本机消息 → quote 唤醒；引用别人 → 不越界'
 test('WAKE-POKE 被戳：回戳；戳别人不理会', async (t) => {
   const h = await boot(t)
   const pokes = []
-  h.kernel.napcat.poke = async (chatKey, qq) => {
+  h.kernel.onebot.poke = async (chatKey, qq) => {
     pokes.push({ chatKey, qq })
     return true
   }
@@ -274,7 +274,7 @@ test('WAKE-POKE 被戳：回戳；戳别人不理会', async (t) => {
 test('WAKE-RECALL 引用 + 「撤回」：单条撤回成功即回执，且同一条只试一次', async (t) => {
   const h = await boot(t)
   const recalled = []
-  h.kernel.napcat.recall = async (id) => {
+  h.kernel.onebot.recall = async (id) => {
     recalled.push(Number(id))
     return { ok: true }
   }
@@ -357,7 +357,7 @@ test('CMD-5 /resetall：不带 confirm 只提示不动；confirm 后归档并清
 
 test('CMD-7 /history：群历史进 prompt 并放行进模型；命令后正题不被吃掉', async (t) => {
   const h = await boot(t)
-  h.kernel.napcat.groupHistory = async () => [
+  h.kernel.onebot.groupHistory = async () => [
     { message_id: 901, time: Math.floor(Date.now() / 1000) - 60, sender: { user_id: OTHER_QQ, nickname: '群友' }, message: [{ type: 'text', data: { text: '之前聊到火锅' } }] },
   ]
   await emitRaw(h.kernel, groupAtEvent({ text: '/history 10 你觉得哪家好吃', messageId: 53 }))
@@ -400,7 +400,7 @@ test('FILE-3 入站文件落盘：文件名带时间戳前缀防覆盖', async (
   const uploadDir = path.join(h.dataDir, 'qq_uploads')
   fs.mkdirSync(uploadDir, { recursive: true })
   fs.writeFileSync(path.join(uploadDir, 'incoming.txt'), 'hello')
-  h.kernel.napcat.getFile = async () => ({ file: path.join(uploadDir, 'incoming.txt') })
+  h.kernel.onebot.getFile = async () => ({ file: path.join(uploadDir, 'incoming.txt') })
   await emitRaw(h.kernel, {
     post_type: 'message',
     message_type: 'private',
@@ -449,7 +449,7 @@ test('FILE-5 总开关关闭：不收入站文件、send_image 拒绝发图', as
   fs.mkdirSync(uploadDir, { recursive: true })
   const f = path.join(h.dataDir, 'x.txt')
   fs.writeFileSync(f, 'hello')
-  h.kernel.napcat.getFile = async () => ({ file: f })
+  h.kernel.onebot.getFile = async () => ({ file: f })
   await emitRaw(h.kernel, privateFileEvent([{ name: 'x.txt', size: 5 }], { id: 62 }))
   await sleep(80)
   assert.equal(fs.readdirSync(uploadDir).length, 0, '开关关闭时不应落盘')
@@ -464,7 +464,7 @@ test('FILE-6 单条消息文件数上限：只处理前 N 个并提示', async (
   fs.mkdirSync(uploadDir, { recursive: true })
   const src = path.join(h.dataDir, 'src.txt')
   fs.writeFileSync(src, 'x')
-  h.kernel.napcat.getFile = async () => ({ file: src })
+  h.kernel.onebot.getFile = async () => ({ file: src })
   await emitRaw(h.kernel, privateFileEvent([
     { name: 'a.txt', size: 1, url: src },
     { name: 'b.txt', size: 1, url: src },
@@ -520,7 +520,7 @@ test('FILE-8 群聊没叫它 → 默认不下载（被叫才下）', async (t) =
   fs.mkdirSync(uploadDir, { recursive: true })
   const src = path.join(h.dataDir, 'src.txt')
   fs.writeFileSync(src, 'x')
-  h.kernel.napcat.getFile = async () => ({ file: src })
+  h.kernel.onebot.getFile = async () => ({ file: src })
   await emitRaw(h.kernel, groupFileEvent([{ name: 'x.txt', size: 1, url: src }], { at: false }))
   await sleep(120)
   assert.equal(h.tap.last()?.wake, null, '没叫它 = 不唤醒')
@@ -533,7 +533,7 @@ test('FILE-9 群里 @ 它 + 文件 → 落盘并写进 hint', async (t) => {
   fs.mkdirSync(uploadDir, { recursive: true })
   const src = path.join(h.dataDir, 'src.txt')
   fs.writeFileSync(src, 'x')
-  h.kernel.napcat.getFile = async () => ({ file: src })
+  h.kernel.onebot.getFile = async () => ({ file: src })
   await emitRaw(h.kernel, groupFileEvent([{ name: 'y.txt', size: 1, url: src }], { at: true, id: 65 }))
   await sleep(150)
   assert.equal(fs.readdirSync(uploadDir).length, 1, '被 @ 时应下载文件')
@@ -547,7 +547,7 @@ test('FILE-10 策略改成「过门禁都下」→ 没叫它也落盘（passive-
   fs.mkdirSync(uploadDir, { recursive: true })
   const src = path.join(h.dataDir, 'src.txt')
   fs.writeFileSync(src, 'x')
-  h.kernel.napcat.getFile = async () => ({ file: src })
+  h.kernel.onebot.getFile = async () => ({ file: src })
   await emitRaw(h.kernel, groupFileEvent([{ name: 'z.txt', size: 1, url: src }], { at: false, id: 66 }))
   await sleep(150)
   assert.equal(fs.readdirSync(uploadDir).length, 1, '「都下」策略下没叫也会落盘')
@@ -555,7 +555,7 @@ test('FILE-10 策略改成「过门禁都下」→ 没叫它也落盘（passive-
 
 test('WAKE-RECALL 撤回失败：不把 协议端原始报错回显到群里（2026-10-23 事故回归）', async (t) => {
   const h = await boot(t)
-  h.kernel.napcat.recall = async () => ({
+  h.kernel.onebot.recall = async () => ({
     ok: false,
     raw: 'Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:\n{"result":7,"errMsg":"decode failed!"}',
     msg: '撤回失败: Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg EventRet:\n{"result":7,"errMsg":"decode failed!"}',
@@ -580,7 +580,7 @@ test('WAKE-RECALL 撤回失败：不把 协议端原始报错回显到群里（2
 test('CMD-7b /history 上限 500：请求条数被夹到 500，默认仍是 50', async (t) => {
   const h = await boot(t)
   const asked = []
-  h.kernel.napcat.groupHistory = async (gid, count) => {
+  h.kernel.onebot.groupHistory = async (gid, count) => {
     asked.push(count)
     return [{ message_id: 902, time: Math.floor(Date.now() / 1000) - 60, sender: { user_id: OTHER_QQ, nickname: '群友' }, message: [{ type: 'text', data: { text: '历史一条' } }] }]
   }
@@ -616,7 +616,7 @@ test('send_message 的 sticker 参数：插件没装/没开 → 如实说被忽�
 
 test('WAKE-NOTICE 无身份 notice（点赞 profile_like / bot_offline）：不建会话、不进模型、不留出站', async (t) => {
   const h = await boot(t)
-  // 2026-10-25 13:57 事故原样：NapCat 的点赞通知只有 operator_id，没有 user_id/group_id
+  // 2026-10-25 13:57 事故原样：OneBot 的点赞通知只有 operator_id，没有 user_id/group_id
   await emitRaw(h.kernel, {
     post_type: 'notice',
     notice_type: 'notify',

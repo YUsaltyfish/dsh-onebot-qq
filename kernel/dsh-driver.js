@@ -50,7 +50,7 @@ const QUESTION_CUSTOM_REPLY = '请在 QQ 里直接用文字列出可选内容'
  * @param {string} [opts.workspaceId]  已注册的 QQ 工作区 id（由宿主自举后传入；传了就优先用它挂会话）
  * @param {string} opts.agentPreset    会话 preset（空 = 用 DSH 默认）
  * @param {object} opts.state          ChatState（群上文水位用）
- * @param {object} [opts.napcat]       协议端适配器（群上文用；不传则从内核服务上取）
+ * @param {object} [opts.onebot]       协议端适配器（群上文用；不传则从内核服务上取）
  */
 export function createDshDriver(opts) {
   const { ctx, log } = opts
@@ -375,10 +375,10 @@ export function createDshDriver(opts) {
    * @param {number} count 最多给几条
    */
   async function fetchGroupContext(ev, count) {
-    const napcat = napcatOf()
-    if (!ev?.groupId || !napcat || !(count > 0)) return ''
+    const onebot = onebotOf()
+    if (!ev?.groupId || !onebot || !(count > 0)) return ''
     try {
-      const list = await napcat.groupHistory(ev.groupId, count + 2)
+      const list = await onebot.groupHistory(ev.groupId, count + 2)
       if (!Array.isArray(list) || !list.length) return ''
       const state = opts.state?.get(ev.chatKey)
       let start = 0
@@ -387,7 +387,7 @@ export function createDshDriver(opts) {
         if (i >= 0) start = i + 1
       }
       const now = Date.now()
-      const selfId = napcat.selfId
+      const selfId = onebot.selfId
       const lines = []
       for (const m of list.slice(start)) {
         const mid = String(m.message_id)
@@ -412,12 +412,12 @@ export function createDshDriver(opts) {
 
   // ── 健康探针 / 会话标题同步 ──────────────────────────────────
   /**
-   * 协议端适配器：opts.napcat 留给显式注入（宿主装配时已经建好）；否则**运行期**从内核服务上取
+   * 协议端适配器：opts.onebot 留给显式注入（宿主装配时已经建好）；否则**运行期**从内核服务上取
    * （由 index.js 在装配时交给内核；这里只做兼容读取，不依赖 ctx 私有属性）。
    */
-  function napcatOf() {
-    const fromService = typeof ctx?.get === 'function' ? ctx.get('qqBot')?.kernel?.napcat : null
-    return opts.napcat ?? fromService ?? ctx?.qqBotKernel?.napcat
+  function onebotOf() {
+    const fromService = typeof ctx?.get === 'function' ? ctx.get('qqBot')?.kernel?.onebot : null
+    return opts.onebot ?? fromService ?? ctx?.qqBotKernel?.onebot
   }
 
   /** `/status` 与控制台直接读这个；in-process 恒 linked。 */
@@ -457,12 +457,12 @@ export function createDshDriver(opts) {
    * 取一份"号码→名字"全量名单（群列表 / 好友列表一次就是全量，别为每条线各打一次协议端）。
    * 优先用适配器封装的方法（groupList/friendList），没有就直走 OneBot 接口。
    */
-  async function loadNames(napcat, method, action, pickId, pickName) {
+  async function loadNames(onebot, method, action, pickId, pickName) {
     const map = new Map()
     try {
-      const res = typeof napcat[method] === 'function'
-        ? await napcat[method]()
-        : await napcat.wsApi(action, {})
+      const res = typeof onebot[method] === 'function'
+        ? await onebot[method]()
+        : await onebot.wsApi(action, {})
       for (const item of asList(res)) {
         const id = String(pickId(item) ?? '')
         const name = String(pickName(item) || '').trim()
@@ -496,8 +496,8 @@ export function createDshDriver(opts) {
    * @returns {Promise<{renamed:number, skipped:number, checked?:number, throttled?:boolean}>}
    */
   async function syncSessionTitles(o = {}) {
-    const napcat = napcatOf()
-    if (!napcat || !sessions.size) return { renamed: 0, skipped: 0 }
+    const onebot = onebotOf()
+    if (!onebot || !sessions.size) return { renamed: 0, skipped: 0 }
     const now = Date.now()
     if (!o.force && now - lastTitleSyncAt < TITLE_SYNC_THROTTLE_MS) return { renamed: 0, skipped: 0, throttled: true }
     lastTitleSyncAt = now
@@ -509,12 +509,12 @@ export function createDshDriver(opts) {
       let title = ''
       if (chatKey.startsWith('group:')) {
         const gid = chatKey.slice(6)
-        groups ??= await loadNames(napcat, 'groupList', 'get_group_list', (g) => g?.group_id ?? g?.id, (g) => g?.group_name ?? g?.name)
+        groups ??= await loadNames(onebot, 'groupList', 'get_group_list', (g) => g?.group_id ?? g?.id, (g) => g?.group_name ?? g?.name)
         const name = groups.get(gid)
         if (name) title = `${name} (${gid})`
       } else if (chatKey.startsWith('private:')) {
         const qq = chatKey.slice(8)
-        friends ??= await loadNames(napcat, 'friendList', 'get_friend_list', (f) => f?.user_id ?? f?.qq, (f) => f?.remark || f?.nickname || f?.name)
+        friends ??= await loadNames(onebot, 'friendList', 'get_friend_list', (f) => f?.user_id ?? f?.qq, (f) => f?.remark || f?.nickname || f?.name)
         const name = friends.get(qq)
         if (name) title = `${name} (${qq})`
       }

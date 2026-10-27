@@ -1,6 +1,6 @@
 # dsh-onebot-qq
 
-DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端可换：任意 OneBot v11 实现都行（本机线上在用的是 [SnowLuma](https://github.com/SnowLuma/SnowLuma)，另有 [NapCat](https://napcat.napneko.icu/) 等实现）。
+DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端可换：任意 OneBot v11 实现都行（本机线上在用的是 [SnowLuma](https://github.com/SnowLuma/SnowLuma)，另有 [OneBot](https://onebot.napneko.icu/) 等实现）。
 微内核 + 可插拔子插件，**Linux / Windows通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
@@ -29,7 +29,7 @@ DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端�
 |---|---|
 | Node.js | `>= 22` |
 | DSH | `>= 0.2.1-rc.2 < 0.3.0`（`engines.dsh` 声明） |
-| 协议端（任选其一） | 任意 **OneBot v11** 实现（如 **SnowLuma** v2.x：token 必填、不自己启动 QQ；**NapCat**：token 可空）；都需开启**正向 WebSocket**（常见默认 3001）与 **HTTP API**（常见默认 3000），见 [安装与卸载 §二](docs/安装与卸载.md#二准备协议端onebot-v11) |
+| 协议端（任选其一） | 任意 **OneBot v11** 实现（如 **SnowLuma** v2.x：token 必填、不自己启动 QQ；**OneBot**：token 可空）；都需开启**正向 WebSocket**（常见默认 3001）与 **HTTP API**（常见默认 3000），见 [安装与卸载 §二](docs/安装与卸载.md#二准备协议端onebot-v11) |
 | QQ 号 | 协议端登录用（建议小号）；机器人靠它收发消息 |
 
 ## 安装

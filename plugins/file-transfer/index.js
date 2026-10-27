@@ -63,8 +63,8 @@ async function fetchFileBytes(bot, f) {
     return Buffer.from(await res.arrayBuffer())
   }
   // 溯源协议端本地缓存；适配器把这个能力叫 getFile（只读视图已暴露）
-  if (f?.fileId && typeof bot.napcat?.getFile === 'function') {
-    const info = await bot.napcat.getFile(f.fileId)
+  if (f?.fileId && typeof bot.onebot?.getFile === 'function') {
+    const info = await bot.onebot.getFile(f.fileId)
     const local = info?.file
     if (local && fs.existsSync(local) && fs.statSync(local).isFile()) return fs.readFileSync(local)
     if (info?.url && /^https?:\/\//.test(info.url)) {

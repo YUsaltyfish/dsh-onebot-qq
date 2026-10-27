@@ -7,7 +7,7 @@
  *   · **普通文本**（正文/caption）只转义 `&` `[` `]`：逗号在文本里是普通字符，
  *     若也转义成 `&#44;` 且协议端不对文本段做实体还原，聊天里就会显示 `&#44;`。
  *   · Windows 本地路径含反斜杠，不同 OneBot 实现对 `file=` 形式接受度不同；
- *     统一由 `toNapCatFileRef()` 转换，真机验证后用 `DSH_QQ_MEDIA_REF` 切模式。
+ *     统一由 `toOneBotFileRef()` 转换，真机验证后用 `DSH_QQ_MEDIA_REF` 切模式。
  *
  * 本文件是 `escapeCq` 的**唯一实现**（kernel/format.js 从这里再导出）。
  */
@@ -44,7 +44,7 @@ export function mediaRefMode(env = process.env) {
  * - `fileUri` 模式用 `pathToFileURL()`（唯一正确构造 file URL 的方式）。
  * 注意：调用方负责先做白名单校验，本函数不校验来源。
  */
-export function toNapCatFileRef(file, opts = {}) {
+export function toOneBotFileRef(file, opts = {}) {
   const abs = path.resolve(String(file))
   const mode = opts.mode || mediaRefMode()
   if (mode === 'fileUri') return pathToFileURL(abs).href
@@ -52,7 +52,7 @@ export function toNapCatFileRef(file, opts = {}) {
 }
 
 /** OneBot `file=` 参数值 → 本地路径（入站用；支持 file:// URL、普通路径）。 */
-export function fromNapCatFileRef(ref) {
+export function fromOneBotFileRef(ref) {
   const s = String(ref ?? '').trim()
   if (!s) return ''
   if (/^file:\/\//i.test(s)) {
@@ -67,7 +67,7 @@ export function fromNapCatFileRef(ref) {
 
 /** `[CQ:<kind>,file=<escaped>]`。 */
 export function cqMedia(kind, file, opts = {}) {
-  return `[CQ:${kind},file=${escapeCqParam(toNapCatFileRef(file, opts))}]`
+  return `[CQ:${kind},file=${escapeCqParam(toOneBotFileRef(file, opts))}]`
 }
 
 export function cqImage(file, opts = {}) {

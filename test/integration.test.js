@@ -2,7 +2,7 @@
  * test/integration.test.js — 全链路集成：装配 / 唯一出站口 / 入站协调 / 可选兼容网关 / 插件隔离。
  *
  * 迁移自旧 `integration.test.js`：删除 dsh-ops-gate 外部插件、旧 admin 热改、站点 :3971 端口写死等用例；
- * 真 NapCat WS 全链路见 `test/e2e.test.js`。
+ * 真 OneBot WS 全链路见 `test/e2e.test.js`。
  */
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -81,7 +81,7 @@ test('1. 全量装配：9 子插件 + 9 原生工具 + 7 命令 + 单例（重�
 test('2. 唯一出站口 deliver：先抽 [AT:] 再六项脱敏；主人私聊豁免；长文卡片失败降级', async (t) => {
   const h = await bootKernel({ config: { pacing: { merge: { enabled: false } } } })
   t.after(() => h.dispose())
-  h.kernel.napcat.resolveMemberByName = async (_gid, name) => (name === '奶茶' ? 123456789 : null)
+  h.kernel.onebot.resolveMemberByName = async (_gid, name) => (name === '奶茶' ? 123456789 : null)
 
   const r1 = await h.kernel.deliver(
     `group:${GROUP_ID}`,
@@ -99,7 +99,7 @@ test('2. 唯一出站口 deliver：先抽 [AT:] 再六项脱敏；主人私聊�
   const longText = '这是一段测试长文，用来验证超过阈值时自动打包为合并转发卡片。'.repeat(16)
   const r3 = await h.kernel.deliver(`group:${GROUP_ID}`, longText)
   assert.equal(r3.mode, 'forward', '超阈值走合并转发卡片')
-  h.kernel.napcat.sendForward = async () => {
+  h.kernel.onebot.sendForward = async () => {
     throw new Error('mock forward error')
   }
   const r4 = await h.kernel.deliver(`group:${GROUP_ID}`, longText)
@@ -179,7 +179,7 @@ test('4. 可选兼容网关：compatServer=true 监听动态端口（/health、/
   }, { label: 'compat 网关监听' })
   const { body: health } = await httpGetJson(`http://127.0.0.1:${port}/health`)
   assert.equal(health.ok, true)
-  assert.ok('napcatLinked' in health)
+  assert.ok('onebotLinked' in health)
 
   // 第二个实例撞同一端口 → EADDRINUSE 只记日志（并跑模式），内核照常可用
   const h2 = await bootKernel({

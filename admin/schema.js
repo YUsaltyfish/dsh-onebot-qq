@@ -12,7 +12,7 @@
  *   · `PERSONA_GROUPS`：跟随「人设」显示在「总览」页的分组（当前为空：句池/唤醒 已各自成页）。
  *
  * 键与配置路径的映射（v2 配置结构见 kernel/config-store.js）：
- *   · 核心项：`key` 就是 raw 配置里的点路径（`pacing.reply.hourlyMax`、`napcat.wsUrl`…）；
+ *   · 核心项：`key` 就是 raw 配置里的点路径（`pacing.reply.hourlyMax`、`onebot.wsUrl`…）；
  *   · 子插件项：`key = <pluginId>.<field>`，落到 `raw.pluginConfig[<pluginId>][<field>]`。
  *
  * 单位口径（**两套，别混**）：
@@ -21,7 +21,7 @@
  *   · 子插件项：raw 里**本来就存面板单位**（秒 / % —— 各插件 configSchema 的 default 就是面板值），
  *     所以这里**不做 scale 换算**；`scale` 只是“× scale = 插件内部基准单位”的说明字段，前端不读。
  *
- * 秘密字段（napcat token）读出来给占位符，写回占位符 = 不改。
+ * 秘密字段（onebot token）读出来给占位符，写回占位符 = 不改。
  */
 
 /** 秘密值的占位符：读 schema 时回显它而不是真值；把它原样写回来 = 不修改。 */
@@ -90,29 +90,29 @@ export const CORE_CONTROLS = [
 
   // ── OneBot 连接（对接任意 OneBot v11 协议端）──────
   {
-    key: 'info.napcat', group: 'OneBot 连接', type: 'info',
-    text: '分三步接上 OneBot 协议端（任意 OneBot v11 实现；下面键名沿用历史名 napcat.*，与本插件对接的实现无关）：\n'
+    key: 'info.onebot', group: 'OneBot 连接', type: 'info',
+    text: '分三步接上 OneBot 协议端（任意 OneBot v11 实现；下面键名沿用历史名 onebot.*，与本插件对接的实现无关）：\n'
       + '① 先在本机装好并启动协议端并登录 QQ（各实现方式不同：有的自己拉起 QQ，有的注入已在运行的 QQ 进程，详见 docs/安装与卸载.md §二）；\n'
       + '② 在协议端配置里打开「WebSocket 服务端」（常见默认 ws://127.0.0.1:3001）和「HTTP 服务端」（常见默认 http://127.0.0.1:3000）；有 token 就一并填到下面（部分实现强制要 token，两个都要填）；\n'
       + '③ 填好地址/token 后先让输入框失焦（离开输入框就会保存），再点「运维」页的「🔌 测试 OneBot 连接」：出现 ✅ 就说明通了（测的是已保存的配置）。\n'
       + '⚠️ 两个地址都在同一台机器时用 127.0.0.1 即可；跨机器要把 127.0.0.1 换成协议端那台机器的 IP，并确认防火墙放行端口。',
   },
   {
-    key: 'napcat.wsUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot v11 正向 WS 地址',
+    key: 'onebot.wsUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot v11 正向 WS 地址',
     default: 'ws://127.0.0.1:3001',
     hint: '协议端的 WebSocket 服务地址（入站消息从这里来）。改了会重新连接。',
   },
   {
-    key: 'napcat.wsToken', group: 'OneBot 连接', type: 'str', label: 'WS Token', secret: true, default: '',
+    key: 'onebot.wsToken', group: 'OneBot 连接', type: 'str', label: 'WS Token', secret: true, default: '',
     hint: '可留空。填了就是 OneBot 的 access_token（走 Authorization: Bearer）。',
   },
   {
-    key: 'napcat.httpUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot HTTP API 地址',
+    key: 'onebot.httpUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot HTTP API 地址',
     default: 'http://127.0.0.1:3000',
     hint: '发消息 / 查群列表 / 取头像走这个 HTTP API。',
   },
   {
-    key: 'napcat.httpToken', group: 'OneBot 连接', type: 'str', label: 'HTTP Token', secret: true, default: '',
+    key: 'onebot.httpToken', group: 'OneBot 连接', type: 'str', label: 'HTTP Token', secret: true, default: '',
     hint: '多数实现可留空；强制鉴权的实现（如 SnowLuma）必填，与协议端的 HTTP token 一致。',
   },
 
@@ -362,11 +362,11 @@ export const ACTIONS = [
 
   // 新手向导 / 连接自检（契约 §3.1）
   {
-    id: 'napcat-check', group: '运维', label: '🔌 测试 OneBot 连接',
+    id: 'onebot-check', group: '运维', label: '🔌 测试 OneBot 连接',
     hint: '向协议端发一次 get_login_info：通了一次就能收到消息；失败会给出原因（未启动 / 地址错 / token 错）。',
   },
   {
-    id: 'napcat-reconnect', group: '运维', label: '↻ 重新连接 OneBot',
+    id: 'onebot-reconnect', group: '运维', label: '↻ 重新连接 OneBot',
     hint: '重连协议端的 WebSocket（改完地址/token 但没自动重连时用）。',
   },
   {

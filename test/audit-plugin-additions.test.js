@@ -94,7 +94,7 @@ test('PRIVATE-GATE 好友放行；陌生人拦下且不进模型', async (t) => 
   t.after(() => h.dispose())
   const tap = tapInbound(h.kernel)
   // 好友列表：只有非主人 MEMBER_QQ（主人本来就永远放行，这里单独验证"好友"通道）
-  h.kernel.napcat.friendList = async () => [{ user_id: MEMBER_QQ }]
+  h.kernel.onebot.friendList = async () => [{ user_id: MEMBER_QQ }]
 
   // 第 1 条触发 passive-tap 刷新缓存（pre-gate 此时还不知道 → failOpen 放行）
   await emitRaw(h.kernel, privateEvent({ text: '你好', messageId: 1, userId: MEMBER_QQ }))
@@ -115,7 +115,7 @@ test('PRIVATE-GATE 主人永远放行（即使好友列表里没有）', async (
   const h = await bootKernel({ config: mergeOff })
   t.after(() => h.dispose())
   const tap = tapInbound(h.kernel)
-  h.kernel.napcat.friendList = async () => [{ user_id: MEMBER_QQ }]
+  h.kernel.onebot.friendList = async () => [{ user_id: MEMBER_QQ }]
   await emitRaw(h.kernel, privateEvent({ text: '主人', messageId: 1, userId: ADMIN_QQ }))
   await waitFor(() => h.ctx._prompts.length === 1, { label: '主人私聊进模型' })
 })

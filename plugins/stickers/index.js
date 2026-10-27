@@ -122,7 +122,7 @@ export default {
 
     /**
      * 取图字节：① 段里的 file 是现成本地文件就直接读；② 原始 url 直链兜底。
-     * 旧实现第二级是 `napcat.get_file` 溯源（老引用图只有 file 哈希名）；新适配器没暴露 getFile
+     * 旧实现第二级是 `onebot.get_file` 溯源（老引用图只有 file 哈希名）；新适配器没暴露 getFile
      * （契约只有 groupHistory/memberInfo/recall/fetchAvatar）→ 老图收不到。passive-tap 本来就只收
      * 当轮新消息（url 新鲜），不为这点在适配器上开洞；失败就跳过这一张。
      */
@@ -132,9 +132,9 @@ export default {
       if (local && fs.existsSync(local)) {
         try { if (fs.statSync(local).isFile()) return fs.readFileSync(local) } catch (e) { tried.push(`本地读取失败 ${e.message}`) }
       }
-      if (local && !/^https?:\/\//.test(local) && typeof bot.napcat?.getFile === 'function') {
+      if (local && !/^https?:\/\//.test(local) && typeof bot.onebot?.getFile === 'function') {
         try {
-          const info = await bot.napcat.getFile(local)
+          const info = await bot.onebot.getFile(local)
           if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) return fs.readFileSync(info.file)
           if (info?.url && /^https?:\/\//.test(info.url)) {
             const r = await fetch(info.url, { signal: AbortSignal.timeout(15000) })

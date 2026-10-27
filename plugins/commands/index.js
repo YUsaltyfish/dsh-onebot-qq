@@ -300,7 +300,7 @@ export default {
         // 命令后面还写了东西（"/history 25 看看"）→ 那是主人的正题，必须带上，别吃掉
         // （线上实测踩到：只读到命令、正文丢了）
         const extra = tail.replace(/^\d+\s*/, '').trim()
-        const list = await bot.napcat.groupHistory(ev.groupId, n + 2)
+        const list = await bot.onebot.groupHistory(ev.groupId, n + 2)
         if (!Array.isArray(list) || !list.length) {
           await reply(ev, '⚠️ 取群记录失败（协议端没回数据），过会儿再试', 'history')
           return

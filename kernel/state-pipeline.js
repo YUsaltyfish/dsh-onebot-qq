@@ -200,18 +200,18 @@ export class Pipeline {
  * 超长消息 → 合并转发卡片（需求：超长消息发成一张卡片，不刷屏）。
  * 卡片失败要**降级成普通分段**，话不能吞。独立成函数只是为了让 deliver 读得完。
  */
-async function sendLongAsForward({ napcat, log, target, text, longForward, replyMaxLength }) {
+async function sendLongAsForward({ onebot, log, target, text, longForward, replyMaxLength }) {
   const lf = longForward || {}
   const chunk = Math.max(200, Number(lf.chunkSize) || 800)
-  const name = String(napcat.selfNickname || lf.nodeName || '机器人').slice(0, 24)
-  const uin = String(napcat.selfId || '')
+  const name = String(onebot.selfNickname || lf.nodeName || '机器人').slice(0, 24)
+  const uin = String(onebot.selfId || '')
   const nodes = splitLongText(text, { max: chunk }).map((t) => ({
     type: 'node',
     data: { uin, name, content: [{ type: 'text', data: { text: escapeCq(t) } }] },
   }))
   try {
     // 合并转发同样非幂等：retries:0（同一张卡片发两遍比发失败还糟）
-    const messageId = await napcat.sendForward(target, nodes, {
+    const messageId = await onebot.sendForward(target, nodes, {
       timeoutMs: Number(lf.timeoutMs) > 0 ? Number(lf.timeoutMs) : 180000,
       retries: 0,
     })
@@ -223,7 +223,7 @@ async function sendLongAsForward({ napcat, log, target, text, longForward, reply
     let messageId = null
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 500)) // 同一秒灌一堆像刷屏
-      messageId = await napcat.sendMessage(target, escapeCq(parts[i]))
+      messageId = await onebot.sendMessage(target, escapeCq(parts[i]))
     }
     return { messageId, mode: 'forward-fallback' }
   }
@@ -238,14 +238,14 @@ async function sendLongAsForward({ napcat, log, target, text, longForward, reply
  * ⚠️ ①② 顺序反了会出大事（自检逮到过）：先脱敏会把 `[AT:qq=123]` 的号码变成 [已隐去]，
  *   标记当场废掉 → @ 静默失效，而且只在非豁免会话里失效，极难发现。
  *
- * @param {{napcat: object, log?: object, adminQq?: number|string|null, longForward?: object, replyMaxLength?: number,
+ * @param {{onebot: object, log?: object, adminQq?: number|string|null, longForward?: object, replyMaxLength?: number,
  *          onAfterSend?: Function, outboundHooks?: Function[]}} cfg
  *   onAfterSend(rec) —— 发送成功后的落点：留档 + ChatState.markSent 都收口在这儿
  *   （deliver 不持有 ChatState，免得同一份状态两处写）
  *   outboundHooks —— 宿主自己的出站钩子数组（与 deliver.onDecorate 同一个池子，便于宿主把
  *   `bot.onOutbound` 直接接进去；不传就内部自建）
  */
-export function createDeliver({ napcat, log = console, adminQq = null, longForward = {}, replyMaxLength = 3000, onAfterSend = null, outboundHooks = [] }) {
+export function createDeliver({ onebot, log = console, adminQq = null, longForward = {}, replyMaxLength = 3000, onAfterSend = null, outboundHooks = [] }) {
   const hooks = outboundHooks
 
   async function deliver(target, text, opts = {}) {
@@ -264,7 +264,7 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
     if (atMarkers.names.length) {
       if (m[1] === 'group') {
         for (const nm of atMarkers.names) {
-          const q = await napcat.resolveMemberByName?.(m[2], nm) // 测试桩可能没有成员表
+          const q = await onebot.resolveMemberByName?.(m[2], nm) // 测试桩可能没有成员表
           if (q) ats.push(q)
           else log.warn(`[出站] 群 ${m[2]} 里找不到「${nm}」，这条 @ 不了（消息照发）`)
         }
@@ -306,12 +306,12 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
     let messageId = null
     let mode = out.replyTo != null ? 'reply' : (out.ats.length ? 'at' : 'plain')
     if (wantForward) {
-      ({ messageId, mode } = await sendLongAsForward({ napcat, log, target: to, text: out.text, longForward: lf, replyMaxLength }))
+      ({ messageId, mode } = await sendLongAsForward({ onebot, log, target: to, text: out.text, longForward: lf, replyMaxLength }))
     } else {
       wire = (out.replyTo != null ? `[CQ:reply,id=${out.replyTo}] ` : '')
         + (out.ats.length ? out.ats.map((q) => `[CQ:at,qq=${q}]`).join(' ') + ' ' : '')
         + escapeCq(out.text)
-      messageId = await napcat.sendMessage(to, wire)
+      messageId = await onebot.sendMessage(to, wire)
     }
     const rec = { target: to, text: out.text, ats: out.ats, replyTo: out.replyTo, mode, messageId, hits: safe.hits, wire, turnCtx: out.turnCtx }
     // 每条成功出站都留一行 —— 外部脚本/控制台靠它统计出站量，别改静默
@@ -345,7 +345,7 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
     if (!/^\[CQ:/i.test(String(cqBody || ''))) throw new Error('sendMedia 的 cqBody 必须是 CQ 码串（纯文本请用 deliver）')
     // caption 里的 [ ] 会把 CQ 码拆坏，必须转义；cqBody 本身是 CQ 码，不能碰
     const wire = (cap ? escapeCq(cap) + ' ' : '') + cqBody
-    const messageId = await napcat.sendMedia(to, wire)
+    const messageId = await onebot.sendMedia(to, wire)
     // 媒体消息也带上本轮上下文（主动接话统计"已接"、留档排查都要它）；没有上下文时保持 null
     const rec = { target: to, text: cap, ats: [], replyTo: null, mode: 'media', messageId, hits: safe.hits, wire, turnCtx: turnStore.getStore() ?? null }
     if (onAfterSend) {

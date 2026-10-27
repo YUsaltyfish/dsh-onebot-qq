@@ -2,7 +2,7 @@
  * test/helpers.mjs — 测试公用夹具（不是测试文件，node --test 不会直接跑它）。
  *
  * 目标：所有套件统一「临时数据目录 + 实例 config.json + mock Cordis ctx」的装配方式，
- * 不依赖真实 DSH / NapCat / 站点路径。需要真实 WS/HTTP 的套件用 test/fake-napcat.mjs。
+ * 不依赖真实 DSH / OneBot / 站点路径。需要真实 WS/HTTP 的套件用 test/fake-onebot.mjs。
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -24,7 +24,7 @@ export function tmpDir(tag = 't') {
 export function baseConfig(forbiddenOverrides = {}) {
   return deepMerge(defaultConfig(), {
     adminQq: ADMIN_QQ,
-    napcat: {
+    onebot: {
       wsUrl: 'ws://127.0.0.1:1',
       wsToken: '',
       httpUrl: 'http://127.0.0.1:1',
@@ -183,34 +183,34 @@ export function createMockCtx(opts = {}) {
   return ctx
 }
 
-/** 给 kernel.napcat 打桩（autoConnect:false 下不会碰真实网络）。 */
+/** 给 kernel.onebot 打桩（autoConnect:false 下不会碰真实网络）。 */
 export function stubNapcat(kernel) {
   const sent = []
   let seq = 5000
-  kernel.napcat.selfId = 999999
-  kernel.napcat.selfNickname = '测试机器人'
-  kernel.napcat.sendMessage = async (target, wire) => {
+  kernel.onebot.selfId = 999999
+  kernel.onebot.selfNickname = '测试机器人'
+  kernel.onebot.sendMessage = async (target, wire) => {
     sent.push({ kind: 'msg', target, wire })
     return ++seq
   }
-  kernel.napcat.sendForward = async (target, nodes) => {
+  kernel.onebot.sendForward = async (target, nodes) => {
     sent.push({ kind: 'forward', target, nodes })
     return ++seq
   }
-  kernel.napcat.sendMedia = async (target, wire) => {
+  kernel.onebot.sendMedia = async (target, wire) => {
     sent.push({ kind: 'media', target, wire })
     return ++seq
   }
-  kernel.napcat.groupHistory = async () => []
-  kernel.napcat.groupList = async () => [{ id: GROUP_ID, name: '测试群', group_id: GROUP_ID, group_name: '测试群' }]
-  kernel.napcat.friendList = async () => [{ user_id: ADMIN_QQ, nickname: '主人' }]
-  kernel.napcat.memberInfo = async (_gid, qq) => ({ user_id: Number(qq), nickname: Number(qq) === ADMIN_QQ ? '主人' : '新人' })
-  kernel.napcat.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: ADMIN_QQ, nickname: '主人' }, message: '被引用的消息' })
-  kernel.napcat.recall = async () => ({ ok: true })
-  kernel.napcat.poke = async () => ({ ok: true })
-  kernel.napcat.fetchAvatar = async () => ({ ok: true, path: '' })
-  kernel.napcat.getFile = async () => ''
-  kernel.napcat.resolveMemberByName = async (_gid, name) => (name === '奶茶' ? 123456789 : null)
+  kernel.onebot.groupHistory = async () => []
+  kernel.onebot.groupList = async () => [{ id: GROUP_ID, name: '测试群', group_id: GROUP_ID, group_name: '测试群' }]
+  kernel.onebot.friendList = async () => [{ user_id: ADMIN_QQ, nickname: '主人' }]
+  kernel.onebot.memberInfo = async (_gid, qq) => ({ user_id: Number(qq), nickname: Number(qq) === ADMIN_QQ ? '主人' : '新人' })
+  kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: ADMIN_QQ, nickname: '主人' }, message: '被引用的消息' })
+  kernel.onebot.recall = async () => ({ ok: true })
+  kernel.onebot.poke = async () => ({ ok: true })
+  kernel.onebot.fetchAvatar = async () => ({ ok: true, path: '' })
+  kernel.onebot.getFile = async () => ''
+  kernel.onebot.resolveMemberByName = async (_gid, name) => (name === '奶茶' ? 123456789 : null)
   return sent
 }
 
@@ -247,9 +247,9 @@ export async function bootKernel(opts = {}) {
   return { kernel, ctx, dataDir, configPath: file, raw, sent, dispose }
 }
 
-/** 把原始 OneBot 事件喂给内核（等价于 NapCat WS 推一条）。 */
+/** 把原始 OneBot 事件喂给内核（等价于 OneBot WS 推一条）。 */
 export async function emitRaw(kernel, raw) {
-  for (const h of [...kernel.napcat.handlers]) await h(raw)
+  for (const h of [...kernel.onebot.handlers]) await h(raw)
 }
 
 export function groupAtEvent({ text = '你好', messageId = 5001, userId = ADMIN_QQ, at = true, replyTo = null } = {}) {

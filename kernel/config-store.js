@@ -11,7 +11,7 @@
  *   {
  *     "version": 2,
  *     "adminQq": 123456,                       // 必填（无默认）
- *     "napcat": { wsUrl, wsToken, httpUrl, httpToken },
+ *     "onebot": { wsUrl, wsToken, httpUrl, httpToken },
  *     "dsh": { agentPreset, qqWorkspacePath, sessionsFile },
  *     "outbound": { replyMaxLength, longForwardThreshold, longForwardChunkSize, quoteAfterMsgs },
  *     "archive": { enabled, dir },
@@ -37,11 +37,14 @@ export function defaultConfig() {
   return {
     version: CONFIG_VERSION,
     adminQq: 0,
-    napcat: {
+    onebot: {
       wsUrl: 'ws://127.0.0.1:3001',
       wsToken: '',
       httpUrl: 'http://127.0.0.1:3000',
       httpToken: '',
+      // 媒体（图片/文件）发送超时与重试：大文件/慢中转站要放宽，默认贴近旧行为
+      mediaSendTimeoutMs: 180000,
+      mediaSendRetries: 0,
     },
     dsh: {
       // 随包声明的内置 preset（cordis.patch.yml 里的 preset-qq-chat）：
@@ -150,7 +153,17 @@ export function migrateLegacyConfig(old = {}) {
   if (String(old?.dsh?.workspaceTitle || '').trim()) cfg.dsh.workspaceTitle = String(old.dsh.workspaceTitle)
   if (bridge.sessionsFile) cfg.dsh.sessionsFile = String(bridge.sessionsFile)
   if (Array.isArray(bridge.admins) && bridge.admins[0]) cfg.adminQq = Number(bridge.admins[0])
-  if (isPlainObject(old.napcat)) cfg.napcat = deepMerge(cfg.napcat, old.napcat)
+  if (isPlainObject(old.onebot)) cfg.onebot = deepMerge(cfg.onebot, old.onebot)
+  // 旧键兼容：2026-10-27 之前这段叫 `napcat`（当时只有一家实现）。
+  // 新键 `onebot` 优先；旧键只补新键没给的字段，所以老 config.json 不改也能直接跑。
+  // 这里必须保留旧名字面量 —— 它是历史配置的键名，删了线上配置就读不到。
+  const legacyOneBot = isPlainObject(old.napcat) ? old.napcat : null
+  if (legacyOneBot) {
+    const cur = isPlainObject(old.onebot) ? old.onebot : {}
+    for (const k of Object.keys(legacyOneBot)) {
+      if (cur[k] === undefined) cfg.onebot[k] = legacyOneBot[k]
+    }
+  }
   if (isPlainObject(bridge.chatArchive)) cfg.archive = deepMerge(cfg.archive, bridge.chatArchive)
   if (isPlainObject(old.pacing)) cfg.pacing = deepMerge(cfg.pacing, old.pacing)
   if (isPlainObject(bridge.pacing)) cfg.pacing = deepMerge(cfg.pacing, bridge.pacing)
@@ -277,8 +290,8 @@ export function validateConfig(cfg) {
   if (!Number.isInteger(adminQq) || adminQq <= 0) {
     errors.push('adminQq 未配置：请在实例配置里填主人 QQ（必填项，无默认）')
   }
-  if (!cfg?.napcat || !String(cfg.napcat.wsUrl || '').trim()) errors.push('napcat.wsUrl 未配置（OneBot v11 正向 WS 地址）')
-  if (!cfg?.napcat || !String(cfg.napcat.httpUrl || '').trim()) errors.push('napcat.httpUrl 未配置（OneBot HTTP API 地址）')
+  if (!cfg?.onebot || !String(cfg.onebot.wsUrl || '').trim()) errors.push('onebot.wsUrl 未配置（OneBot v11 正向 WS 地址）')
+  if (!cfg?.onebot || !String(cfg.onebot.httpUrl || '').trim()) errors.push('onebot.httpUrl 未配置（OneBot HTTP API 地址）')
   for (const [label, value] of [
     ['dsh.sessionsFile', cfg?.dsh?.sessionsFile],
     ['dsh.qqWorkspacePath', cfg?.dsh?.qqWorkspacePath],
@@ -333,6 +346,22 @@ export function applyCredentialEnv(cfg, env = process.env) {
 }
 
 /**
+ * 旧配置键兼容：2026-10-27 之前这段叫 `napcat`，之后统一叫 `onebot`。
+ * 新键优先，旧键只补新键缺的字段 —— 老 `config.json` 一个字不改也能直接跑。
+ * ⚠️ 字面量 `'napcat'` 是历史键名，不能删（删了线上配置读不到）。
+ */
+export function applyOneBotLegacyKey(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.napcat)) return raw
+  const legacy = raw.napcat
+  const cur = isPlainObject(raw.onebot) ? raw.onebot : {}
+  const mergedOneBot = { ...cur }
+  for (const k of Object.keys(legacy)) {
+    if (mergedOneBot[k] === undefined) mergedOneBot[k] = legacy[k]
+  }
+  return { ...raw, onebot: mergedOneBot }
+}
+
+/**
  * 加载实例配置。
  * @returns {{dataDir:string, configPath:string, raw:object, runtime:object, migrated:boolean, created:boolean}}
  */
@@ -351,6 +380,8 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
   } else {
     raw = readJsonFile(file)
   }
+  // 旧键兼容（`napcat.*` → `onebot.*`）：v2 与 legacy 两种形状都要过一遍
+  raw = applyOneBotLegacyKey(raw)
   const migrated = isLegacyShape(raw)
   const merged = migrated ? migrateLegacyConfig(raw) : deepMerge(defaultConfig(), raw)
   merged.version = CONFIG_VERSION

@@ -1,5 +1,5 @@
 /**
- * 合并转发解析的测试（纯函数，不起 NapCat）。
+ * 合并转发解析的测试（纯函数，不起 OneBot）。
  * 用法：node test/forward.test.js   （或随 node --test 一起跑）
  */
 import test from 'node:test'
@@ -97,7 +97,7 @@ test('renderForward：没有 QQ 号的发送者也别崩', () => {
 // 下面的形状照真机返回抄的（三条、其中一条 message 是空数组），
 // QQ 号与昵称已换成占位值 —— 测试只需要形状，不需要真实身份。
 // ─────────────────────────────────────────────────────────────
-const NAPCAT_INLINE_FORWARD = {
+const ONEBOT_INLINE_FORWARD = {
   type: 'forward',
   data: {
     id: 'fwd-inline-1',
@@ -126,7 +126,7 @@ const NAPCAT_INLINE_FORWARD = {
 }
 
 test('真机回归：extractText 要把内联 content 一起带出来（不能只给 id）', () => {
-  const r = extractText([NAPCAT_INLINE_FORWARD], 10000)
+  const r = extractText([ONEBOT_INLINE_FORWARD], 10000)
   assert.equal(r.forwards.length, 1)
   const f = r.forwards[0]
   assert.equal(f.id, 'fwd-inline-1', 'id 仍然要有（回退请求可能用到）')
@@ -136,7 +136,7 @@ test('真机回归：extractText 要把内联 content 一起带出来（不能�
 })
 
 test('真机回归：只靠内联 content 就能渲染出全部三条（不再依赖 get_forward_msg）', () => {
-  const r = extractText([NAPCAT_INLINE_FORWARD], 10000)
+  const r = extractText([ONEBOT_INLINE_FORWARD], 10000)
   const out = renderForward({ content: r.forwards[0].content })
 
   assert.ok(out.length > 0, '不能是空串（原来就是空串 → 模型什么都没看到）')

@@ -54,7 +54,22 @@
 - **视频类链接在 SnowLuma 等严格协议端下发不出**：协议端要求「video 必须是消息里唯一的 segment」（`message element "video" must be the only segment in a message`；同一条里放两个视频同样被拒：`video may appear only once`）。`link-parser` 原来把「说明文字 + `[CQ:video]`」拼成一条 —— NapCat 时代兄弟元素被 QQ 静默吞掉、看起来正常，换成 SnowLuma 后整条发送失败（ERROR 日志，媒体一条都发不出）。
   现在有视频时改为：**每个视频各自一条、图片并一条、说明文字最后单独一条**；纯图片仍是「说明 + 图片同条」（图片没有该限制）。媒体全部失败时按原逻辑走「本条按普通消息处理」降级，并且**不单独发说明**（避免只留一句标题）。新增 4 条用例（单视频拆条 / 多视频逐条 / 纯图片不拆 / 全失败降级），全量 271/271。
 
+### 变更（配置键与标识符改名：napcat → onebot）⚠️ 破坏性
+
+- **配置键 `napcat.*` → `onebot.*`**：`wsUrl` / `wsToken` / `httpUrl` / `httpToken` / `mediaSendTimeoutMs` / `mediaSendRetries` 全部迁到 `onebot` 段。
+  **旧键继续能读**：`loadConfig()` 会做一次归一（`applyOneBotLegacyKey`）—— 新键优先、旧键只补缺字段，所以老 `config.json` 一个字不改也能直接跑；控制台保存后写成新键。
+- **动作 id**：`napcat-check` → `onebot-check`，`napcat-reconnect` → `onebot-reconnect`（旧 id 不再注册）。
+- **模块与函数改名**：`kernel/napcat-adapter.js` → **`kernel/onebot-adapter.js`**，类 `NapCatAdapter` → `OneBotAdapter`，
+  `toNapCatFileRef` / `fromNapCatFileRef` → `toOneBotFileRef` / `fromOneBotFileRef`，内部 `checkNapcat` → `checkOneBot`；
+  测试用假协议端 `test/fake-napcat.mjs` → `test/fake-onebot.mjs`。
+- **日志前缀与验收串**：`[onebot-qq:napcat]` → `[onebot-qq:onebot]`，`NapCat WS 已连接` → `OneBot WS 已连接` 等。
+  ⚠️ **外部脚本要跟着改**：部署机的 `/root/qq_watch.sh`（取 `onebot.httpToken`，旧键兜底）与 `/root/qqbot_sync_github.sh`（校验新文件名）已同步；
+  自建的监控/巡检若 grep 过 `NapCat WS 已连接`，改成 `OneBot WS 已连接`。
+- 文档、示例配置、`locale`、诊断项、CLI 输出同步为 `onebot.*`。仓库内旧实现名仅剩两处：兼容旧键的字面量（`applyOneBotLegacyKey` 内）与一条防回归守卫测试。
+- 测试 269/269（新增「旧键兼容」2 条：只写旧键能读、两键并存时新键优先）。
+
 ### 文档
+
 
 - **SnowLuma 升为一等公民**：`docs/安装与卸载.md` 的「准备协议端」拆成 **NapCat / SnowLuma 两小节**（含 Linux 无头部署、ptrace 注入前提、token 必填、关掉自带 `#sl`、`get_file` 能力差异）；`docs/排错.md` 新增「接了 SnowLuma 之后」整节（注入失败 / `good=false` 收不进 / 二维码过期 / `#sl` 抢话等 9 条）；`docs/配置参考.md` 写明 `napcat.*` 键名沿用、SnowLuma 两个 token 必填；`docs/开发指南.md` 新增「协议端差异」对照表（负 `message_id` / 群历史锚点 / `get_status` 健康字段 / `get_file` 覆盖面）；`README.md`、`docs/README.md` 与 `Windows安装.md`、`使用说明书.md`、`运维接口.md` 的措辞改为「协议端」，并说明控制台页签/配置键名沿用 NapCat 是历史原因。
 

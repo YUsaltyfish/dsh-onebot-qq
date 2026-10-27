@@ -136,7 +136,7 @@ test('句池三级回落：人设 .lines.txt → _默认.lines.txt → 内置兜
     },
   })
   t.after(() => h.dispose())
-  h.kernel.napcat.poke = async () => false // 回戳不可用 → 用句池回一句
+  h.kernel.onebot.poke = async () => false // 回戳不可用 → 用句池回一句
 
   const poke = (qq, id) => ({
     post_type: 'notice',
@@ -207,7 +207,7 @@ test('插件热关：persona-voice.enabled=false → pick() 返回空，调用�
       },
     },
   })
-  h.kernel.napcat.poke = async () => false
+  h.kernel.onebot.poke = async () => false
   const persona = h.kernel.plugins.find((p) => p.id === 'persona-voice')
   assert.equal(persona.cfg.enabled, false)
   const pick = h.kernel.shared.linesPool?.pick

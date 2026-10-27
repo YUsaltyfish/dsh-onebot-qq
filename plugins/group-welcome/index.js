@@ -130,7 +130,7 @@ export default {
       const now = Date.now()
       if (now - groupCache.at > GROUP_NAME_TTL_MS) {
         try {
-          const list = await bot.napcat?.groupList?.()
+          const list = await bot.onebot?.groupList?.()
           if (Array.isArray(list) && list.length) {
             groupCache = { at: now, map: new Map(list.map((g) => [String(g.id), String(g.name || '')])) }
           } else {
@@ -311,7 +311,7 @@ export default {
       const qq = Number(notice.userId ?? ev.sender?.qq)
       if (!Number.isInteger(qq) || qq <= 0) return
       // 自己入群：normalizeEvent 已经滤过 self，这里双保险
-      if (String(qq) === String(bot.napcat?.selfId ?? '')) return
+      if (String(qq) === String(bot.onebot?.selfId ?? '')) return
 
       const scratch = scratchOf(ev.chatKey)
       // 冷却：同群同人；先占位，固定模式发送失败会清掉（别让失败也吃冷却）
@@ -324,7 +324,7 @@ export default {
       // 昵称 / 群名查询失败都不能挡住欢迎
       let name = String(qq)
       try {
-        const info = await bot.napcat?.memberInfo?.(gid, qq)
+        const info = await bot.onebot?.memberInfo?.(gid, qq)
         name = String(info?.card || info?.nickname || name)
       } catch (e) {
         log.debug(`[入群欢迎] 取昵称失败 ${gid}/${qq}: ${e.message}`)

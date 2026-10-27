@@ -20,7 +20,7 @@
         dataDir: ''
         # 实例配置文件：留空 = <dataDir>/config.json
         configPath: ''
-        # 启动时自动连接 NapCat；先做静态验证/无 QQ 环境时设为 false
+        # 启动时自动连接 OneBot；先做静态验证/无 QQ 环境时设为 false
         autoConnect: true
         # 可选兼容网关（给旧脚本用的 :3971 HTTP 入口），默认关闭
         compatServer: false

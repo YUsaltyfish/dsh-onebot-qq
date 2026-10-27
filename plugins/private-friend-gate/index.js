@@ -12,11 +12,11 @@
  *
  *   ① **`pre-gate` 里只查表，绝不 await 网络**。
  *      `pre-gate` 是 fail-closed 阶段（`kernel/state-pipeline.js:159-163`：插件抛错 = 这条消息被拦下）。
- *      如果在里面 await `napcat.friendList()`，协议端一超时就抛错 → **全部私聊被一起静默**，
+ *      如果在里面 await `onebot.friendList()`，协议端一超时就抛错 → **全部私聊被一起静默**，
  *      正是旧版特意避免的事故。所以：`passive-tap`（fail-open）负责刷新，`pre-gate` 只做纯查表。
  *
  *   ② **好友列表为空 = 拉取失败，按"不知道"放行**。
- *      `napcat.friendList()` 在异常时 catch 掉了、返回 `[]`（`kernel/napcat-adapter.js:421-431`），
+ *      `onebot.friendList()` 在异常时 catch 掉了、返回 `[]`（`kernel/onebot-adapter.js:421-431`），
  *      跟"真的没有好友"分不开。空列表一律不拦人 —— 宁可放过，也不因为协议端抖一下就把所有人拉黑。
  *
  * 已知能力缺口（不是 bug，是内核没透出来）：
@@ -107,7 +107,7 @@ export default {
       if (slot.at && now - slot.at < ttl()) return
       if (slot.failedAt && now - slot.failedAt < RETRY_MS) return
       try {
-        const list = await bot.napcat?.friendList?.()
+        const list = await bot.onebot?.friendList?.()
         const ids = new Set((Array.isArray(list) ? list : [])
           .map((f) => Number(f?.qq ?? f?.user_id))
           .filter((n) => Number.isInteger(n) && n > 0))

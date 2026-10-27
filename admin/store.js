@@ -111,7 +111,7 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
     // ③ 热重载：失败 → 回滚 → 再尽力重载回老配置
     try {
       if (typeof kernel?.reloadConfig === 'function') await maybe(kernel.reloadConfig())
-      // 二次保险（幂等）：让 adapter/kernel 级参数（napcat 地址、adminQq…）也重新应用
+      // 二次保险（幂等）：让 adapter/kernel 级参数（onebot 地址、adminQq…）也重新应用
       if (typeof kernel?.applyRuntimeConfig === 'function') await maybe(kernel.applyRuntimeConfig(kernel.runtime))
     } catch (e) {
       let rolled = false

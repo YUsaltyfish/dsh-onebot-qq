@@ -101,7 +101,7 @@ test('[AT:] 提取：qq= 与名字两种标记都抽出，正文不留标记', (
 
 test('[AT:] 先于脱敏：@ 标记里的号码不被脱敏吃掉，正文里的号码照杀', async () => {
   const sent = []
-  const napcat = {
+  const onebot = {
     selfId: 999999,
     resolveMemberByName: async () => null,
     sendMessage: async (target, wire) => {
@@ -109,7 +109,7 @@ test('[AT:] 先于脱敏：@ 标记里的号码不被脱敏吃掉，正文里的
       return 1
     },
   }
-  const deliver = createDeliver({ napcat, log: quietLog(), adminQq: ADMIN_QQ })
+  const deliver = createDeliver({ onebot, log: quietLog(), adminQq: ADMIN_QQ })
   const r = await deliver(`group:${GROUP_ID}`, '[AT:qq=888888] 群号 987654321')
   assert.deepEqual(r.ats, [888888])
   assert.ok(sent.at(-1).wire.includes('[CQ:at,qq=888888]'), 'CQ at 已拼进消息')
@@ -348,7 +348,7 @@ test('ChatState：引用锚队列 / countArrival 跳过唤醒自己 / quoteNeed 
 
 function makeDeliver(opts = {}) {
   const sent = []
-  const napcat = {
+  const onebot = {
     selfId: 999999,
     resolveMemberByName: async (_gid, name) => (name === '奶茶' ? 123456789 : null),
     sendMessage: async (target, wire) => { sent.push({ kind: 'msg', target, wire }); return sent.length },
@@ -357,7 +357,7 @@ function makeDeliver(opts = {}) {
   }
   const recs = []
   const deliver = createDeliver({
-    napcat,
+    onebot,
     log: quietLog(),
     adminQq: ADMIN_QQ,
     longForward: { threshold: 100, chunkSize: 50, enabled: true },
@@ -365,7 +365,7 @@ function makeDeliver(opts = {}) {
     onAfterSend: (rec) => recs.push(rec),
     ...opts,
   })
-  return { deliver, sent, recs, napcat }
+  return { deliver, sent, recs, onebot }
 }
 
 test('deliver：target/空正文校验；@ 名字反查；显式 replyTo 与 0 语义', async () => {
@@ -399,8 +399,8 @@ test('deliver：超长且无 @/引用 → 合并转发卡片；卡片失败自�
   assert.equal(r1.mode, 'forward')
   assert.equal(sent.at(-1).kind, 'forward')
 
-  const { deliver: d2, sent: s2, napcat } = makeDeliver()
-  napcat.sendForward = async () => {
+  const { deliver: d2, sent: s2, onebot } = makeDeliver()
+  onebot.sendForward = async () => {
     throw new Error('forward fail')
   }
   const r2 = await d2(`group:${GROUP_ID}`, long)
@@ -483,7 +483,7 @@ test('compat：/health 字段兼容旧探针；/send 走真实 deliver（脱敏 
   cleanups.push(() => compat.close())
 
   const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json())
-  for (const f of ['ok', 'dshLinked', 'napcatLinked', 'napcatLastFrameAgoMs', 'sessions']) {
+  for (const f of ['ok', 'dshLinked', 'onebotLinked', 'onebotLastFrameAgoMs', 'sessions']) {
     assert.ok(f in health, `health 应有字段 ${f}`)
   }
 

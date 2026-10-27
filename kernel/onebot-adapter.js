@@ -1,5 +1,5 @@
 /**
- * kernel/napcat-adapter.js — 唯一碰外部的地方（OneBot v11 正向 WS + HTTP API）。
+ * kernel/onebot-adapter.js — 唯一碰外部的地方（OneBot v11 正向 WS + HTTP API）。
  *
  * 纪律：
  *  · **不导出任何"裸 send"给插件**。所有出站只能走 `bot.deliver()`（脱敏/长度/引用/留档的唯一实现）；
@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveDataDir } from '../platform/paths.js'
-import { fromNapCatFileRef } from '../platform/cq-file.js'
+import { fromOneBotFileRef } from '../platform/cq-file.js'
 import { atomicWriteFileSync } from '../platform/atomic.js'
 
 const SEND_TIMEOUT_MS = 12000   // 单条发送超时：协议端 HTTP 半死时不能让一条消息把整轮对话拖死
@@ -54,7 +54,7 @@ function recallFailureText(raw, timedOut = false) {
   return '撤回失败：协议端拒绝了这次撤回（可能已过期或消息不存在）'
 }
 
-export class NapCatAdapter {
+export class OneBotAdapter {
   /**
    * @param {{wsUrl?: string, wsToken?: string, httpUrl: string, httpToken?: string, selfId?: number|string|null, log?: object,
    *          avatarDir?: string, avatarCacheHours?: number}} cfg
@@ -93,7 +93,7 @@ export class NapCatAdapter {
 
   /**
    * 建立 WS 连接（并启动心跳看门狗）。外部只需在启动时调一次；断线由内部自己重连。
-   * 返回 Promise 是给宿主 `napcat.connect().catch(...)` 用的 —— 连接失败由内部重连，不 throw。
+   * 返回 Promise 是给宿主 `onebot.connect().catch(...)` 用的 —— 连接失败由内部重连，不 throw。
    */
   async connect() {
     this.closed = false
@@ -173,7 +173,7 @@ export class NapCatAdapter {
   _open() {
     if (this.closed || this._connecting) return
     if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return // 已有连接/正在握手：绝不叠第二条
-    if (!this.wsUrl) { this.log.warn('未配置 napcat.wsUrl，NapCat 入站不可用'); return }
+    if (!this.wsUrl) { this.log.warn('未配置 onebot.wsUrl，OneBot 入站不可用'); return }
     this._connecting = true
     const gen = ++this._wsGen
     // WS 鉴权兼容两种 OneBot 11 标准形态（纯客户端适配，**不动协议端任何配置**）：
@@ -185,7 +185,7 @@ export class NapCatAdapter {
     const watchdog = setTimeout(() => {
       if (gen !== this._wsGen) return // 已被更新一代的连接/close() 取代
       this._connecting = false
-      this.log.warn('NapCat WS 握手超时, 3 秒后重连')
+      this.log.warn('OneBot WS 握手超时, 3 秒后重连')
       try { this.ws?.close() } catch { /* 已断开 */ }
       this._scheduleReconnect()
     }, 10000)
@@ -204,7 +204,7 @@ export class NapCatAdapter {
       clearTimeout(watchdog)
       this._connecting = false
       this.lastFrameAt = Date.now()
-      this.log.info('NapCat WS 已连接') // 运维验收就 grep 这一句，别改措辞
+      this.log.info('OneBot WS 已连接') // 运维验收就 grep 这一句，别改措辞
       this._fetchLoginInfo()
     }
 
@@ -220,14 +220,14 @@ export class NapCatAdapter {
         if (typeof good === 'boolean') this.receiveGood = good
         return
       }
-      if (data.post_type === 'lifecycle') { this.log.info(`NapCat lifecycle: ${data.sub_type || 'connect'}`); return }
+      if (data.post_type === 'lifecycle') { this.log.info(`OneBot lifecycle: ${data.sub_type || 'connect'}`); return }
       if (data.post_type !== 'message' && data.post_type !== 'notice') return
       for (const h of this.handlers) {
         try { h(data) } catch (e) { this.log.error(`事件处理异常: ${e.stack || e.message}`) }
       }
     }
 
-    this.ws.onerror = () => { if (gen === this._wsGen) this.log.warn('NapCat WS 错误 (等待握手超时或断开)') }
+    this.ws.onerror = () => { if (gen === this._wsGen) this.log.warn('OneBot WS 错误 (等待握手超时或断开)') }
     this.ws.onclose = () => {
       if (gen !== this._wsGen) return // 旧 socket 的迟到 close：忽略，不要触发重连
       clearTimeout(watchdog)
@@ -236,7 +236,7 @@ export class NapCatAdapter {
       this.loginOk = null
       this.loginError = '协议端 WS 断开'
       this.receiveGood = null
-      this.log.info('NapCat WS 已断开')
+      this.log.info('OneBot WS 已断开')
       this._scheduleReconnect()
     }
   }
@@ -253,7 +253,7 @@ export class NapCatAdapter {
       if (!this.ws || this.ws.readyState !== 1) return // 没连上归握手看门狗管
       const idle = Date.now() - this.lastFrameAt
       if (this.lastFrameAt && idle > STALE_MS) {
-        this.log.warn(`NapCat 已 ${Math.round(idle / 1000)}s 没有任何帧(含心跳), 判定假连接 → 强制重连`)
+        this.log.warn(`OneBot 已 ${Math.round(idle / 1000)}s 没有任何帧(含心跳), 判定假连接 → 强制重连`)
         this._forceReconnect()
       }
     }, 30000)
@@ -468,7 +468,7 @@ export class NapCatAdapter {
     try {
       const { data } = await this._post('get_file', { file_id: String(fileId) }, 10000)
       const hit = data?.status === 'ok' && data?.data ? { ...data.data } : null
-      if (hit && typeof hit.file === 'string') hit.file = fromNapCatFileRef(hit.file)
+      if (hit && typeof hit.file === 'string') hit.file = fromOneBotFileRef(hit.file)
       return hit
     } catch (e) {
       this.log.debug(`get_file 失败 (${fileId}): ${e.message}`)
@@ -657,7 +657,7 @@ export class NapCatAdapter {
   }
 
   /**
-   * 取群友 / 自己的头像（契约 `bot.napcat.fetchAvatar`；产物要能直接拿去图生图）。
+   * 取群友 / 自己的头像（契约 `bot.onebot.fetchAvatar`；产物要能直接拿去图生图）。
    *
    * 为什么走 CDN：协议端没有通用头像接口（`get_qq_avatar` 在多数版本回"不支持的Api"），
    * `get_group_member_info` / `get_friend_list` 里也都没有头像字段。QQ 头像是公开的：

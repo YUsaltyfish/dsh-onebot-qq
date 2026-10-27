@@ -94,7 +94,7 @@ test('出站引用跟随 turn/start：A 生成中 B/C 已提交，A 仍引 A；�
 
 test('未到 turn/start 就失败：不留下永久锚', async (t) => {
   const h = await boot(t)
-  h.kernel.napcat.msgById = h.kernel.napcat.msgById || (async () => null)
+  h.kernel.onebot.msgById = h.kernel.onebot.msgById || (async () => null)
   // 让 prompt 直接失败（非 session-gone），这一轮不会发生
   h.ctx.setPromptHandler(async () => { throw new Error('boom') })
   await emitRaw(h.kernel, groupAtEvent({ text: '失败', messageId: 2001 }))

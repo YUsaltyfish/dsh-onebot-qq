@@ -20,8 +20,8 @@ import {
 import {
   escapeCq,
   escapeCqParam,
-  fromNapCatFileRef,
-  toNapCatFileRef,
+  fromOneBotFileRef,
+  toOneBotFileRef,
 } from '../platform/cq-file.js'
 import {
   readJsonFile,
@@ -94,14 +94,14 @@ test('cq: 文本只转义 & [ ]（逗号保持原样）；参数值额外转义�
   assert.equal(escapeCqParam('a,b&c[d]e'), 'a&#44;b&amp;c&#91;d&#93;e')
 })
 
-test('cq: toNapCatFileRef / fromNapCatFileRef 往返', () => {
+test('cq: toOneBotFileRef / fromOneBotFileRef 往返', () => {
   const file = path.join(tmpRoot(), '图 0,1.png')
-  const fwd = toNapCatFileRef(file, { mode: 'fwd' })
+  const fwd = toOneBotFileRef(file, { mode: 'fwd' })
   if (isWin) assert.ok(!fwd.includes('\\'), 'Windows 默认模式应转正斜杠')
-  const uri = toNapCatFileRef(file, { mode: 'fileUri' })
+  const uri = toOneBotFileRef(file, { mode: 'fileUri' })
   assert.ok(uri.startsWith('file://'))
-  assert.equal(fromNapCatFileRef(uri), path.resolve(file))
-  assert.equal(fromNapCatFileRef(file), file)
+  assert.equal(fromOneBotFileRef(uri), path.resolve(file))
+  assert.equal(fromOneBotFileRef(file), file)
 })
 
 test('atomic: BOM 剥离 / JSON 原子写读', () => {

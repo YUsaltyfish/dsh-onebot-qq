@@ -38,7 +38,7 @@ function readBody(req, limit = 65536) {
 
 /**
  * @param {{host?: string, port?: number, kernel: object, log?: object, imageRoots?: string[]}} opts
- *   kernel 需要：`deliver / sendMedia / napcat / dsh / state / plugins / handleAdminRpc`
+ *   kernel 需要：`deliver / sendMedia / onebot / dsh / state / plugins / handleAdminRpc`
  *   imageRoots：允许 `/send-image` 读取的目录根（绝对路径，宿主按平台层解析）
  * @returns {{close(): void}}
  */
@@ -71,13 +71,13 @@ export function startCompatServer({ host = '127.0.0.1', port = 3971, kernel, log
     (kernel.plugins?.find((p) => p?.id === 'gate-wake')?.cfg?.ignoreGroups || []).map(Number)
 
   const health = () => {
-    const nh = kernel.napcat?.health?.() ?? {}
+    const nh = kernel.onebot?.health?.() ?? {}
     return {
       ok: true,
       dshLinked: Boolean(kernel.dsh?.health?.()?.linked ?? true),
-      napcatLinked: Boolean(nh.linked),
-      napcatLastFrameAgoMs: nh.lastFrameAgoMs,
-      napcatStale: nh.stale,
+      onebotLinked: Boolean(nh.linked),
+      onebotLastFrameAgoMs: nh.lastFrameAgoMs,
+      onebotStale: nh.stale,
       follows: kernel.dsh?.sessions?.size ?? 0,
       remoteEventsReady: true,
       sessions: kernel.dsh?.sessions?.size ?? 0,
@@ -115,7 +115,7 @@ export function startCompatServer({ host = '127.0.0.1', port = 3971, kernel, log
         const b = await readBody(req)
         const id = Number(b.message_id)
         if (!Number.isInteger(id) || id <= 0) throw new Error('message_id 无效')
-        const r = await kernel.napcat.recall(id)
+        const r = await kernel.onebot.recall(id)
         if (!r.ok) throw new Error(r.msg || '撤回失败')
         return send(200, { ok: true, recalled: id })
       }

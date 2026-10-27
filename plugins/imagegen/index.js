@@ -732,10 +732,10 @@ export default {
         if (!raw) throw new Error('user 不能为空（QQ 号，或群会话里的群名片/昵称）')
 
         if (!/^\d{5,12}$/.test(raw)) {
-          // 昵称 → QQ 号要读群成员表；这个能力在适配器里（契约：bot.napcat.fetchAvatar），不在这重复实现
+          // 昵称 → QQ 号要读群成员表；这个能力在适配器里（契约：bot.onebot.fetchAvatar），不在这重复实现
           if (kind !== 'group') throw new Error('私聊里只能按 QQ 号取头像')
-          if (typeof bot.napcat?.fetchAvatar !== 'function') throw new Error(`群里没找到「${raw}」—— 换成 QQ 号再试`)
-          return await bot.napcat.fetchAvatar(target, raw)
+          if (typeof bot.onebot?.fetchAvatar !== 'function') throw new Error(`群里没找到「${raw}」—— 换成 QQ 号再试`)
+          return await bot.onebot.fetchAvatar(target, raw)
         }
 
         // QQ 头像是公开 CDN（协议端没有可用头像接口，实测 `get_qq_avatar` 回"不支持的Api"）

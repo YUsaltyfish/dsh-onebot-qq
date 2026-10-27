@@ -17,7 +17,7 @@
 | SnowLuma（可选，本机在用） | v2.2.0，OneBot v11 实现；发行包分「完整版（内置 Node 24）」与「lite（需 Node 24.22.1+）」 | 见 §三末「用 SnowLuma（可选，本机在用）」 |
 | QQ 账号 | 建议小号 | — |
 
-> 术语：**DSH** 是跑机器人的宿主（`dsh web` 起 Web 服务）；**协议端** 是连 QQ 的 OneBot v11 实现（SnowLuma、NapCat 等，任选其一）；
+> 术语：**DSH** 是跑机器人的宿主（`dsh web` 起 Web 服务）；**协议端** 是连 QQ 的 OneBot v11 实现（SnowLuma、OneBot 等，任选其一）；
 > **本插件** 是装在 DSH profile 里的 `dsh-onebot-qq`。
 
 ## 一、安装 Node.js 22
@@ -44,7 +44,7 @@ dsh web          # 首次启动会初始化 web profile（%USERPROFILE%\.dsh\pro
 
 ## 三、安装并配置 OneBot 协议端
 
-> 下面给的是**通用步骤**：任选一个 OneBot v11 实现（SnowLuma、NapCat 等）都能照做。
+> 下面给的是**通用步骤**：任选一个 OneBot v11 实现（SnowLuma、OneBot 等）都能照做。
 > 想用 **SnowLuma**（本机在用的实现）就跳到本节最后的「用 SnowLuma（可选，本机在用）」，接完回来继续 §四。
 
 1. 按协议端自己的文档安装并启动它（多数实现会自带/拉起 QQ 客户端），按它自己的界面登录 QQ。
@@ -52,7 +52,7 @@ dsh web          # 首次启动会初始化 web profile（%USERPROFILE%\.dsh\pro
 3. 在它的 **OneBot v11** 配置里开启两个服务（都在 `127.0.0.1`，不要暴露公网）：
    - **WebSocket 服务（正向）**：常见默认端口 `3001`
    - **HTTP 服务 / HTTP API**：常见默认端口 `3000`
-   - 若设置了 token：记下来，后面填进实例配置（`napcat.wsToken` / `napcat.httpToken`；**键名沿用历史名，可对接任意 OneBot v11 协议端**）。
+   - 若设置了 token：记下来，后面填进实例配置（`onebot.wsToken` / `onebot.httpToken`；**键名沿用历史名，可对接任意 OneBot v11 协议端**）。
 4. 保存配置并**重启协议端**，确认 QQ 仍在线。
 
 > OneBot 配置的存放位置与界面各实现不同（多数在协议端自己的配置目录里），以该实现的官方文档为准。
@@ -65,7 +65,7 @@ SnowLuma v2.2.0 也是 OneBot v11 实现，有 Windows x64 发行包。接法和
 1. 装发行包，启动 `launcher.bat`；打开 WebUI <http://127.0.0.1:5099>（初始账号 `admin`，密码在**全新数据目录的首启日志里打印一次**；也可用环境变量 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 预置）。
 2. **先自己开 QQ 用手机扫码登录**，再让 SnowLuma 注入（它**不启动 QQ**，靠 native addon `ptrace` 注入已在运行的 QQ 进程；**没有 CLI、没有二维码 API**，只能对着 QQ 登录窗口扫）。
 3. WebUI 里配 OneBot：开正向 WS `3001`、HTTP `3000`（`messageFormat: array`）。**3000/3001 强制带 `accessToken`**（每个网络自动生成 32 字节 base64url，可在 WebUI 或 `config/onebot.json` 改）→ 两个 token 都抄下来。
-4. 控制台 →「OneBot 连接」页照旧填地址 / token（**任意 OneBot v11 协议端都填这里**；配置键名沿用 `napcat.*`，历史原因），然后「运维 → 测试 OneBot 连接」。
+4. 控制台 →「OneBot 连接」页照旧填地址 / token（**任意 OneBot v11 协议端都填这里**；配置键名沿用 `onebot.*`，历史原因），然后「运维 → 测试 OneBot 连接」。
 5. 建议关掉它自带的 `#sl` 状态指令（`statusCommand.enabled=false`）：默认开时群里发 `#sl` 框架会回一句，`swallow:false` 时还会把消息继续下发给机器人（机器人与框架各回一句）。
 
 > 排错补充：掉线看 `get_status` 的 `good`（`good=false` = 发得出、收不进）；`message_id` 是**非零有符号 int32，负值合法**，引用/撤回用返回的真实 id；`get_file` 只覆盖图片/语音缓存（群文件/视频溯源可能降级）。另建议冻结 QQ 静默热更新（`qqpatch.gtimg.cn` 指到 `0.0.0.0`），否则 hook 可能与 QQ 版本错位。
@@ -130,7 +130,7 @@ dsh web
    ```powershell
    dsh web
    ```
-   日志会看到（此时**没有**「NapCat WS 已连接」是预期）：
+   日志会看到（此时**没有**「OneBot WS 已连接」是预期）：
    ```
    [onebot-qq:kernel] 实例配置未完成（缺 adminQq）…控制台可继续配置
    [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
@@ -148,14 +148,14 @@ dsh web
 
 - 用**正斜杠**（`"C:/dsh-data/qq-bot"`）或双反斜杠（`"C:\\dsh-data\\qq-bot"`），避免转义错误；
 - 相对路径（如 `"workspace"`）相对**数据目录**解析，跨机器迁移最省事；
-- 必填 `adminQq` / `napcat.wsUrl` / `napcat.httpUrl`（协议端连接配置，**键名沿用 `napcat.*`，历史原因**）；协议端开了鉴权就填 `wsToken` / `httpToken`（接 SnowLuma 时两个都**必须**填）；
+- 必填 `adminQq` / `onebot.wsUrl` / `onebot.httpUrl`（协议端连接配置，**键名沿用 `onebot.*`，历史原因**）；协议端开了鉴权就填 `wsToken` / `httpToken`（接 SnowLuma 时两个都**必须**填）；
 - 生图凭据建议用环境变量（见 §九），不要写进 JSON；**手改配置后要重启一次 dsh-web**（控制台改是热生效）。
 
 自检：`node bin\dsh-onebot-qq.mjs doctor`（无 QQ/协议端时加 `--no-net`）；❌ 项修完再启动，⚠️（如 symlink 不可用、协议端未启动）属正常提示。
 
 ## 七、启动与验证
 
-1. 协议端在线、QQ 已登录；控制台「测试 OneBot 连接」返回 ok（按钮名已是「OneBot」），或日志出现 `[onebot-qq:napcat] NapCat WS 已连接`；
+1. 协议端在线、QQ 已登录；控制台「测试 OneBot 连接」返回 ok（按钮名已是「OneBot」），或日志出现 `[onebot-qq:onebot] OneBot WS 已连接`；
 2. 私聊「ping」→ 有回复；群里 @ 机器人「ping」→ 有回复；
 3. `/status`（仅主人）→ 有回执；发一张本地图（`a.png` 放进 `<dataDir>\workspace\` 后说「发一下 a.png」）→ QQ 收到图；
 4. 重启 `dsh web` 后再发一条 → 仍是同一个 DSH 会话；异常走控制台「运维 → 🩺 一键诊断」，报告在 `<dataDir>\reports\`。
@@ -277,7 +277,7 @@ node --test test\e2e.test.js   # 只跑假协议端（fake OneBot）端到端（
 - [ ] 协议端在线、QQ 已登录；WS 3001 / HTTP 3000 开启（SnowLuma 两个端口都要 token）
 - [ ] 插件装进 `web` profile，重启后日志有「内核就绪」
 - [ ] `config.json` 填好 `adminQq` + 协议端地址/token；`doctor` 无 ❌
-- [ ] 日志有「NapCat WS 已连接」
+- [ ] 日志有「OneBot WS 已连接」
 - [ ] 私聊 + 群 @ 文本往返成功
 - [ ] 发图成功（必要时切换 `DSH_QQ_MEDIA_REF` 并记录）
 - [ ] 人设切换成功（copy 或 symlink）

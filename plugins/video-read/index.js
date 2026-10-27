@@ -211,12 +211,12 @@ export default {
         //    ⚠️ 必须放在 before-turn（顺序 await，安全），**不能放在 passive-tap**——
         //    那个阶段内核是 fire-and-forget 的，不等 async 完成，会出现
         //    "before-turn 判定没有视频段 → 0.5 秒后才反查回来"的时序 bug（踩过）。
-        if (ev.replyToId && typeof bot.napcat?.msgById === 'function') {
+        if (ev.replyToId && typeof bot.onebot?.msgById === 'function') {
           // 每条引用都会走到这里：不是视频的结论按 messageId 缓存 100 条，别反复打协议端。
           const noVideo = (ev._scratch['video-read:noVideo'] ||= new Set())
           if (noVideo.has(String(ev.replyToId))) return
           try {
-            const q = await bot.napcat.msgById(ev.replyToId)
+            const q = await bot.onebot.msgById(ev.replyToId)
             const qSeg = q ? videoSegOf({ rawSegments: q.message ?? q.raw_message ?? [] }) : null
             if (qSeg) {
               seg = qSeg
@@ -327,9 +327,9 @@ export default {
       // 协议端溯源：**每个 handle 都试** —— file / file_id / url 在协议端眼里是同一个东西的
       // 不同叫法，哪个能用取决于版本。只试 seg.fileId || seg.file 会漏掉"file 有值但其实是文件名"的情况。
       for (const id of [seg.fileId, seg.file].filter(Boolean)) {
-        if (typeof bot.napcat?.getFile !== 'function') break
+        if (typeof bot.onebot?.getFile !== 'function') break
         try {
-          const info = await bot.napcat.getFile(id)
+          const info = await bot.onebot.getFile(id)
           const p = String(info?.file || '')
           if (p && fs.existsSync(p) && fs.statSync(p).isFile()) {
             bot.log.debug(`[看视频] getFile(${String(id).slice(0, 20)}) → 本地 ${p}`)

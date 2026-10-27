@@ -248,7 +248,7 @@ function cmdInit(flags) {
   2) 打开 设置 → QQ 控制台 →「新手向导」：填主人 QQ + OneBot 协议端地址，
      点「测试 OneBot 连接」→ 保存后自动连接（无需重启）。
   3) 也可以手改实例配置：${configPath}
-     （adminQq / napcat.wsUrl / napcat.httpUrl；缺 adminQq 时插件进入「待配置模式」，控制台仍可打开）
+     （adminQq / onebot.wsUrl / onebot.httpUrl；缺 adminQq 时插件进入「待配置模式」，控制台仍可打开）
   4) 自检：
        node ${path.relative(process.cwd(), path.join(PKG_ROOT, 'bin/dsh-onebot-qq.mjs')) || 'bin/dsh-onebot-qq.mjs'} doctor --data-dir "${dataDir}"
   5) 人设：已自动投递「${DEFAULT_PERSONA_NAME}」；换人设：
@@ -396,7 +396,7 @@ async function cmdDoctor(flags) {
 
   // 6) OneBot 协议端端口探测（可选）
   if (loaded && !noNet) {
-    const nap = loaded.runtime.napcat || {}
+    const nap = loaded.runtime.onebot || {}
     for (const [label, url, defPort] of [
       ['OneBot WS 端口', nap.wsUrl, 3001],
       ['OneBot HTTP 端口', nap.httpUrl, 3000],
@@ -435,7 +435,7 @@ async function cmdDoctor(flags) {
 // import-legacy
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LEGACY_TOP_KEYS = new Set(['bridge', 'napcat', 'dsh', 'pacing', 'imagegen', 'parser', 'welcome'])
+const LEGACY_TOP_KEYS = new Set(['bridge', 'onebot', 'dsh', 'pacing', 'imagegen', 'parser', 'welcome'])
 
 function cmdImportLegacy(flags, positional) {
   const srcArg = positional[0]
@@ -479,7 +479,7 @@ function cmdImportLegacy(flags, positional) {
   console.log(`
 请检查迁移结果（重点）：
   · adminQq                = ${migrated.adminQq || '（未迁移到，请手填）'}
-  · napcat.wsUrl/httpUrl   = ${migrated.napcat.wsUrl} / ${migrated.napcat.httpUrl}
+  · onebot.wsUrl/httpUrl   = ${migrated.onebot.wsUrl} / ${migrated.onebot.httpUrl}
   · dsh.qqWorkspacePath    = ${migrated.dsh.qqWorkspacePath}（相对 dataDir 或绝对路径）
   · dsh.sessionsFile       = ${migrated.dsh.sessionsFile}
   · archive.dir            = ${migrated.archive.dir}

@@ -40,7 +40,7 @@ function writeValidConfig(dataDir) {
   const file = path.join(dataDir, 'config.json')
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
   raw.adminQq = 10001
-  raw.napcat = { wsUrl: 'ws://127.0.0.1:3001', wsToken: '', httpUrl: 'http://127.0.0.1:3000', httpToken: '' }
+  raw.onebot = { wsUrl: 'ws://127.0.0.1:3001', wsToken: '', httpUrl: 'http://127.0.0.1:3000', httpToken: '' }
   fs.writeFileSync(file, `${JSON.stringify(raw, null, 4)}\n`)
 }
 
@@ -57,11 +57,11 @@ test('init：建数据目录 + 默认配置（adminQq=0）+ 复制模板；可�
   ]) {
     assert.ok(fs.existsSync(path.join(dataDir, sub)), `应创建子目录 ${sub}`)
   }
-  // 实例配置：v2、adminQq 占位 0、NapCat 有默认地址
+  // 实例配置：v2、adminQq 占位 0、OneBot 有默认地址
   const cfg = readConfig(dataDir)
   assert.equal(cfg.version, 2)
   assert.equal(cfg.adminQq, 0)
-  assert.equal(cfg.napcat.wsUrl, 'ws://127.0.0.1:3001')
+  assert.equal(cfg.onebot.wsUrl, 'ws://127.0.0.1:3001')
   // 模板文件
   assert.ok(fs.existsSync(path.join(dataDir, 'workspace', 'AGENTS.md')), 'workspace 应有 AGENTS.md 模板')
   assert.ok(fs.existsSync(path.join(dataDir, 'workspace', 'CLAUDE.local.md')))
@@ -119,7 +119,7 @@ test('doctor：缺必填项 → 退出码 1；填好后 → 退出码 0（--no-n
   assert.match(bad.stdout, /adminQq/)
   assert.match(bad.stdout, /❌/)
 
-  // 填好必填项 → 通过（--no-net 跳过 NapCat 端口探测）
+  // 填好必填项 → 通过（--no-net 跳过 OneBot 端口探测）
   writeValidConfig(dataDir)
   const good = runCli(['doctor', '--data-dir', dataDir, '--no-net'])
   assert.equal(good.status, 0, good.stdout + good.stderr)
@@ -184,7 +184,7 @@ test('import-legacy：旧 bridge 配置 → v2；覆盖时备份；参数缺失�
           groupKeywords: { '*': ['小助手'] },
           chatArchive: { enabled: true, dir: 'logs/qq_chat' },
         },
-        napcat: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' },
+        onebot: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' },
         imagegen: { apiKey: 'REPLACE_ME', baseUrl: 'https://example.invalid/v1' },
       },
       null,

@@ -38,8 +38,8 @@ test('defaultConfig：v2 结构、adminQq=0、不含私有路径/真实号码', 
   assert.equal(cfg.version, 2)
   assert.equal(cfg.adminQq, 0, '没有默认主人 QQ（必须显式配置）')
   assert.equal(cfg.credentials.gptImage.protocol, 'openai-images', '生图默认协议 openai-images')
-  assert.equal(cfg.napcat.wsUrl, 'ws://127.0.0.1:3001')
-  assert.equal(cfg.napcat.httpUrl, 'http://127.0.0.1:3000')
+  assert.equal(cfg.onebot.wsUrl, 'ws://127.0.0.1:3001')
+  assert.equal(cfg.onebot.httpUrl, 'http://127.0.0.1:3000')
   assert.equal(cfg.dsh.qqWorkspacePath, 'workspace', '工作区是相对 dataDir 的路径')
   assert.equal(cfg.dsh.sessionsFile, 'state/sessions.json')
   assert.equal(cfg.archive.dir, 'logs/qq_chat')
@@ -89,7 +89,7 @@ test('migrateLegacyConfig：旧 bridge 段 → v2（字段名与单位换算）'
       avatarDir: 'qq_avatars',
       avatarCacheHours: 12,
     },
-    napcat: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' },
+    onebot: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' },
     imagegen: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2', cooldownMs: 90000 },
     parser: { enabled: true, serviceUrl: 'http://127.0.0.1:3972' },
     welcome: { enabled: true, delayMs: 3000, imageChance: 0.5, cooldownMs: 600000 },
@@ -162,7 +162,7 @@ test('isLegacyShape / validateConfig', () => {
   const good = deepMerge(base, { adminQq: 10001 })
   assert.deepEqual(validateConfig(good), [])
 
-  const noUrls = deepMerge(good, { napcat: { wsUrl: '', httpUrl: '' } })
+  const noUrls = deepMerge(good, { onebot: { wsUrl: '', httpUrl: '' } })
   errors = validateConfig(noUrls)
   assert.equal(errors.length, 2)
   assert.ok(errors.some((e) => e.includes('wsUrl')))
@@ -189,7 +189,7 @@ test('resolveRuntimePaths：相对路径按 dataDir 解析、绝对路径原样�
         'file-transfer': { uploadDir: 'qq_uploads', imageWhitelist: ['qq_uploads', 'C:/abs-on-win', '/abs-on-posix'] },
         'link-parser': { parserUrl: 'http://127.0.0.1:3972', platforms: ['bilibili'] },
       },
-      napcat: { wsUrl: 'ws://127.0.0.1:3001' },
+      onebot: { wsUrl: 'ws://127.0.0.1:3001' },
     },
     dataDir,
   )
@@ -199,7 +199,7 @@ test('resolveRuntimePaths：相对路径按 dataDir 解析、绝对路径原样�
   assert.equal(resolved.archive.dir, path.resolve(dataDir, 'logs/qq_chat'))
   assert.equal(resolved.pluginConfig.stickers.dir, path.resolve(dataDir, 'qq-stickers'))
   assert.equal(resolved.pluginConfig['file-transfer'].uploadDir, path.resolve(dataDir, 'qq_uploads'))
-  assert.equal(resolved.napcat.wsUrl, 'ws://127.0.0.1:3001', 'URL 不当路径解析')
+  assert.equal(resolved.onebot.wsUrl, 'ws://127.0.0.1:3001', 'URL 不当路径解析')
   assert.equal(resolved.pluginConfig['link-parser'].parserUrl, 'http://127.0.0.1:3972')
   assert.deepEqual(resolved.pluginConfig['link-parser'].platforms, ['bilibili'], '非路径数组不解析')
   const whitelist = resolved.pluginConfig['file-transfer'].imageWhitelist
@@ -261,7 +261,7 @@ test('loadConfig：正常配置 + UTF-8 BOM 也能读；migrated 标记旧格式
 
   // 旧格式落盘 → 内存迁移
   const legacyFile = path.join(dataDir, 'legacy.json')
-  fs.writeFileSync(legacyFile, JSON.stringify({ bridge: { admins: [10001] }, napcat: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' } }))
+  fs.writeFileSync(legacyFile, JSON.stringify({ bridge: { admins: [10001] }, onebot: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' } }))
   const legacyRes = loadConfig({ dataDir, configPath: legacyFile, env: {}, createIfMissing: false })
   assert.equal(legacyRes.migrated, true)
   assert.equal(legacyRes.raw.adminQq, 10001)
@@ -292,4 +292,47 @@ test('examples/config.example.json：合法、能通过校验、无私有值', (
   assert.deepEqual(validateConfig(merged), [], '示例配置填完占位值后应能通过校验')
   assert.equal(merged.credentials.gptImage.protocol, 'openai-images', '示例配置应带生图协议字段')
   assert.equal(exampleConfig().version, CONFIG_VERSION)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 旧配置键兼容：2026-10-27 起这段从 napcat 改名为 onebot，老 config.json 必须照旧能跑
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('旧键兼容：config.json 只写 napcat.* 时，运行时能读到 onebot.*（老部署不用改文件）', () => {
+  const dataDir = tmpDir('legacy-key')
+  const file = path.join(dataDir, 'config.json')
+  fs.writeFileSync(file, JSON.stringify({
+    version: CONFIG_VERSION,
+    adminQq: 10001,
+    napcat: {
+      wsUrl: 'ws://127.0.0.1:4599',
+      wsToken: 'ws-token-old',
+      httpUrl: 'http://127.0.0.1:4598',
+      httpToken: 'http-token-old',
+      mediaSendTimeoutMs: 300000,
+      mediaSendRetries: 2,
+    },
+  }))
+  const r = loadConfig({ dataDir })
+  assert.equal(r.runtime.onebot.wsUrl, 'ws://127.0.0.1:4599', '旧键的 WS 地址要能读到')
+  assert.equal(r.runtime.onebot.wsToken, 'ws-token-old', '旧键的 token 要能读到')
+  assert.equal(r.runtime.onebot.httpUrl, 'http://127.0.0.1:4598')
+  assert.equal(r.runtime.onebot.httpToken, 'http-token-old')
+  assert.equal(r.runtime.onebot.mediaSendTimeoutMs, 300000, '旧键里的非默认字段也不能丢')
+  assert.equal(r.runtime.onebot.mediaSendRetries, 2)
+  assert.deepEqual(validateConfig(r.raw), [], '兼容后应直接通过校验')
+})
+
+test('旧键兼容：onebot 与 napcat 同时存在时，onebot 优先、napcat 只补缺', () => {
+  const dataDir = tmpDir('both-keys')
+  const file = path.join(dataDir, 'config.json')
+  fs.writeFileSync(file, JSON.stringify({
+    version: CONFIG_VERSION,
+    adminQq: 10001,
+    onebot: { wsUrl: 'ws://127.0.0.1:4799' },              // 新键：只有地址
+    napcat: { wsUrl: 'ws://127.0.0.1:3001', wsToken: 'from-old' }, // 旧键：地址该被新键覆盖，token 该补上
+  }))
+  const r = loadConfig({ dataDir })
+  assert.equal(r.runtime.onebot.wsUrl, 'ws://127.0.0.1:4799', '新键优先')
+  assert.equal(r.runtime.onebot.wsToken, 'from-old', '旧键补缺字段')
 })

@@ -154,7 +154,7 @@ test('schema（新手引导）：protocol enum / 模型 suggestions / info 控�
   const infos = schema.controls.filter((c) => c.type === 'info')
   assert.ok(infos.length >= 2, `应有图文说明控件（info），实际 ${infos.length}`)
 
-  for (const id of ['napcat-check', 'napcat-reconnect', 'imagegen-check']) {
+  for (const id of ['onebot-check', 'onebot-reconnect', 'imagegen-check']) {
     assert.ok(schema.actions.some((a) => a.id === id), `actions 应包含 ${id}`)
   }
 
@@ -168,7 +168,7 @@ test('schema（新手引导）：protocol enum / 模型 suggestions / info 控�
   assert.deepEqual(withSuggestions.map((c) => c.key), ['credentials.gptImage.model'])
 })
 
-test('status（新手引导）：meta / onboarding 5 项 / napcat / imagegen（绝不回显 key）', async (t) => {
+test('status（新手引导）：meta / onboarding 5 项 / onebot / imagegen（绝不回显 key）', async (t) => {
   const h = await boot(t)
   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
   const st = await endpoints.handle('status', {})
@@ -182,27 +182,27 @@ test('status（新手引导）：meta / onboarding 5 项 / napcat / imagegen（�
   assert.equal(st.meta.configReady, true, '有 adminQq 的配置 → configReady=true')
 
   assert.ok(Array.isArray(st.onboarding) && st.onboarding.length === 5, 'onboarding 5 项')
-  assert.deepEqual(st.onboarding.map((o) => o.id), ['config', 'adminQq', 'napcat', 'persona', 'imagegen'])
+  assert.deepEqual(st.onboarding.map((o) => o.id), ['config', 'adminQq', 'onebot', 'persona', 'imagegen'])
   for (const item of st.onboarding) {
     for (const f of ['id', 'label', 'ok', 'required', 'hint']) assert.ok(f in item, `onboarding 项缺 ${f}`)
   }
   assert.equal(st.onboarding.find((o) => o.id === 'adminQq').ok, true)
-  assert.equal(st.onboarding.find((o) => o.id === 'napcat').ok, false, '未连接 → ❌')
+  assert.equal(st.onboarding.find((o) => o.id === 'onebot').ok, false, '未连接 → ❌')
   assert.equal(st.onboarding.find((o) => o.id === 'imagegen').required, false, '生图是可选项')
 
-  assert.ok(st.napcat && 'wsUrl' in st.napcat && 'wsTokenSet' in st.napcat && 'linked' in st.napcat)
+  assert.ok(st.onebot && 'wsUrl' in st.onebot && 'wsTokenSet' in st.onebot && 'linked' in st.onebot)
   assert.ok(st.imagegen && 'configured' in st.imagegen && 'protocol' in st.imagegen)
   const imagegenJson = JSON.stringify(st.imagegen)
   assert.equal(typeof st.imagegen.apiKeySet, 'boolean', '只报 apiKeySet，不回显 key 本身')
   assert.doesNotMatch(imagegenJson, /"apiKey":\s*"/, 'imagegen 状态里 apiKey 只能是布尔（envOverride 标记），不能回显值')
   assert.equal(imagegenJson.includes('REPLACE_ME'), false, '不回显任何 key 值')
-  assert.equal(JSON.stringify(st.napcat).includes('wsToken":'), false, 'napcat 状态不回显 token')
+  assert.equal(JSON.stringify(st.onebot).includes('wsToken":'), false, 'onebot 状态不回显 token')
 })
 
 test('待配置模式：set 保存成功并热应用其余配置（pending 标记、不自动连接）；默认人设已自动投递；补上 adminQq 后 configReady=true', async (t) => {
   const h = await bootKernel({
     config: {
-      adminQq: 0, // 只缺这一项（napcat 地址用测试占位、非空）→ 待配置模式
+      adminQq: 0, // 只缺这一项（onebot 地址用测试占位、非空）→ 待配置模式
       pacing: { merge: { enabled: false } },
     },
   })
@@ -233,14 +233,14 @@ test('待配置模式：set 保存成功并热应用其余配置（pending 标�
 
   // 协议端地址同样要即时进 adapter（否则新手向导「先填地址→测试连接」会连旧地址）
   const reloadCallsBefore = reloadCalls
-  const wsSet = await endpoints.handle('set', { key: 'napcat.wsUrl', value: 'ws://127.0.0.1:4599' })
+  const wsSet = await endpoints.handle('set', { key: 'onebot.wsUrl', value: 'ws://127.0.0.1:4599' })
   assert.equal(wsSet.ok, true, JSON.stringify(wsSet))
   assert.equal(wsSet.pending, true)
   assert.ok(reloadCalls > reloadCallsBefore, 'pending 分支也必须调用 reloadConfig（只落盘不热应用是错的）')
-  assert.equal(h.kernel.runtime.napcat.wsUrl, 'ws://127.0.0.1:4599', 'pending reload 应热应用 runtime')
-  assert.equal(h.kernel.napcat.wsUrl, 'ws://127.0.0.1:4599', 'pending 模式下 协议端地址也要进 adapter（测试连接用新地址）')
+  assert.equal(h.kernel.runtime.onebot.wsUrl, 'ws://127.0.0.1:4599', 'pending reload 应热应用 runtime')
+  assert.equal(h.kernel.onebot.wsUrl, 'ws://127.0.0.1:4599', 'pending 模式下 协议端地址也要进 adapter（测试连接用新地址）')
   await new Promise((r) => setTimeout(r, 200))
-  assert.equal(h.kernel.napcat.health().linked, false, '待配置模式仍不自动连接')
+  assert.equal(h.kernel.onebot.health().linked, false, '待配置模式仍不自动连接')
 
   // 安装即用：待配置模式下启动时也已自动投递默认人设并写回 activePersona
   assert.equal(
@@ -311,15 +311,15 @@ test('action imagegen-check：未配置逐项提示；合法配置 GET /models 4
   assert.match(String(ok.advice), /404|提示/, '404 只给提示不算失败')
 })
 
-test('action napcat-check / napcat-reconnect：未连接返回可读结果（不 throw）', async (t) => {
+test('action onebot-check / onebot-reconnect：未连接返回可读结果（不 throw）', async (t) => {
   const h = await boot(t) // autoConnect:false → 未连接
   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
-  const check = await endpoints.handle('action', { id: 'napcat-check' })
+  const check = await endpoints.handle('action', { id: 'onebot-check' })
   assert.equal(check.ok, false)
   assert.match(String(check.error), /未连接/)
   assert.ok(String(check.message).length > 0)
 
-  const rec = await endpoints.handle('action', { id: 'napcat-reconnect' })
+  const rec = await endpoints.handle('action', { id: 'onebot-reconnect' })
   assert.equal(rec.ok, true, '重连动作本身不 throw')
   assert.equal(typeof rec.linked, 'boolean')
 })
@@ -506,7 +506,7 @@ function assertDiagnoseShape(result, { label = 'diagnose' } = {}) {
     assert.equal(typeof c.detail, 'string', `${label} ${c.id}.detail 应为字符串`)
   }
   const ids = result.checks.map((c) => c.id)
-  for (const id of ['config', 'adminQq', 'dsh', 'tools', 'napcat', 'persona', 'dirs', 'runtime']) {
+  for (const id of ['config', 'adminQq', 'dsh', 'tools', 'onebot', 'persona', 'dirs', 'runtime']) {
     assert.ok(ids.includes(id), `${label} 应包含检查项 ${id}（实际：${ids.join(',')}）`)
   }
   assert.ok(result.summary && typeof result.summary === 'object', `${label} 应有 summary`)
@@ -529,7 +529,7 @@ test('action diagnose（正常配置）：返回 checks/summary/report/reportPat
     dataDir,
     config: {
       adminQq: ADMIN_QQ,
-      napcat: {
+      onebot: {
         wsUrl: 'ws://127.0.0.1:3001',
         wsToken: 'super-secret-token',
         httpUrl: 'http://127.0.0.1:3000',
@@ -575,8 +575,8 @@ test('action diagnose（正常配置）：返回 checks/summary/report/reportPat
   assert.equal(byId.adminQq.ok, true)
   assert.equal(byId.tools.ok, true)
   assert.equal(byId.runtime.ok, true)
-  assert.equal(byId.napcat.ok, false, '没连协议端 → napcat 项 fail')
-  assert.match(String(byId.napcat.detail), /未连接|协议端/)
+  assert.equal(byId.onebot.ok, false, '没连协议端 → onebot 项 fail')
+  assert.match(String(byId.onebot.detail), /未连接|协议端/)
 })
 
 test('action diagnose（待配置模式 adminQq=0）：仍成功并落盘；config/adminQq 为 ⚠️/❌', async (t) => {
@@ -604,7 +604,7 @@ test('action diagnose（待配置模式 adminQq=0）：仍成功并落盘；conf
   assert.match(result.report, /待配置|adminQq/, '报告应提示缺 adminQq / 待配置模式')
 })
 
-test('action diagnose：协议端未连接只让 napcat 项 fail，绝不 throw；可选能力只降级 ⚠️', async (t) => {
+test('action diagnose：协议端未连接只让 onebot 项 fail，绝不 throw；可选能力只降级 ⚠️', async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-diag-offline-'))
   for (const d of ['workspace', 'personas', 'state', 'logs/qq_chat']) fs.mkdirSync(path.join(dataDir, d), { recursive: true })
   const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ } }) // autoConnect:false，且无 fake 协议端
@@ -614,7 +614,7 @@ test('action diagnose：协议端未连接只让 napcat 项 fail，绝不 throw�
   const result = await endpoints.handle('action', { id: 'diagnose' })
   assertDiagnoseShape(result)
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]))
-  assert.equal(byId.napcat.ok, false)
+  assert.equal(byId.onebot.ok, false)
   // 可选项（生图未配置）只能是 warn，不参与 fail
   const imagegen = byId.imagegen
   if (imagegen) assert.equal(imagegen.required, false, '生图是可选检查项')
@@ -713,12 +713,12 @@ test('diagnose：报告落盘失败 → reportPath 为空、报告含失败提�
   assert.match(r.fixPrompt, /未能落盘|贴给 DSH|正文/, 'fixPrompt 应退化为"贴正文给 DSH"')
 })
 
-test('diagnose：老内核缺 checkNapcat / checkAgentPreset → 降级不判 ❌（不 throw）', async (t) => {
+test('diagnose：老内核缺 checkOneBot / checkAgentPreset → 降级不判 ❌（不 throw）', async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-diag-oldkernel-'))
   for (const d of ['workspace', 'personas', 'state', 'logs/qq_chat']) fs.mkdirSync(path.join(dataDir, d), { recursive: true })
   const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ, dsh: { agentPreset: 'qq-chat' } } })
   t.after(() => h.dispose())
-  delete h.kernel.checkNapcat
+  delete h.kernel.checkOneBot
   delete h.kernel.checkAgentPreset
   const store = createConfigStore({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const r = await runDiagnostics({ kernel: h.kernel, store, log: quiet() })
@@ -726,8 +726,8 @@ test('diagnose：老内核缺 checkNapcat / checkAgentPreset → 降级不判 �
   const byId = Object.fromEntries(r.checks.map((c) => [c.id, c]))
   assert.equal(byId.agentPreset.ok, true, '缺 checkAgentPreset → 降级为通过（无法校验）')
   assert.match(String(byId.agentPreset.detail), /无法校验|未提供校验能力/)
-  assert.equal(byId.napcat.ok, false, '缺 checkNapcat → 回退 health，未连接仍 fail（但不 throw）')
-  assert.match(String(byId.napcat.detail), /未连接/)
+  assert.equal(byId.onebot.ok, false, '缺 checkOneBot → 回退 health，未连接仍 fail（但不 throw）')
+  assert.match(String(byId.onebot.detail), /未连接/)
 })
 
 test('秘密字段：set 响应/日志/状态都不回显明文；config.json 落盘为 0600', async (t) => {
@@ -736,7 +736,7 @@ test('秘密字段：set 响应/日志/状态都不回显明文；config.json �
   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
 
   const secret = 'SUPER_SECRET_TOKEN_123'
-  const set = await endpoints.handle('set', { key: 'napcat.wsToken', value: secret })
+  const set = await endpoints.handle('set', { key: 'onebot.wsToken', value: secret })
   assert.equal(set.ok, true, JSON.stringify(set))
   assert.equal(set.secret, true)
   assert.equal(set.configured, true)
@@ -749,7 +749,7 @@ test('秘密字段：set 响应/日志/状态都不回显明文；config.json �
   assert.equal(JSON.stringify(schema).includes(secret), false, 'schema 不得回显秘密字段明文')
   assert.equal(JSON.stringify(status).includes(secret), false, 'status 不得回显秘密字段明文')
   const cfg = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
-  assert.equal(cfg.napcat.wsToken, secret, '磁盘上应保存真实值')
+  assert.equal(cfg.onebot.wsToken, secret, '磁盘上应保存真实值')
 
   // 配置与备份都应是 0600（Windows 无 chmod 语义，跳过）
   if (process.platform !== 'win32') {

@@ -30,7 +30,7 @@ import {
   normalizeEvent, buildPromptText, extractText, renderForward, senderNameOf, detectImageMediaType, parseKeywordLines,
 } from './kernel/format.js'
 
-import { NapCatAdapter } from './kernel/napcat-adapter.js'
+import { OneBotAdapter } from './kernel/onebot-adapter.js'
 import { ChatState, Pipeline, createDeliver, turnStore } from './kernel/state-pipeline.js'
 import { createPacing } from './kernel/pacing.js'
 import { createDshDriver } from './kernel/dsh-driver.js'
@@ -252,14 +252,14 @@ export async function apply(ctx, bundleConfig = {}) {
     const onlyAdminQqMissing = errors.length === 1 && /adminQq/.test(String(errors[0]))
     if (onlyAdminQqMissing) {
       configReady = false
-      log.warn('实例配置未完成（缺 adminQq）：已进入**待配置模式** —— 控制台与工具可用、暂不连接 NapCat；'
+      log.warn('实例配置未完成（缺 adminQq）：已进入**待配置模式** —— 控制台与工具可用、暂不连接 OneBot；'
         + '请在 设置 → QQ 控制台 → 新手向导 里填写「主人 QQ」和 OneBot 协议端地址并保存，配置就绪后会自动连接。'
         + `（配置文件：${configPath}）`)
     } else {
       throw new Error(`QQ 机器人配置未就绪：${errors.join('；')}（配置文件：${configPath}）`)
     }
   }
-  if (loaded.created) log.info(`已创建默认实例配置：${configPath}（请到控制台填写 adminQq / NapCat 地址）`)
+  if (loaded.created) log.info(`已创建默认实例配置：${configPath}（请到控制台填写 adminQq / OneBot 地址）`)
   if (loaded.migrated) log.warn('检测到旧版配置格式：已按 v2 在内存中迁移；建议用 CLI 的 import-legacy 落盘')
 
   // ── 2. 子插件发现（import + 配置解析；单个插件坏不拖垮内核）──────
@@ -375,9 +375,9 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 4. 适配器 + 状态 + 管线 + 节奏 + 出站 + DSH 驱动 ─────────────
   const imagegenCfg = discovered.find((d) => d.id === 'imagegen')?.cfg
   const avatarDir = String(imagegenCfg?.avatarDir || '').trim() || path.join(dataDir, 'avatars')
-  const napcat = new NapCatAdapter({
-    ...runtime.napcat,
-    log: logFor('napcat'),
+  const onebot = new OneBotAdapter({
+    ...runtime.onebot,
+    log: logFor('onebot'),
     avatarDir,
     avatarCacheHours: Number(imagegenCfg?.avatarCacheHours) > 0 ? Number(imagegenCfg.avatarCacheHours) : 24,
   })
@@ -390,7 +390,7 @@ export async function apply(ctx, bundleConfig = {}) {
   const greetedSessions = new Set() // sessionId 集合：首轮带 [QQ会话 chatKey｜...]，后续轮只带 [本条消息ID ...]
 
   const kernel = {
-    log, napcat, state, pipeline, pacing, tmp,
+    log, onebot, state, pipeline, pacing, tmp,
     adminQq: Number(runtime.adminQq) || 0,
     configReady,
     version: PACKAGE_VERSION,
@@ -467,7 +467,7 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 出站：唯一实现（deliver + deliver.media） ──────────────────
   const outboundHooks = kernel.outboundHooks
   const deliver = createDeliver({
-    napcat, log, adminQq: kernel.adminQq,
+    onebot, log, adminQq: kernel.adminQq,
     longForward: {
       threshold: runtime.outbound?.longForwardThreshold ?? 400,
       chunkSize: runtime.outbound?.longForwardChunkSize ?? 800,
@@ -537,7 +537,7 @@ export async function apply(ctx, bundleConfig = {}) {
     workspaceId: kernel.qqWorkspace?.id || '',
     agentPreset: runtime.dsh.agentPreset,
     state,
-    napcat,
+    onebot,
     maintSessionIds: kernel.maintSessionIds,
   })
   kernel.dsh = dsh
@@ -642,7 +642,7 @@ export async function apply(ctx, bundleConfig = {}) {
       message_id: { type: 'integer', required: true, description: '要撤回的消息 ID' },
     },
     async execute(args = {}) {
-      const r = await napcat.recall(args.message_id)
+      const r = await onebot.recall(args.message_id)
       if (!r?.ok) throw new Error(r?.msg || '撤回失败')
       return { ok: true, message_id: Number(args.message_id) }
     },
@@ -660,7 +660,7 @@ export async function apply(ctx, bundleConfig = {}) {
     pacing: runtime.pacing,
     credentials: runtime.credentials,
     dsh: runtime.dsh,
-    napcat: runtime.napcat,
+    onebot: runtime.onebot,
     compat: runtime.compat,
     keywordTable: kernel.shared.keywordsTable || {},
     tmp,
@@ -676,26 +676,26 @@ export async function apply(ctx, bundleConfig = {}) {
         if (i >= 0) pluginDisposers.splice(i, 1)
       }
     },
-    get selfId() { return napcat.selfId },
+    get selfId() { return onebot.selfId },
     get commands() { return kernel.commands },
     get core() { return coreOf() },
     get credentials() { return runtime.credentials },
-    get napcat() {
+    get onebot() {
       // 只读 + 受控动作视图：插件拿不到任何裸 sendMessage/sendForward/sendMedia，只能调受控查询与 poke/recall。
       return {
-        get selfId() { return napcat.selfId },
-        get selfNickname() { return napcat.selfNickname },
-        groupHistory: (...a) => napcat.groupHistory(...a),
-        groupList: (...a) => napcat.groupList(...a),
-        friendList: (...a) => napcat.friendList(...a),
-        memberInfo: (...a) => napcat.memberInfo(...a),
-        msgById: (...a) => napcat.msgById(...a),
-        getFile: (...a) => napcat.getFile(...a),
-        getForwardMsg: (...a) => napcat.getForwardMsg(...a),
-        poke: (...a) => napcat.poke(...a),
-        recall: (...a) => napcat.recall(...a),
-        fetchAvatar: (...a) => napcat.fetchAvatar(...a),
-        health: () => napcat.health(),
+        get selfId() { return onebot.selfId },
+        get selfNickname() { return onebot.selfNickname },
+        groupHistory: (...a) => onebot.groupHistory(...a),
+        groupList: (...a) => onebot.groupList(...a),
+        friendList: (...a) => onebot.friendList(...a),
+        memberInfo: (...a) => onebot.memberInfo(...a),
+        msgById: (...a) => onebot.msgById(...a),
+        getFile: (...a) => onebot.getFile(...a),
+        getForwardMsg: (...a) => onebot.getForwardMsg(...a),
+        poke: (...a) => onebot.poke(...a),
+        recall: (...a) => onebot.recall(...a),
+        fetchAvatar: (...a) => onebot.fetchAvatar(...a),
+        health: () => onebot.health(),
       }
     },
     get dsh() { return dsh },
@@ -803,9 +803,9 @@ export async function apply(ctx, bundleConfig = {}) {
     // 2. 引用消息正文与被引图反查（供 buildPromptText 的 quoteText 与识图使用）
     if (ev.replyToId && !ev._scratch.quoteText) {
       try {
-        const qMsg = await napcat.msgById(ev.replyToId)
+        const qMsg = await onebot.msgById(ev.replyToId)
         if (qMsg) {
-          const parsed = extractText(qMsg.message ?? qMsg.raw_message ?? '', napcat.selfId)
+          const parsed = extractText(qMsg.message ?? qMsg.raw_message ?? '', onebot.selfId)
           const qSender = senderNameOf(qMsg.sender, qMsg.sender?.user_id ?? qMsg.user_id)
           const imgTag = parsed.images?.length ? ` [被引图×${parsed.images.length}]` : ''
           ev._scratch.quoteText = `[${qSender}(QQ:${qMsg.sender?.user_id ?? qMsg.user_id ?? '?'})]: ${parsed.text || '[媒体/富文本]'}${imgTag}`
@@ -824,8 +824,8 @@ export async function apply(ctx, bundleConfig = {}) {
     let fwdItems = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
     if (ev.wake && !fwdItems.length && ev.replyToId) {
       try {
-        const qMsg = await napcat.msgById(ev.replyToId)
-        const qParsed = qMsg ? extractText(qMsg.message ?? qMsg.raw_message ?? '', napcat.selfId) : null
+        const qMsg = await onebot.msgById(ev.replyToId)
+        const qParsed = qMsg ? extractText(qMsg.message ?? qMsg.raw_message ?? '', onebot.selfId) : null
         if (qParsed?.forwards?.length) fwdItems = qParsed.forwards
       } catch (e) {
         log.debug(`反查被引消息失败（不影响本轮）: ${e.message}`)
@@ -839,7 +839,7 @@ export async function apply(ctx, bundleConfig = {}) {
         // ② 内联没有才回退请求（有些来源确实只给 id）
         if (!rendered && item?.id) {
           try {
-            const fwd = await napcat.getForwardMsg(item.id)
+            const fwd = await onebot.getForwardMsg(item.id)
             rendered = fwd ? renderForward(fwd) : ''
           } catch (e) {
             log.warn(`取合并转发失败（id=${item.id}）: ${e.message}`)
@@ -860,8 +860,8 @@ export async function apply(ctx, bundleConfig = {}) {
           let buf = null
           if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
             buf = fs.readFileSync(file)
-          } else if (file && typeof napcat.getFile === 'function') {
-            const info = await napcat.getFile(file)
+          } else if (file && typeof onebot.getFile === 'function') {
+            const info = await onebot.getFile(file)
             if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) {
               buf = fs.readFileSync(info.file)
             } else if (info?.url && /^https?:\/\//.test(info.url)) {
@@ -1142,7 +1142,7 @@ export async function apply(ctx, bundleConfig = {}) {
     const groups = pacing.allowedGroupIds?.() ?? []
     for (const gid of groups) {
       try {
-        const msgs = await napcat.groupHistory(gid, 1)
+        const msgs = await onebot.groupHistory(gid, 1)
         const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null
         if (!last) continue
         const ts = Number(last.time) * 1000 || Date.now()
@@ -1156,11 +1156,11 @@ export async function apply(ctx, bundleConfig = {}) {
   seedProactiveBaseline().catch(() => {})
   kernel.seedProactiveBaseline = seedProactiveBaseline
 
-  napcat.onEvent(async (raw) => {
+  onebot.onEvent(async (raw) => {
     const t0 = Date.now()
     let ev
     try {
-      ev = normalizeEvent(raw, napcat.selfId, kernel.adminQq)
+      ev = normalizeEvent(raw, onebot.selfId, kernel.adminQq)
     } catch (e) {
       log.warn(`事件归一失败: ${e.message}`)
       return
@@ -1199,7 +1199,7 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 健康快照 ─────────────────────────────────────────────────
   kernel.status = () => ({
     contractVersion: CONTRACT_VERSION,
-    napcat: napcat.health(),
+    onebot: onebot.health(),
     dsh: dsh.health(),
     plugins: kernel.pluginDefs.map((p) => ({
       id: p.id, title: p.title, order: p.order, enabled: p.enabled, loaded: p.loaded, lastError: p.error,
@@ -1292,7 +1292,7 @@ export async function apply(ctx, bundleConfig = {}) {
       replyMaxLength: runtime.outbound?.replyMaxLength ?? 3000,
     })
     replaceInPlace(archiveCfg, runtime.archive || {})
-    napcat.applyConfig?.(runtime.napcat)
+    onebot.applyConfig?.(runtime.onebot)
     // 工作区路径/名称可能被改过：按新值创建或复用（幂等），再让驱动绑到它
     const wsInfo = await ensureQqWorkspace({ quiet: true })
     await dsh.applyConfig?.({
@@ -1310,7 +1310,7 @@ export async function apply(ctx, bundleConfig = {}) {
     }
     // 首次配置完成（待配置模式 → 已就绪）：按 bundle 引导项自动连接一次；失败只警告，控制台可手动重连
     if (!pending && !wasReady && bundleConfig.autoConnect !== false) {
-      napcat.connect().catch((e) => log.warn(`配置就绪后自动连接协议端失败（可在控制台点「重新连接 OneBot」）: ${e.message}`))
+      onebot.connect().catch((e) => log.warn(`配置就绪后自动连接协议端失败（可在控制台点「重新连接 OneBot」）: ${e.message}`))
     }
     return {
       ok: true,
@@ -1326,7 +1326,7 @@ export async function apply(ctx, bundleConfig = {}) {
    * 不传/传的就是当前 runtime → 重新读盘（拿最新 raw + runtime）。
    */
   kernel.applyRuntimeConfig = async (nextRuntime) => {
-    const useGiven = nextRuntime && nextRuntime !== runtime && nextRuntime.napcat && nextRuntime.adminQq !== undefined
+    const useGiven = nextRuntime && nextRuntime !== runtime && nextRuntime.onebot && nextRuntime.adminQq !== undefined
     if (useGiven) return applyRuntimeConfigValue(nextRuntime, deepClone(nextRuntime))
     const reloaded = loadConfig({ dataDir: bundleConfig.dataDir, configPath: bundleConfig.configPath, createIfMissing: false })
     return applyRuntimeConfigValue(reloaded.runtime, reloaded.raw)
@@ -1354,13 +1354,13 @@ export async function apply(ctx, bundleConfig = {}) {
   }
   /** 控制台「测试入群欢迎」：把合成通知喂给所有入站订阅者（走真实管线，出站仍走 deliver）。 */
   kernel.simulateNotice = async (rawEvent) => {
-    const handlers = [...(napcat.handlers || [])]
+    const handlers = [...(onebot.handlers || [])]
     return Promise.all(handlers.map((h) => h(rawEvent)))
   }
   kernel.reconnectNapcat = async () => {
-    try { napcat.close() } catch { /* 已断开 */ }
-    await napcat.connect()
-    return napcat.health()
+    try { onebot.close() } catch { /* 已断开 */ }
+    await onebot.connect()
+    return onebot.health()
   }
   /**
    * 控制台「测试 OneBot 连接」：未连接直接给出原因；已连接用 `get_login_info` 实测一次（5s 超时），
@@ -1368,18 +1368,18 @@ export async function apply(ctx, bundleConfig = {}) {
    * @returns {Promise<{ok:boolean, linked:boolean, stale:boolean, lastFrameAgoMs:number|null,
    *   selfId:number|null, nickname:string|null, latencyMs?:number, error?:string}>}
    */
-  kernel.checkNapcat = async () => {
+  kernel.checkOneBot = async () => {
     const t0 = Date.now()
     // 先主动查一次登录状态：协议端 WS 连着但 QQ 掉线时，只有 get_login_info 能发现
-    const login = await napcat.checkLogin?.({ force: true }).catch((e) => ({ ok: null, error: e?.message || String(e) }))
-    const health = napcat.health?.() || {}
+    const login = await onebot.checkLogin?.({ force: true }).catch((e) => ({ ok: null, error: e?.message || String(e) }))
+    const health = onebot.health?.() || {}
     const base = {
       ok: false,
       linked: !!health.linked,
       stale: !!health.stale,
       lastFrameAgoMs: health.lastFrameAgoMs ?? null,
-      selfId: napcat.selfId ?? null,
-      nickname: napcat.selfNickname ?? null,
+      selfId: onebot.selfId ?? null,
+      nickname: onebot.selfNickname ?? null,
       qqLoggedIn: health.qqLoggedIn ?? null,
       qqLoginCheckedAt: health.qqLoginCheckedAt ?? null,
       qqLoginError: health.qqLoginError || '',
@@ -1495,7 +1495,7 @@ export async function apply(ctx, bundleConfig = {}) {
       })
     : null
   if (configReady && bundleConfig.autoConnect !== false) {
-    napcat.connect().catch((e) => log.error(`NapCat 连接失败: ${e.message}`))
+    onebot.connect().catch((e) => log.error(`OneBot 连接失败: ${e.message}`))
   } else if (!configReady) {
     log.warn('待配置模式：已跳过协议端自动连接（填完 adminQq / 协议端地址后自动连接，或在控制台手动重连）')
   }
@@ -1515,7 +1515,7 @@ export async function apply(ctx, bundleConfig = {}) {
     try { adminHost?.dispose?.() } catch { /* ignore */ }
     try { compat?.close() } catch { /* ignore */ }
     try { pacing.stop() } catch { /* ignore */ }
-    try { napcat.close() } catch { /* ignore */ }
+    try { onebot.close() } catch { /* ignore */ }
     try { dsh.close?.() } catch { /* ignore */ }
     tmp.cleanup()
     kernel.activeTurns.clear()

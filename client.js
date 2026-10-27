@@ -255,7 +255,7 @@ window.__ModuleLoader__.load({
 
 		// 新手向导里可一键处理的两项（其余项只显示 hint；人设安装时已自动投递）
 		const WIZARD_ACTIONS = {
-			napcat: { id: 'napcat-check', label: '测试连接' },
+			onebot: { id: 'onebot-check', label: '测试连接' },
 			imagegen: { id: 'imagegen-check', label: '检查生图' },
 		}
 
@@ -281,7 +281,7 @@ window.__ModuleLoader__.load({
 					: null,
 
 				// ═══ QQ 掉线提醒：OneBot WS 还连着，但 QQ 服务端往返探测失败（get_stranger_info）═══
-				(health.napcatLinked && health.qqLoggedIn === false)
+				(health.onebotLinked && health.qqLoggedIn === false)
 					? h('div', {
 						key: 'qqoffline',
 						style: { padding: '8px 10px', borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13, marginBottom: 8, lineHeight: 1.5 },
@@ -291,17 +291,17 @@ window.__ModuleLoader__.load({
 
 				h('div', { style: S.row, key: 'hc' }, [
 					h('span', { style: S.badge(health.dshLinked), key: 'd' }, `DSH ${health.dshLinked ? '已连' : '断开'}`),
-					h('span', { style: S.badge(health.napcatLinked && !health.napcatStale), key: 'n' }, `OneBot ${health.napcatLinked && !health.napcatStale ? '在线' : '异常'}`),
+					h('span', { style: S.badge(health.onebotLinked && !health.onebotStale), key: 'n' }, `OneBot ${health.onebotLinked && !health.onebotStale ? '在线' : '异常'}`),
 					h('span', {
 						style: S.badge(health.qqLoggedIn === true), key: 'q',
 						title: health.qqLoginError || '',
-					}, health.napcatLinked
+					}, health.onebotLinked
 						? (health.qqLoggedIn === true ? 'QQ 已登录' : (health.qqLoggedIn === false ? 'QQ 未登录' : 'QQ 检查中'))
 						: 'QQ 未知'),
 					h('button', {
 						key: 'ql', style: S.btn, disabled: busy,
 						title: '主动调用 get_stranger_info 验证 QQ 是否真的在线（协议端缓存的登录信息可能过期）',
-						onClick: () => run('检查 QQ 登录', () => call('action', { id: 'napcat-check' })),
+						onClick: () => run('检查 QQ 登录', () => call('action', { id: 'onebot-check' })),
 					}, '检查 QQ 登录'),
 					health.qqLoginCheckedAt
 						? h('span', { key: 'qt', style: { opacity: .6, fontSize: 12 } }, `最近检查 ${fmtCheck(health.qqLoginCheckedAt)}`)
@@ -426,8 +426,8 @@ window.__ModuleLoader__.load({
 			const [note, setNote] = useState('')
 			const [busyLocal, setBusyLocal] = useState(false)
 			const health = (status && status.health) || {}
-			const nap = (status && status.napcat) || {}
-			const linked = Boolean(health.napcatLinked)
+			const nap = (status && status.onebot) || {}
+			const linked = Boolean(health.onebotLinked)
 			const selfId = nap.selfId || health.selfId || ''
 			const nick = health.selfNickname || ''
 			const qqLoggedIn = nap.qqLoggedIn ?? health.qqLoggedIn ?? null
@@ -438,7 +438,7 @@ window.__ModuleLoader__.load({
 			const test = async () => {
 				setBusyLocal(true); setNote('')
 				try {
-					const r = await call('action', { id: 'napcat-check' })
+					const r = await call('action', { id: 'onebot-check' })
 					setNote((r && (r.message || r.error)) || '测试完成')
 					await refresh()
 				} catch (e) {
