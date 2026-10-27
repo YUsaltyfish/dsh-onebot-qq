@@ -209,6 +209,26 @@ export const CORE_CONTROLS = [
     scale: 0.01, min: 0, max: 100, step: 5, default: 0.45,
     hint: '先给群消息按语境打分（问句、正在热聊、它很久没说话…分高；@别人、纯表情分低），分够高才接。',
   },
+  // ── 连续对话（2026-10-27）：被真人叫过并回过话之后，隔一会儿把这期间的新消息塞回模型再判一次 ──
+  // 控制台只放这 3 项；其余（每小时上限 5、最小间隔 5 分钟、一次唤醒只查 1 次、必须有人类新消息）
+  // 都是防止"自己转"的内部闸门，写在 kernel/pacing.js 的 REPLY_DEFAULTS.continuation 里就够了。
+  {
+    key: 'pacing.reply.continuation.enabled', group: '主动接话', type: 'bool', label: '连续对话（回完话后再看要不要补一句）', default: false,
+    hint: '开 = 被真人叫过、它回过话之后，等「多久后检查」这么久，把这期间群里新说的话再看一遍：'
+      + '想补就补一句，不想补就什么都不发。\n'
+      + '防自转：只有真人唤醒才会开这条链，一次唤醒只检查一次，且必须有人类新消息才会检查。'
+      + '总开关（允许主动接话）关掉时它也不工作。',
+  },
+  {
+    key: 'pacing.reply.continuation.delayMs', group: '主动接话', type: 'int', label: '连续对话：回完话后等多久检查', unit: '秒',
+    scale: 1000, min: 30, max: 300, step: 10, default: 120000,
+    hint: '从它**发出回复**那一刻开始计时。到点时如果没人再叫它 → 看这期间有没有新的人类消息，再决定要不要补一句。',
+  },
+  {
+    key: 'pacing.reply.continuation.bonus', group: '主动接话', type: 'float', label: '连续对话：情境加分', min: 0, max: 3, step: 0.1, default: 1.5,
+    hint: '和「主动接话」共用同一套语境权重与门槛，这里只是给"刚聊过"这个情境加的分（直接加到分数上）。\n'
+      + '0 = 完全按原权重（续聊几乎永远过不了门槛）；调高 = 更容易补这一句。默认 1.5。',
+  },
   {
     key: 'pacing.reply.maxChars', group: '主动接话', type: 'int', label: '主动接话最多多少字', unit: '字',
     min: 20, max: 500, step: 10, default: 140,

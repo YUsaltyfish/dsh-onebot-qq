@@ -36,6 +36,18 @@ export const REPLY_DEFAULTS = {
   sensitivity: 0.45,         // 语境敏感度 0~1（越高越挑"值得接"的时机）
   maxChars: 140,             // 主动接话单条字数上限（提示用；超了照发但记日志）
   groups: [],                // 允许主动接话的群号（数组或 {"群号": true} 对象都认）
+  // 连续对话（2026-10-27）：被真人叫过、且它回过话之后，等一会儿把这期间的新消息塞回模型再判一次。
+  // 只暴露 enabled / delayMs / bonus 三个到控制台；其余是防"自己转"的内部闸门（改这里就够了）。
+  continuation: {
+    enabled: false,          // 总开关（默认关；跟主动接话一起受 pacing.reply.enabled 总闸管）
+    delayMs: 120000,         // 回完话后等多久再检查（默认 2 分钟）
+    bonus: 1.5,              // 复用主动接话 9 个权重的"情境加分"（直接加到 logit 上）
+    hourlyMax: 5,            // 每群每小时最多续几次（内部闸门）
+    minGapMs: 300000,        // 两次续聊最小间隔（5 分钟，内部闸门）
+    maxPerChain: 1,          // 一次唤醒最多检查几次（1 = 补一次就收手，防自转）
+    requireNewMessage: true, // 它回完之后必须有人类新消息才检查（关掉容易变成自问自答）
+    quoteLastHuman: false,   // 续聊是否引用最后一条人类消息（默认不引用）
+  },
   style: {
     splitEnabled: true,
     splitProbability: 0.5,   // 拆条概率（0~1）
@@ -108,6 +120,7 @@ function normalize(rawPacing) {
       ...Object.fromEntries(Object.entries(r).filter(([k]) => !['style', 'weights', 'groups'].includes(k))),
       style: { ...REPLY_DEFAULTS.style, ...style },
       weights: { ...REPLY_DEFAULTS.weights, ...weights },
+      continuation: { ...REPLY_DEFAULTS.continuation, ...(r.continuation && typeof r.continuation === 'object' ? r.continuation : {}) },
       groups,
     },
     merge: { ...MERGE_DEFAULTS, ...m },
@@ -290,6 +303,7 @@ export function createPacing({ log = console, state, clock = null }) {
     const gid = String(ev.groupId ?? key.replace(/^group:/, ''))
     if (!allowedGroups().has(gid)) return
     if (isBusy(key)) return // 这个群正在被叫的一轮里，不抢
+    if (contPending(key)) return // 已经有续聊排队，别抢同一时刻
     const now = nowMs()
     const o = ensureWindow(key, now)
     if (!o) return
@@ -309,22 +323,119 @@ export function createPacing({ log = console, state, clock = null }) {
   /** 冷场找话是否开启（关 = 只由入站消息驱动「话题合适时接话」，不再定时找话）。 */
   const silenceOn = () => cfg.reply.silenceEnabled !== false
 
+  // ── 连续对话（2026-10-27）────────────────────────────────────
+  // 只做一件事：真人叫过它、它也回过话之后，隔一会儿把**这期间的新消息**塞回模型再判一次
+  // "要不要补一句"。判据不另起一套：续聊分 = sigmoid(主动接话那 9 个权重算出的 logit + bonus)。
+  // 防"自己转"：只由真人唤醒登记；合成轮（proactive/continuation/welcome）不登记；
+  //            一次链路默认只检查 1 次；且必须有人类新消息（requireNewMessage）。
+  const cont = new Map()      // chatKey → { gid, armedAt, lastReplyAt, dueAt, chain, lastFireAt }
+  const contFires = new Map() // chatKey → [ts…]（每群每小时续聊次数）
+
+  /** 它上次回复之后，群里又有几条人类消息 */
+  function humanMsgsSince(chatKey, since) {
+    return (rings.get(chatKey) || []).filter((m) => m.ts > Number(since || 0))
+  }
+
+  /** 真人唤醒时登记一条"续聊链"（同一群再来一次就重置，不叠加） */
+  function noteWake(ev) {
+    const key = String(ev?.chatKey ?? '')
+    if (!key || !ev?.isGroup) return
+    if (!cfg.reply.enabled || !cfg.reply.continuation.enabled) return
+    const kind = String(ev?.wake?.kind ?? '')
+    if (!['at', 'quote', 'keyword', 'followup'].includes(kind)) return
+    const gid = String(ev.groupId ?? key.replace(/^group:/, ''))
+    if (!allowedGroups().has(gid)) return
+    cont.set(key, { gid, armedAt: nowMs(), lastReplyAt: 0, dueAt: 0, chain: 0, lastFireAt: 0 })
+  }
+
+  /** 它真的发出了一条回复 → 从这一刻开始计时（主动/续聊/欢迎轮不参与） */
+  function noteReplySent(chatKey, turnCtx) {
+    const key = String(chatKey ?? '')
+    const c = cont.get(key)
+    if (!c) return
+    if (['proactive', 'continuation', 'welcome'].includes(String(turnCtx?.wakeKind ?? ''))) return
+    c.lastReplyAt = nowMs()
+    if (c.chain < num(cfg.reply.continuation.maxPerChain, 1)) {
+      c.dueAt = c.lastReplyAt + num(cfg.reply.continuation.delayMs, 120000)
+    }
+  }
+
+  /** 该群是否有待执行的续聊（主动接话两条路径要避让，别同一时刻说两句） */
+  function contPending(chatKey) {
+    const c = cont.get(String(chatKey))
+    return Boolean(c && c.dueAt > 0)
+  }
+
+  /** 到点检查：有人类新消息 + 续聊分够 → 起一轮；否则记日志、链结束 */
+  function tickContinuation(now) {
+    const cf = cfg.reply.continuation
+    if (!cfg.reply.continuation.enabled) return
+    for (const [key, c] of [...cont]) {
+      if (now - c.armedAt > 10 * 60000) { cont.delete(key); continue } // 链活太久（唤醒 10 分钟后语境已变）
+      if (!c.dueAt || now < c.dueAt) continue
+      if (!allowedGroups().has(String(c.gid)) || isBusy(key)) continue
+      if (c.chain >= num(cf.maxPerChain, 1)) { cont.delete(key); continue }
+      const fires = (contFires.get(key) || []).filter((t) => now - t < HOUR)
+      contFires.set(key, fires)
+      if (fires.length >= num(cf.hourlyMax, 5)) { cont.delete(key); continue }
+      if (now - c.lastFireAt < num(cf.minGapMs, 300000)) continue
+      const humans = humanMsgsSince(key, c.lastReplyAt)
+      if (cf.requireNewMessage && humans.length === 0) {
+        log.info(`[连续对话] ${key} 没人接话 → 不检查（链结束）`)
+        cont.delete(key)
+        continue
+      }
+      const last = humans[humans.length - 1]
+      if (!last || last.placeholderOnly || last.short) {
+        log.info(`[连续对话] ${key} 最后一条是媒体/太短 → 跳过`)
+        cont.delete(key)
+        continue
+      }
+      // 复用主动接话的权重：结构不变的 logit + 情境加分
+      const { logit } = interestFor({ chatKey: key, isGroup: true, groupId: c.gid, text: last.text, mentionedSelf: last.mentionBot })
+      const p = 1 / (1 + Math.exp(-(logit + num(cf.bonus, 1.5))))
+      const threshold = thresholdForSensitivity(cfg.reply.sensitivity)
+      if (p < threshold) {
+        log.info(`[连续对话] ${key} 续聊分 ${(p * 100).toFixed(0)}% < 门槛 ${(threshold * 100).toFixed(0)}% → 跳过`)
+        cont.delete(key)
+        continue
+      }
+      c.chain += 1
+      c.lastFireAt = now
+      fires.push(now)
+      log.info(`[连续对话] ${key} 起念（续聊分 ${(p * 100).toFixed(0)}%，新消息 ${humans.length} 条，第 ${c.chain}/${num(cf.maxPerChain, 1)} 次）`)
+      if (typeof onProactiveTurn === 'function') {
+        Promise.resolve()
+          .then(() => onProactiveTurn({ chatKey: key, groupId: c.gid, reason: 'continuation', score: p, humanMsgs: humans.length }))
+          .catch((e) => log.error(`[连续对话] 起回合失败 ${key}: ${e.stack || e.message}`))
+      }
+      // 默认只检查一次：起过就结束；要再续必须等新的真人唤醒
+      if (c.chain >= num(cf.maxPerChain, 1)) cont.delete(key)
+      else c.dueAt = now + num(cf.delayMs, 120000)
+    }
+  }
+
   /** 冷场：到点了、群又安静够久 → 直接起一轮"找话"（不等消息） */
-  function tick() {
-    if (!silenceOn()) return
+  function tickSilence(now) {
     if (!cfg.reply.enabled || num(cfg.reply.hourlyMax, 0) <= 0 || !onProactiveTurn) return
-    const now = nowMs()
     for (const gid of allowedGroups()) {
       const key = `group:${gid}`
       const st = state.get(key)
       const silence = now - Number(st.lastInboundAt || 0)
       if (silence < num(cfg.reply.coldSilenceMs, 300000)) continue
-      if (isBusy(key)) continue
+      if (isBusy(key) || contPending(key)) continue // 有续聊待执行时先让路
       const o = ensureWindow(key, now)
       if (!o) continue
       o.windowUntil = now // 立即用掉窗口，避免下个 tick 重复
       fire(key, gid, 'silence', 1)
     }
+  }
+
+  /** 定时器入口：冷场找话（可选）+ 连续对话（可选） */
+  function tick() {
+    const now = nowMs()
+    if (silenceOn()) tickSilence(now)
+    tickContinuation(now)
   }
 
   /**
@@ -337,8 +448,8 @@ export function createPacing({ log = console, state, clock = null }) {
     if (timer) clearInterval(timer)
     timer = null
     if (!proactiveEnabled()) return null
-    // 冷场找话关掉时不需要定时器：接话机会只由入站消息触发（topic 路径）
-    if (!silenceOn()) return null
+    // 冷场找话与连续对话都关掉时不需要定时器：接话机会只由入站消息触发（topic 路径）
+    if (!silenceOn() && !cfg.reply.continuation.enabled) return null
     timer = setInterval(() => {
       try { tick() } catch (e) { log.error(`[主动接话] tick 异常: ${e.message}`) }
     }, 30000)
@@ -479,6 +590,13 @@ export function createPacing({ log = console, state, clock = null }) {
       minGapMs: opportunityGapMs(),
       sensitivity: clamp01(cfg.reply.sensitivity),
       threshold: thresholdForSensitivity(cfg.reply.sensitivity),
+      // 连续对话：只在控制台"最近状态"里显示待执行/本小时次数（UI 只暴露 3 个可调项）
+      continuation: {
+        enabled: cfg.reply.continuation.enabled === true,
+        threshold: thresholdForSensitivity(cfg.reply.sensitivity),
+        pending: [...cont.keys()].length,
+        firedThisHour: [...contFires.values()].reduce((n, list) => n + list.filter((t) => now - t < HOUR).length, 0),
+      },
       groups,
       recent: fired.slice(-8).reverse().map((e) => ({
         at: e.at, groupId: e.gid, reason: e.reason, sent: !!e.sent, score: e.score,
@@ -489,6 +607,7 @@ export function createPacing({ log = console, state, clock = null }) {
   return {
     apply, start, stop,
     noteInbound, noteOutbound,
+    noteWake, noteReplySent, // 连续对话的两个钩子（内核在唤醒/出站时调）
     markProactiveSent: markSent,
     submit, flush,
     consider,

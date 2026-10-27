@@ -480,6 +480,8 @@ export async function apply(ctx, bundleConfig = {}) {
       pacing.noteOutbound(rec.target)
       // 主动接话的统计只认"这一轮真的发了"（普通回话不参合）
       if (rec.turnCtx?.wakeKind === 'proactive') pacing.markProactiveSent(rec.target)
+      // 连续对话：普通回话真的发出去了，才从这一刻开始算"隔多久再检查"
+      pacing.noteReplySent(rec.target, rec.turnCtx)
       archive(rec.target, { dir: 'out', ts: Date.now(), messageId: rec.messageId ?? null, text: rec.text, mode: rec.mode })
     },
   })
@@ -493,7 +495,9 @@ export async function apply(ctx, bundleConfig = {}) {
   //   · 一轮发几条：拆条数目在控制台动态修改（`pacing.reply.style.splitMaxParts`），内核不再按固定条数拦
   deliver.onDecorate((out) => {
     const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
-    if (!turnCtx || turnCtx.wakeKind !== 'proactive') return
+    const kind = turnCtx?.wakeKind
+    // 主动接话 / 连续对话都是"它自己找的话"：不指人、不挂引用
+    if (!turnCtx || (kind !== 'proactive' && kind !== 'continuation')) return
     if (out.ats?.length || out.replyTo != null) {
       log.info(`[主动接话] 丢掉 @/引用（${out.target}）：主动接话不指人、不挂引用`)
       out.ats = []
@@ -512,8 +516,8 @@ export async function apply(ctx, bundleConfig = {}) {
     // 这些出站没有自己的回合上下文，以前回退 activeTurns 会把引用挂到上一个人身上。
     if (!out.autoQuote) return
     const turnCtx = out.turnCtx ?? null
-    // 主动接话不挂引用（上一道钩子已清掉显式值，这里也不再补）
-    if (!turnCtx || turnCtx.wakeKind === 'proactive') return
+    // 主动接话/续聊不挂引用（上一道钩子已清掉显式值，这里也不再补）
+    if (!turnCtx || turnCtx.wakeKind === 'proactive' || turnCtx.wakeKind === 'continuation') return
     if (out.noReply || out.replyTo != null || out.ats?.length) return
     const need = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     if (need <= 0) return
@@ -1041,9 +1045,11 @@ export async function apply(ctx, bundleConfig = {}) {
     }
     // Pipeline.run 已经创建了 ev.turnCtx 并放入 turnStore
     const turnCtx = ev.turnCtx
+    // 连续对话的起点：只有"真人唤醒"才会登记链（pacing 内部还会再按 wake.kind 过滤一次）
+    pacing.noteWake(ev)
     turnCtx.quoteAfterMsgs = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     // 引用锚：入站事件自带 message_id，记下来；活到这一轮的 DSH turn/end
-    turnCtx._hasAnchor = ev.wake.kind !== 'proactive'
+    turnCtx._hasAnchor = ev.wake.kind !== 'proactive' && ev.wake.kind !== 'continuation'
     turnCtx._turnStarted = false
     if (turnCtx._hasAnchor) state.markTurnAnchor(ev.chatKey, ev.messageId)
 
@@ -1093,18 +1099,22 @@ export async function apply(ctx, bundleConfig = {}) {
   }
 
   // ── 主动接话：没入站也能起一轮候选（走正规管线语义，出站不 @ 不引用由 decorate 钩子硬挡） ──
-  const runProactiveTurn = async ({ chatKey, groupId, reason }) => {
+  const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs }) => {
+    const isContinuation = reason === 'continuation'
     const ev = createEvent({
       chatKey, isGroup: true, groupId,
       messageId: null,
       sender: { qq: 0, name: '', card: null, isMaster: false },
       text: '', time: Date.now(),
     })
-    ev.wake = { kind: 'proactive', reason }
+    ev.wake = { kind: isContinuation ? 'continuation' : 'proactive', reason }
     ev._scratch.silentFailure = true
-    ev.hint.push(reason === 'silence'
-      ? '[主动接话:群里安静一会儿了,可以起个话头或接上一个话题,像群友随口一句;不想说就别发]'
-      : '[主动接话:没人叫你,群里正聊着;想接就自然接一句,不想说这轮就别调发送工具]')
+    // 连续对话：给模型一个"刚才聊过、现在要不要补一句"的语境，并明确允许什么都不做
+    ev.hint.push(isContinuation
+      ? `[续聊检查:你刚回过话,之后群里又有 ${Number(humanMsgs) || 0} 条新消息(见上文);想补一句就正常发一条,不想补就什么都别做,这轮不发也没关系]`
+      : reason === 'silence'
+        ? '[主动接话:群里安静一会儿了,可以起个话头或接上一个话题,像群友随口一句;不想说就别发]'
+        : '[主动接话:没人叫你,群里正聊着;想接就自然接一句,不想说这轮就别调发送工具]')
     const ctxCount = Number(runtime.outbound?.groupContextCount ?? runtime.groupContextCount ?? 5)
     if (ctxCount > 0 && typeof dsh.fetchGroupContext === 'function') {
       try {
@@ -1114,7 +1124,7 @@ export async function apply(ctx, bundleConfig = {}) {
     }
     ev.turnCtx = createTurnContext(ev)
     holdActiveTurn(chatKey, ev.turnCtx)
-    log.info(`[主动接话] ${chatKey} 候选入站（${reason === 'silence' ? '冷场找话' : '话题合适'}）→ 交模型判断接不接`)
+    log.info(`[${isContinuation ? '连续对话' : '主动接话'}] ${chatKey} 候选入站（${isContinuation ? '续聊检查' : reason === 'silence' ? '冷场找话' : '话题合适'}）→ 交模型判断接不接`)
     return turnStore.run(ev.turnCtx, () => state.serialize(ev.chatKey, () => runTurn(ev)))
   }
   pacing.start({

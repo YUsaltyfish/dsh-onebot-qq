@@ -594,13 +594,15 @@ export function buildPromptText(ev, opts = {}) {
   const wakeMark = ev.wake?.kind === 'keyword' ? `[关键词:${ev.wake.keyword}] `
     : ev.wake?.kind === 'followup' ? '[接上条] '
       : ev.wake?.kind === 'proactive' ? '[主动接话候选:没人叫你,群里正聊着;想接就自然接一句,不想接这轮就别调发送工具] '
-        : ev.wake?.kind === 'welcome' ? '[入群欢迎轮:这是系统的入群通知,不是群友发言;按下面提示发欢迎语] ' : ''
+        // 连续对话：刚被真人叫过、也回过话；现在只是"要不要补一句"，明确允许这轮什么都不发
+        : ev.wake?.kind === 'continuation' ? '[续聊检查:你刚回过话,这是同一段对话的后续;想补一句就发,不想补就什么都别做] '
+          : ev.wake?.kind === 'welcome' ? '[入群欢迎轮:这是系统的入群通知,不是群友发言;按下面提示发欢迎语] ' : ''
   // 群里必须带说话人+QQ：同名/近名的人靠号码才能分开（否则会把 A 说的话安到 B 头上）
   // 主动接话轮/入群欢迎轮的"触发"不是某个人发的消息 → 不挂说话人前缀，避免凭空出现一个空名字
   const speakerName = senderNameOf(ev.sender, ev.sender?.qq)
   const speakerQq = Number(ev.sender?.qq)
   const speakerTag = speakerQq > 0 ? `${speakerName}(QQ:${speakerQq})` : speakerName
-  const speaker = ev.isGroup && ev.wake?.kind !== 'proactive' && ev.wake?.kind !== 'welcome'
+  const speaker = ev.isGroup && ev.wake?.kind !== 'proactive' && ev.wake?.kind !== 'continuation' && ev.wake?.kind !== 'welcome'
     ? `[${speakerTag}]: ` : ''
   const quote = opts.quoteText ? `\n\n[引用]\n${opts.quoteText}` : ''
   const fileHint = opts.fileHint ? `\n${opts.fileHint}` : ''

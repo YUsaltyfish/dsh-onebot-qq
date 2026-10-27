@@ -83,6 +83,17 @@ export function defaultConfig() {
         sensitivity: 0.45,
         maxChars: 140,
         groups: [],
+        // 连续对话（只暴露 3 个可调项，其余是内部闸门；见 kernel/pacing.js 的同名默认值）
+        continuation: {
+          enabled: false,
+          delayMs: 120000,
+          bonus: 1.5,
+          hourlyMax: 5,
+          minGapMs: 300000,
+          maxPerChain: 1,
+          requireNewMessage: true,
+          quoteLastHuman: false,
+        },
         style: {
           splitEnabled: true,
           splitProbability: 0.5,
