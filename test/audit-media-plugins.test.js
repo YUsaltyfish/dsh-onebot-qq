@@ -171,7 +171,7 @@ test('link-parser 纯图片：保持旧行为（说明 + 图片同条，不拆�
 
 test('link-parser 视频发送全失败：不发说明文字、按普通消息降级（不吞消息）', async (t) => {
   const h = await bootLinkParser(t, { media: [VIDEO_MEDIA] })
-  h.kernel.napcat.sendMedia = async () => { throw new Error('mock send fail') }
+  h.kernel.onebot.sendMedia = async () => { throw new Error('mock send fail') }
   await emitRaw(h.kernel, groupAtEvent({ text: '看这个 https://b23.tv/abc 怎么样', messageId: 305 }))
   const prompt = await waitFor(() => h.ctx._prompts?.[0], { label: '降级放行进模型' })
   assert.ok(prompt.content[0].text.includes('b23.tv'), '媒体没发出时链接仍交给模型')

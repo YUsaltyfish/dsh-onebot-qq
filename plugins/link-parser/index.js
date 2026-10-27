@@ -209,7 +209,7 @@ export default {
      *   同一条里出现两个视频也不行（`video may appear only once`）。
      *   所以有视频时：每个视频各自一条、图片并一条、说明文字最后单独一条；
      *   没有视频时保持旧行为（说明 + 图片一条发，各协议端都允许）。
-     *   注意这是 QQ 客户端的真实形态，不是 SnowLuma 的怪癖 —— NapCat 时代混发只是被 QQ 静默丢弃兄弟元素。
+     *   注意这是 QQ 客户端的真实形态，不是 SnowLuma 的怪癖 —— 老实现时代混发只是被 QQ 静默丢弃兄弟元素。
      */
     async function deliverResult(chatKey, data) {
       const maxBytes = maxBytesOf()
