@@ -16,6 +16,6 @@ powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1 -DataDir '
 powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1 -Force
 ```
 
-完整步骤（NapCat 配置、路径写法、真机验证清单）见 [`docs/Windows安装.md`](../../docs/Windows安装.md)。
+完整步骤（协议端配置、路径写法、真机验证清单）见 [`docs/Windows安装.md`](../../docs/Windows安装.md)。
 
 > 脚本只是便利工具：任何一步失败都可以手动做（建目录、复制 `examples/qq-lines` 与 `examples/personas`、把 `examples/config.example.json` 复制成 `<dataDir>\config.json`）。也可以直接用跨平台 CLI：`node bin/dsh-onebot-qq.mjs init --data-dir <dataDir>`。

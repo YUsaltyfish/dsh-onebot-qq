@@ -1,6 +1,6 @@
 # dsh-onebot-qq
 
-DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端可换：[NapCat](https://napcat.napneko.icu/) 或 [SnowLuma](https://github.com/SnowLuma/SnowLuma) 等任何 OneBot v11 实现。
+DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端可换：任意 OneBot v11 实现都行（本机线上在用的是 [SnowLuma](https://github.com/SnowLuma/SnowLuma)，另有 [NapCat](https://napcat.napneko.icu/) 等实现）。
 微内核 + 可插拔子插件，**Linux / Windows通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
@@ -29,7 +29,7 @@ DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端�
 |---|---|
 | Node.js | `>= 22` |
 | DSH | `>= 0.2.1-rc.2 < 0.3.0`（`engines.dsh` 声明） |
-| 协议端（二选一） | **NapCat**（QQNT + OneBot v11，token 可空）或 **SnowLuma**（v2.x；token 必填、不自己启动 QQ）；两者都需开启**正向 WebSocket**（默认 3001）与 **HTTP API**（默认 3000），见 [安装与卸载 §二](docs/安装与卸载.md#二准备协议端onebot-v11napcat-或-snowluma) |
+| 协议端（任选其一） | 任意 **OneBot v11** 实现（如 **SnowLuma** v2.x：token 必填、不自己启动 QQ；**NapCat**：token 可空）；都需开启**正向 WebSocket**（常见默认 3001）与 **HTTP API**（常见默认 3000），见 [安装与卸载 §二](docs/安装与卸载.md#二准备协议端onebot-v11) |
 | QQ 号 | 协议端登录用（建议小号）；机器人靠它收发消息 |
 
 ## 安装
@@ -49,7 +49,7 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 也可以在 DSH 桌面端的「设置 → 插件」里填 GitHub 仓库地址安装。
 
-> 装完还要「建数据目录 → 启动 → 控制台新手向导连 NapCat」才算跑通：完整步骤、升级、卸载、回滚见 [`docs/安装与卸载.md`](docs/安装与卸载.md)；Windows 见 [`docs/Windows安装.md`](docs/Windows安装.md)。
+> 装完还要「建数据目录 → 启动 → 控制台新手向导连协议端」才算跑通：完整步骤、升级、卸载、回滚见 [`docs/安装与卸载.md`](docs/安装与卸载.md)；Windows 见 [`docs/Windows安装.md`](docs/Windows安装.md)。
 
 > **可选**：想让 QQ 线连**全局工具**（`ops_*` / agent-team / MCP 资源）也挡住，再装配套的独立插件 `dsh-onebot-qq-opsgate`：
 > `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
@@ -59,8 +59,8 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 ## 快速开始（4 步）
 
-1. 协议端登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（NapCat 可空，**SnowLuma 必填**）。
-2. DSH 设置 →「QQ 控制台」→「OneBot 连接」页（NapCat / SnowLuma 都填这里）填地址/token → 点「测试 OneBot 连接」。
+1. 协议端登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（多数实现可空，**SnowLuma 必填**）。
+2. DSH 设置 →「QQ 控制台」→「OneBot 连接」页（任意 OneBot v11 协议端都填这里）填地址/token → 点「测试 OneBot 连接」。
 3. 「群聊」页顶部填**主人 QQ**（必填）→ 保存后自动连接。
 4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 

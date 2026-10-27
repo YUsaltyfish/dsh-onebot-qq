@@ -36,6 +36,19 @@
 
 - **控制台里「NapCat」改名为「OneBot」**：页签「NapCat 连接」→「**OneBot 连接**」，按钮「测试 NapCat 连接」/「重新连接 NapCat」→「**测试 OneBot 连接**」/「**重新连接 OneBot**」，状态徽标「NapCat 在线/异常」→「OneBot 在线/异常」，诊断报告项与相关提示文案同步（协议端同时支持 NapCat 与 SnowLuma，界面不再只写其中一家）。**机器侧名字一律未改**：控制台动作 id 仍是 `napcat-check` / `napcat-reconnect`，配置键仍是 `napcat.*`，日志关键字仍是 `NapCat WS 已连接`（对外契约「只加不改」）。新增用例锁住新页签名与按钮名（`test/audit-console-groups.test.js`）。
 
+### 变更（文档与文案口径：NapCat → OneBot 通用）
+
+- **文档不再以 NapCat 为讲解对象，统一按 OneBot v11 通用表述**：`docs/` 8 份 + 仓库 `README.md` + `examples/windows/README.md`。
+  `## 二、准备协议端（OneBot v11：NapCat 或 SnowLuma）` → `（OneBot v11）`；`### 2.1 NapCat` → **`### 2.1 安装并启动协议端（通用步骤）`**（启动协议端并登录 QQ → 开正向 WS（常见默认 3001）/ HTTP API（常见默认 3000）→ 记 token 填 `napcat.wsToken`/`httpToken` → curl 验证）；
+  `## 三、安装并配置 NapCat（QQ 协议端）` → `## 三、安装并配置 OneBot 协议端`；对照表表头 `NapCat | SnowLuma` → `多数实现 | SnowLuma`；
+  删除 NapCat 专属细节（NapCatQQ 安装器、WebUI `:6099`、`config\onebot11_<QQ号>.json`、`LD_PRELOAD`）；SnowLuma 小节保留并标注「本机在用的实现」；
+  文档内 NapCat 命中 159 → 67（剩余全部是配置键 `napcat.*`、代码标识符与日志样例，必须与代码一致）。
+- **界面与 CLI 文案同步泛化**：控制台 OneBot 连接页三步说明（不再写「NapCat 会自己拉起 QQ」）、`HTTP Token` 提示（「多数实现可留空；强制鉴权的实现（如 SnowLuma）必填」）、掉线/未连接提示里的 `:6099` 改为「端口见各实现文档（本机在用的 SnowLuma 默认 :5099）」、
+  诊断项建议文案、`doctor --no-net` 帮助（「跳过 OneBot 协议端端口探测」）、自检项 `OneBot WS 端口`/`OneBot HTTP 端口`、新手向导提示（「测试 OneBot 连接」）；
+  用户可见回执里「NapCat 没回数据 / 临时故障」→「协议端」；进模型的 `[群历史: … 来自 NapCat get_group_msg_history]` → `来自 OneBot get_group_msg_history`；`loginError` 的 `NapCat WS 断开` → `协议端 WS 断开`；`locale/*.json` 与 `package.json` 的 description 去掉 NapCat。
+- **代码注释统一为「协议端」**：`kernel/`、`plugins/`、`admin/`、`client.js`、`bin/` 等 20 个文件约 60 行注释（NapCat 的行为特性 → 协议端通用描述）；差异事实保留但改成实现无关写法（如「Anchor 参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`」）。
+- **保持不动的契约**（与 2026-10-27 变更 9 一致）：配置键 `napcat.*`、动作 id `napcat-check`/`napcat-reconnect`、模块与文件 `kernel/napcat-adapter.js`、`NapCatAdapter`、`toNapCatFileRef`/`fromNapCatFileRef`、`test/fake-napcat.mjs`、日志前缀 `[onebot-qq:napcat]` 与验收日志字符串（如 `NapCat WS 已连接`）—— 全部保留，避免打坏既有配置与运维 grep。
+
 ### 文档
 
 - **SnowLuma 升为一等公民**：`docs/安装与卸载.md` 的「准备协议端」拆成 **NapCat / SnowLuma 两小节**（含 Linux 无头部署、ptrace 注入前提、token 必填、关掉自带 `#sl`、`get_file` 能力差异）；`docs/排错.md` 新增「接了 SnowLuma 之后」整节（注入失败 / `good=false` 收不进 / 二维码过期 / `#sl` 抢话等 9 条）；`docs/配置参考.md` 写明 `napcat.*` 键名沿用、SnowLuma 两个 token 必填；`docs/开发指南.md` 新增「协议端差异」对照表（负 `message_id` / 群历史锚点 / `get_status` 健康字段 / `get_file` 覆盖面）；`README.md`、`docs/README.md` 与 `Windows安装.md`、`使用说明书.md`、`运维接口.md` 的措辞改为「协议端」，并说明控制台页签/配置键名沿用 NapCat 是历史原因。
