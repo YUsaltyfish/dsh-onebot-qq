@@ -180,3 +180,17 @@ test('表情包页：有「收表情（会写索引）」开关（默认关）+ 
   assert.match(String(info.text), /当前表情库：\d+ 张/, '概况要带数量')
   assert.match(String(info.text), /收表情（会写索引）：(开|关)/)
 })
+
+test('群聊页「入站条数上限」：标签写明是上限、解释讲清"只给最后 N 条"与 token 代价', async (t) => {
+  const schema = await schemaOf(t)
+  const c = schema.controls.find((x) => x.key === 'outbound.groupContextCount')
+  assert.ok(c, '控件应存在')
+  assert.equal(c.group, '群聊')
+  assert.equal(c.label, '入站条数上限', '标签统一叫「入站条数上限」')
+  const hint = String(c.hint || '')
+  assert.ok(hint.includes('最多'), '解释要说明"最多"（上限语义）')
+  assert.ok(hint.includes('丢弃'), '解释要说明超过上限时更早的会被丢弃')
+  assert.ok(hint.includes('token'), '解释要提到 token 代价')
+  assert.equal(c.min, 0)
+  assert.equal(c.max, 50)
+})
