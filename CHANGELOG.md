@@ -49,6 +49,11 @@
 - **代码注释统一为「协议端」**：`kernel/`、`plugins/`、`admin/`、`client.js`、`bin/` 等 20 个文件约 60 行注释（NapCat 的行为特性 → 协议端通用描述）；差异事实保留但改成实现无关写法（如「Anchor 参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`」）。
 - **保持不动的契约**（与 2026-10-27 变更 9 一致）：配置键 `napcat.*`、动作 id `napcat-check`/`napcat-reconnect`、模块与文件 `kernel/napcat-adapter.js`、`NapCatAdapter`、`toNapCatFileRef`/`fromNapCatFileRef`、`test/fake-napcat.mjs`、日志前缀 `[onebot-qq:napcat]` 与验收日志字符串（如 `NapCat WS 已连接`）—— 全部保留，避免打坏既有配置与运维 grep。
 
+### 修复（链接解析：视频拆条）
+
+- **视频类链接在 SnowLuma 等严格协议端下发不出**：协议端要求「video 必须是消息里唯一的 segment」（`message element "video" must be the only segment in a message`；同一条里放两个视频同样被拒：`video may appear only once`）。`link-parser` 原来把「说明文字 + `[CQ:video]`」拼成一条 —— NapCat 时代兄弟元素被 QQ 静默吞掉、看起来正常，换成 SnowLuma 后整条发送失败（ERROR 日志，媒体一条都发不出）。
+  现在有视频时改为：**每个视频各自一条、图片并一条、说明文字最后单独一条**；纯图片仍是「说明 + 图片同条」（图片没有该限制）。媒体全部失败时按原逻辑走「本条按普通消息处理」降级，并且**不单独发说明**（避免只留一句标题）。新增 4 条用例（单视频拆条 / 多视频逐条 / 纯图片不拆 / 全失败降级），全量 271/271。
+
 ### 文档
 
 - **SnowLuma 升为一等公民**：`docs/安装与卸载.md` 的「准备协议端」拆成 **NapCat / SnowLuma 两小节**（含 Linux 无头部署、ptrace 注入前提、token 必填、关掉自带 `#sl`、`get_file` 能力差异）；`docs/排错.md` 新增「接了 SnowLuma 之后」整节（注入失败 / `good=false` 收不进 / 二维码过期 / `#sl` 抢话等 9 条）；`docs/配置参考.md` 写明 `napcat.*` 键名沿用、SnowLuma 两个 token 必填；`docs/开发指南.md` 新增「协议端差异」对照表（负 `message_id` / 群历史锚点 / `get_status` 健康字段 / `get_file` 覆盖面）；`README.md`、`docs/README.md` 与 `Windows安装.md`、`使用说明书.md`、`运维接口.md` 的措辞改为「协议端」，并说明控制台页签/配置键名沿用 NapCat 是历史原因。

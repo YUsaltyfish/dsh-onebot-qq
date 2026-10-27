@@ -102,6 +102,83 @@ test('link-parser 默认关闭：带链接的消息不抢答，照常交给模�
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// link-parser：真发（侧车用 fetch 打桩）
+// 2026-10-27 SnowLuma 真机踩坑：视频必须是消息里唯一的 segment，
+// 「文字 + [CQ:video]」或「两个视频一条」都会被协议端直接拒绝 → 视频必须拆条发。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VIDEO_MEDIA = { kind: 'video', path: '/tmp/qqbot-linkparser-demo.mp4', size: 1024 * 1024, duration: 61 }
+const IMAGE_MEDIA = { kind: 'image', path: '/tmp/qqbot-linkparser-demo.png', size: 1024 }
+
+async function bootLinkParser(t, parsed) {
+  const h = await bootKernel({
+    config: {
+      pacing: { merge: { enabled: false } },
+      pluginConfig: {
+        'gate-wake': { adminQq: ADMIN_QQ },
+        'persona-voice': { splitReplyEnabled: false },
+        'link-parser': { enabled: true, parserUrl: 'http://sidecar.invalid', platforms: ['bilibili', 'douyin'] },
+      },
+    },
+  })
+  t.after(() => h.dispose())
+  installFetchMock(t, (url) => (String(url).endsWith('/parse')
+    ? jsonResponse({
+      ok: true, platform: 'bilibili', platformName: 'B站', title: '测试视频', author: '测试UP',
+      elapsedMs: 12, skipped: [], media: [], ...parsed,
+    })
+    : jsonResponse({}, 404)))
+  return h
+}
+
+const linkEvent = (text = '看 https://b23.tv/abc', messageId = 301) => groupAtEvent({ text, at: false, messageId })
+
+test('link-parser 视频：视频单独一条、说明文字另起一条（视频不能和文字混发）', async (t) => {
+  const h = await bootLinkParser(t, { media: [VIDEO_MEDIA] })
+  await emitRaw(h.kernel, linkEvent())
+  const media = await waitFor(() => h.sent.find((s) => s.kind === 'media'), { label: '视频出站' })
+  assert.match(media.wire, /^\[CQ:video,file=/, '视频消息必须是纯 CQ 视频（唯一 segment）')
+  assert.equal(media.wire.includes('B站'), false, '视频消息里不能混说明文字（SnowLuma 会整条拒绝）')
+  const msg = await waitFor(() => h.sent.find((s) => s.kind === 'msg'), { label: '说明文字出站' })
+  assert.ok(msg.wire.includes('测试视频'), '说明文字仍要发（标题）')
+  assert.ok(msg.wire.includes('B站'), '说明文字带平台名')
+  assert.equal(h.sent.filter((s) => s.kind === 'media').length, 1, '只有一个视频就只发一条视频')
+})
+
+test('link-parser 多视频：每个视频各一条（同条放两个视频也会被拒）', async (t) => {
+  const h = await bootLinkParser(t, {
+    media: [{ ...VIDEO_MEDIA, path: '/tmp/qqbot-linkparser-a.mp4' }, { ...VIDEO_MEDIA, path: '/tmp/qqbot-linkparser-b.mp4', duration: 30 }],
+  })
+  await emitRaw(h.kernel, linkEvent())
+  await waitFor(() => h.sent.filter((s) => s.kind === 'media').length >= 2, { label: '两个视频出站' })
+  const media = h.sent.filter((s) => s.kind === 'media')
+  assert.equal(media.length, 2, '两个视频 = 两条消息')
+  for (const m of media) {
+    assert.equal(m.wire.match(/\[CQ:video/g).length, 1, '每条只含一个视频')
+    assert.equal(m.wire.includes('测试视频'), false, '视频消息不混文字')
+  }
+  await waitFor(() => h.sent.some((s) => s.kind === 'msg'), { label: '说明文字出站' })
+})
+
+test('link-parser 纯图片：保持旧行为（说明 + 图片同条，不拆）', async (t) => {
+  const h = await bootLinkParser(t, { media: [IMAGE_MEDIA] })
+  await emitRaw(h.kernel, linkEvent())
+  const media = await waitFor(() => h.sent.find((s) => s.kind === 'media'), { label: '图片出站' })
+  assert.ok(media.wire.includes('[CQ:image,file='), '图片在媒体消息里')
+  assert.ok(media.wire.includes('测试视频'), '说明和图片同条（图片没有唯一 segment 限制）')
+  assert.equal(h.sent.some((s) => s.kind === 'msg'), false, '纯图片不该再拆一条说明')
+})
+
+test('link-parser 视频发送全失败：不发说明文字、按普通消息降级（不吞消息）', async (t) => {
+  const h = await bootLinkParser(t, { media: [VIDEO_MEDIA] })
+  h.kernel.napcat.sendMedia = async () => { throw new Error('mock send fail') }
+  await emitRaw(h.kernel, groupAtEvent({ text: '看这个 https://b23.tv/abc 怎么样', messageId: 305 }))
+  const prompt = await waitFor(() => h.ctx._prompts?.[0], { label: '降级放行进模型' })
+  assert.ok(prompt.content[0].text.includes('b23.tv'), '媒体没发出时链接仍交给模型')
+  assert.equal(h.sent.some((s) => s.kind === 'msg'), false, '媒体都没发出去就不该单独发说明（免得只留一句标题）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // imagegen
 // ─────────────────────────────────────────────────────────────────────────────
 

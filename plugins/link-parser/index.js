@@ -11,10 +11,12 @@
  *   · `CARD_PATHS` / `firstUrl` / `extractCardUrl`：QQ 的分享卡片是一条 `json` 段、正文一个字没有，
  *     真链接藏在 `meta.detail_1.qqdocurl` 之类字段里（不挖卡片就只能看到"[卡片]"）。
  *
- * 两条铁律：
+ * 三条铁律：
  *   ① **失败一律降级放行**：侧车没起 / 没匹配 / 超时 / 超 maxBytes → 只记日志，消息照旧交给模型。
  *      绝不因为解析器坏了让机器人变哑巴（宁可少发一个视频，也不能吞掉一句话）。
  *   ② **命令永远优先**：`/` 开头的一律不抢（命令插件处理；就算它没处理也不能被我们吞掉）。
+ *   ③ **视频单独一条发**：QQ 客户端把视频当独立消息，文字/多视频混在一条会被协议端拒绝
+ *      （SnowLuma 直接报 `video must be the only segment`；详见 deliverResult 注释）。
  *
  * 触发规则（照旧）：链接出现就解析，不需要 @；但如果这条**同时还在跟本机器人说话**
  * （被 @ 了，或去掉链接后还剩 ≥ modelTextThreshold 个字），发完媒体**继续交给模型**回话；
@@ -198,10 +200,20 @@ export default {
       }
     }
 
-    /** 把一次解析结果发出去；返回 {sent, oversize} —— 一条都没发出去时要能降级 */
+    /**
+     * 把一次解析结果发出去；返回 {sent, oversize} —— 一条都没发出去时要能降级。
+     *
+     * ⚠️ **视频必须单独一条消息**（2026-10-27 真机踩坑，SnowLuma 2.2.0）：
+     *   协议端把视频当独立消息处理，文字 + 视频混在一条会被直接拒绝
+     *   （`message element "video" must be the only segment in a message`），
+     *   同一条里出现两个视频也不行（`video may appear only once`）。
+     *   所以有视频时：每个视频各自一条、图片并一条、说明文字最后单独一条；
+     *   没有视频时保持旧行为（说明 + 图片一条发，各协议端都允许）。
+     *   注意这是 QQ 客户端的真实形态，不是 SnowLuma 的怪癖 —— NapCat 时代混发只是被 QQ 静默丢弃兄弟元素。
+     */
     async function deliverResult(chatKey, data) {
       const maxBytes = maxBytesOf()
-      const cq = []
+      const items = [] // [{ kind, code }] —— 保留类型，发送时按"视频单独一条"分组
       let oversize = 0
       for (const item of data.media || []) {
         if (!item?.path) continue
@@ -212,15 +224,15 @@ export default {
           continue
         }
         const code = toCq(item)
-        if (code) cq.push(code)
+        if (code) items.push({ kind: item.kind, code })
         else log.warn(`[链接解析] 跳过不支持的媒体类型: ${item.kind}`)
       }
       let note = ''
-      if (!cq.length) {
+      if (!items.length) {
         // 视频没合出来（例如没装 ffmpeg）时，用服务给的封面兜底，至少不是什么都不发
         const cover = (data.skipped || []).find((s) => s.cover)
         if (cover) {
-          cq.push(cqImage(cover.cover))
+          items.push({ kind: 'image', code: cqImage(cover.cover) })
           note = '（视频没合出来，先发封面）'
         }
       }
@@ -228,12 +240,44 @@ export default {
       for (const s of data.skipped || []) {
         if (s && s.reason) log.info(`[链接解析] 跳过 ${s.kind || '媒体'}: ${s.reason}`)
       }
-      if (!cq.length) {
+      if (!items.length) {
         log.warn(`[链接解析] ${data.platformName || data.platform} 没有可发送的媒体`)
         return { sent: false, oversize: oversize > 0 }
       }
+
       const caption = buildCaption(data, CAPTION_MAX_CHARS) + note
-      await bot.sendMedia(chatKey, cq.join(' '), caption)
+      const videos = items.filter((it) => it.kind === 'video')
+      // 纯图片/封面：说明 + 图片一条发（图片没有"必须唯一 segment"的限制）
+      if (!videos.length) {
+        await bot.sendMedia(chatKey, items.map((it) => it.code).join(' '), caption)
+        return { sent: true, oversize: oversize > 0 }
+      }
+
+      // 有视频：先逐条发媒体（视频各自一条、图片并一条），媒体发出去了再补说明；
+      // 全部媒体都失败时抛错，让上层走"没发出媒体 → 本条按普通消息处理"的降级。
+      let firstError = null
+      let sentMedia = 0
+      const sendOne = async (code, label) => {
+        try {
+          await bot.sendMedia(chatKey, code)
+          sentMedia += 1
+        } catch (e) {
+          if (!firstError) firstError = e
+          log.error(`[链接解析] ${label}发送失败: ${e.message}`)
+        }
+      }
+      for (const it of videos) await sendOne(it.code, '视频')
+      const images = items.filter((it) => it.kind === 'image')
+      if (images.length) await sendOne(images.map((it) => it.code).join(' '), '图片')
+      if (!sentMedia) throw firstError || new Error('媒体发送失败')
+      if (caption) {
+        try {
+          await bot.deliver(chatKey, caption)
+        } catch (e) {
+          // 媒体已经发出去了，说明文字丢了不至于把整条判失败
+          log.warn(`[链接解析] 说明文字发送失败(忽略): ${e.message}`)
+        }
+      }
       return { sent: true, oversize: oversize > 0 }
     }
 
