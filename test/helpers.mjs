@@ -20,7 +20,7 @@ export function tmpDir(tag = 't') {
   return fs.mkdtempSync(path.join(os.tmpdir(), `qqbot-${tag}-`))
 }
 
-/** v2 实例配置：默认值 + 占位 NapCat 地址 + 关留档。 */
+/** v2 实例配置：默认值 + 占位 协议端地址 + 关留档。 */
 export function baseConfig(forbiddenOverrides = {}) {
   return deepMerge(defaultConfig(), {
     adminQq: ADMIN_QQ,

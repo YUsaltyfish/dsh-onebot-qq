@@ -1,5 +1,5 @@
 /**
- * test/fake-napcat.mjs — 最小 OneBot v11 假 NapCat（HTTP API + 正向 WS），只给测试用。
+ * test/fake-napcat.mjs — 最小 OneBot v11 假协议端（HTTP API + 正向 WS），只给测试用。
  *
  * 为什么自己写：包内**不能**依赖 `ws`（运行期无第三方依赖），而 Node 22 只有 WebSocket 客户端、
  * 没有服务端。这里手写约 100 行 WS 服务端（RFC 6455 握手 + 文本帧），够测试用：
@@ -243,7 +243,7 @@ export function createFakeNapCat(opts = {}) {
     async waitForClient(timeoutMs = 10000) {
       const started = Date.now()
       while (clients.size === 0) {
-        if (Date.now() - started > timeoutMs) throw new Error('fake NapCat: 等待 WS 连接超时')
+        if (Date.now() - started > timeoutMs) throw new Error('fake OneBot: 等待 WS 连接超时')
         await new Promise((r) => setTimeout(r, 20))
       }
       return clients.size

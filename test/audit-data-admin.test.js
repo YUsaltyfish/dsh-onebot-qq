@@ -226,19 +226,19 @@ test('待配置模式：set 保存成功并热应用其余配置（pending 标�
   assert.equal(set.ok, true)
   assert.equal(set.pending, true, '待配置模式的保存应标记 pending')
   assert.match(String(set.message), /待配置模式/)
-  assert.equal(h.kernel.runtime.pacing.reply.hourlyMax, 9, 'pending 模式下其余配置也要热应用（NapCat 地址同理）')
+  assert.equal(h.kernel.runtime.pacing.reply.hourlyMax, 9, 'pending 模式下其余配置也要热应用（协议端地址同理）')
   assert.equal(h.kernel.configReady, false, '仍处于待配置模式')
   const onDisk = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
   assert.equal(onDisk.pacing.reply.hourlyMax, 9, '磁盘上已经保存')
 
-  // NapCat 地址同样要即时进 adapter（否则新手向导「先填地址→测试连接」会连旧地址）
+  // 协议端地址同样要即时进 adapter（否则新手向导「先填地址→测试连接」会连旧地址）
   const reloadCallsBefore = reloadCalls
   const wsSet = await endpoints.handle('set', { key: 'napcat.wsUrl', value: 'ws://127.0.0.1:4599' })
   assert.equal(wsSet.ok, true, JSON.stringify(wsSet))
   assert.equal(wsSet.pending, true)
   assert.ok(reloadCalls > reloadCallsBefore, 'pending 分支也必须调用 reloadConfig（只落盘不热应用是错的）')
   assert.equal(h.kernel.runtime.napcat.wsUrl, 'ws://127.0.0.1:4599', 'pending reload 应热应用 runtime')
-  assert.equal(h.kernel.napcat.wsUrl, 'ws://127.0.0.1:4599', 'pending 模式下 NapCat 地址也要进 adapter（测试连接用新地址）')
+  assert.equal(h.kernel.napcat.wsUrl, 'ws://127.0.0.1:4599', 'pending 模式下 协议端地址也要进 adapter（测试连接用新地址）')
   await new Promise((r) => setTimeout(r, 200))
   assert.equal(h.kernel.napcat.health().linked, false, '待配置模式仍不自动连接')
 
@@ -569,14 +569,14 @@ test('action diagnose（正常配置）：返回 checks/summary/report/reportPat
   assert.equal(result.summary.fail, requiredFailed, 'summary.fail 只统计必填项失败')
   assert.ok(result.summary.warn >= optionalFailed, 'summary.warn 应覆盖可选项失败')
 
-  // 关键检查项语义：配置/工具/运行信息通过；NapCat 未连接应为 fail（不是 throw）
+  // 关键检查项语义：配置/工具/运行信息通过；协议端未连接应为 fail（不是 throw）
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]))
   assert.equal(byId.config.ok, true)
   assert.equal(byId.adminQq.ok, true)
   assert.equal(byId.tools.ok, true)
   assert.equal(byId.runtime.ok, true)
-  assert.equal(byId.napcat.ok, false, '没连 NapCat → napcat 项 fail')
-  assert.match(String(byId.napcat.detail), /未连接|NapCat/)
+  assert.equal(byId.napcat.ok, false, '没连协议端 → napcat 项 fail')
+  assert.match(String(byId.napcat.detail), /未连接|协议端/)
 })
 
 test('action diagnose（待配置模式 adminQq=0）：仍成功并落盘；config/adminQq 为 ⚠️/❌', async (t) => {
@@ -604,10 +604,10 @@ test('action diagnose（待配置模式 adminQq=0）：仍成功并落盘；conf
   assert.match(result.report, /待配置|adminQq/, '报告应提示缺 adminQq / 待配置模式')
 })
 
-test('action diagnose：NapCat 未连接只让 napcat 项 fail，绝不 throw；可选能力只降级 ⚠️', async (t) => {
+test('action diagnose：协议端未连接只让 napcat 项 fail，绝不 throw；可选能力只降级 ⚠️', async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-diag-offline-'))
   for (const d of ['workspace', 'personas', 'state', 'logs/qq_chat']) fs.mkdirSync(path.join(dataDir, d), { recursive: true })
-  const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ } }) // autoConnect:false，且无 fake NapCat
+  const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ } }) // autoConnect:false，且无 fake 协议端
   t.after(() => h.dispose())
   const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
 

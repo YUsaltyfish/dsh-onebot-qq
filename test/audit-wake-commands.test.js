@@ -553,7 +553,7 @@ test('FILE-10 策略改成「过门禁都下」→ 没叫它也落盘（passive-
   assert.equal(fs.readdirSync(uploadDir).length, 1, '「都下」策略下没叫也会落盘')
 })
 
-test('WAKE-RECALL 撤回失败：不把 NapCat 原始报错回显到群里（2026-10-23 事故回归）', async (t) => {
+test('WAKE-RECALL 撤回失败：不把 协议端原始报错回显到群里（2026-10-23 事故回归）', async (t) => {
   const h = await boot(t)
   h.kernel.napcat.recall = async () => ({
     ok: false,

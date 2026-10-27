@@ -23,7 +23,7 @@ async function waitFor(fn, timeoutMs = 8000, label = '条件') {
   throw new Error(`等待超时：${label}`)
 }
 
-test('NapCat 适配器：重连/重复触发后只保留一条 WS（防双回复）', async (t) => {
+test('协议端适配器：重连/重复触发后只保留一条 WS（防双回复）', async (t) => {
   const fake = createFakeNapCat()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-reconnect-'))
@@ -54,7 +54,7 @@ test('NapCat 适配器：重连/重复触发后只保留一条 WS（防双回复
   assert.equal(fake.clientCount, 1, `重新 connect 后应只有 1 条 WS，实际 ${fake.clientCount}`)
 })
 
-test('NapCat 适配器：撤回失败不把原始报错放进 msg（raw 只供日志）', async () => {
+test('协议端适配器：撤回失败不把原始报错放进 msg（raw 只供日志）', async () => {
   const adapter = new NapCatAdapter({
     httpUrl: 'http://127.0.0.1:9', log: quiet, avatarDir: path.join(os.tmpdir(), 'qqbot-recall-avatar'),
   })
@@ -80,7 +80,7 @@ test('NapCat 适配器：撤回失败不把原始报错放进 msg（raw 只供�
   assert.equal(/timeout|aborted|NTEvent/i.test(r2.msg), false, `超时 msg 也不回显原始错误：${r2.msg}`)
 })
 
-test('NapCat 适配器：群历史同时带 message_id/message_seq（NapCat 认 seq，SnowLuma 认 id）', async (t) => {
+test('协议端适配器：群历史同时带 message_id/message_seq（多数实现认 seq，SnowLuma 认 id）', async (t) => {
   const fake = createFakeNapCat()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-history-'))
@@ -98,11 +98,11 @@ test('NapCat 适配器：群历史同时带 message_id/message_seq（NapCat 认 
   assert.ok(call, '应发出 get_group_msg_history')
   assert.equal(call.params.group_id, fake.groupId)
   assert.equal(call.params.message_id, 0, 'SnowLuma 认 message_id（0 = 最新）')
-  assert.equal(call.params.message_seq, 0, 'NapCat 认 message_seq（0 = 最新）')
+  assert.equal(call.params.message_seq, 0, '多数实现认 message_seq（0 = 最新）')
   assert.equal(call.params.count, 5)
 })
 
-test('NapCat 适配器：get_status 明确 online=false/good=false 优先判异常；心跳 good 进 health', async (t) => {
+test('协议端适配器：get_status 明确 online=false/good=false 优先判异常；心跳 good 进 health', async (t) => {
   const fake = createFakeNapCat()
   const urls = await fake.start()
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-status-'))

@@ -1,9 +1,9 @@
 /**
- * test/e2e.test.js — 端到端：假 NapCat（HTTP + 正向 WS）→ 入站五阶段 → mock 模型回合 → 原生工具 → 出站。
+ * test/e2e.test.js — 端到端：假协议端（HTTP + 正向 WS）→ 入站五阶段 → mock 模型回合 → 原生工具 → 出站。
  *
  * 覆盖：
  *   1. 全量装配（9 个子插件自动发现、工具/命令注册、单例）
- *   2. 群消息 @ 本机 → 唤醒 → mock 模型调 `mcp__qq__send_message` → 假 NapCat 收到（六项脱敏生效）
+ *   2. 群消息 @ 本机 → 唤醒 → mock 模型调 `mcp__qq__send_message` → 假协议端 收到（六项脱敏生效）
  *   3. 主人私聊 → 脱敏豁免（配置里的 adminQq 私聊保留敏感信息）
  *   4. `/help` 命令零 token 拦截（不进模型、直接经 deliver 出站）
  *   5. 会话映射落盘（state/sessions.json）
@@ -65,14 +65,14 @@ async function waitFor(fn, { timeoutMs = 8000, label = '条件' } = {}) {
   }
 }
 
-test('e2e：假 NapCat 全链路（装配 / 群@入站→模型→工具→出站脱敏 / 私聊豁免 / 命令零token / 会话落盘）', async (t) => {
+test('e2e：假协议端 全链路（装配 / 群@入站→模型→工具→出站脱敏 / 私聊豁免 / 命令零token / 会话落盘）', async (t) => {
   const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const urls = await fake.start()
   const dataDir = tmpDir('e2e')
   writeInstanceConfig(dataDir, urls)
 
   const ctx = createSharedMockCtx()
-  // 先注册清理，再 apply：任何断言失败都不会留下假 NapCat / 内核（否则测试进程不退出）
+  // 先注册清理，再 apply：任何断言失败都不会留下假协议端 / 内核（否则测试进程不退出）
   t.after(async () => {
     for (const dispose of ctx._effects) {
       try {
@@ -100,9 +100,9 @@ test('e2e：假 NapCat 全链路（装配 / 群@入站→模型→工具→出�
   assert.ok(toolNames.length >= 4, `工具数至少 4，实际 ${toolNames.length}`)
   assert.ok(kernel.commands.has('help'), '应注册 /help')
 
-  // 等 WS 连上 + 登录信息就绪（selfId 由假 NapCat 的 get_login_info 提供）
+  // 等 WS 连上 + 登录信息就绪（selfId 由假协议端 的 get_login_info 提供）
   await fake.waitForClient()
-  await waitFor(() => kernel.napcat.health().linked && kernel.napcat.selfId, { label: 'NapCat WS 已连接/selfId' })
+  await waitFor(() => kernel.napcat.health().linked && kernel.napcat.selfId, { label: '协议端 WS 已连接/selfId' })
   const sendTool = ctx._registeredTools.get('mcp__qq__send_message')
 
   // ── 2. 群消息 @ 本机 → 唤醒 → mock 模型调工具 → 出站（脱敏）────
@@ -164,7 +164,7 @@ test('e2e：假 NapCat 全链路（装配 / 群@入站→模型→工具→出�
   assert.ok(mapping[`private:${ADMIN_QQ}`], '私聊会话映射应落盘')
 })
 
-test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连 NapCat）；控制台写入后 configReady=true 并自动连接', async (t) => {
+test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连协议端）；控制台写入后 configReady=true 并自动连接', async (t) => {
   const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const urls = await fake.start()
   const dataDir = tmpDir('e2e-pending')
@@ -192,7 +192,7 @@ test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连 Na
   assert.ok(ctx._registeredTools.has('mcp__qq__send_message'), '工具已注册（控制台/工具可用）')
   assert.ok(kernel.commands.has('help'), '命令已注册')
 
-  // 不连 NapCat：等一拍再确认没有 WS 客户端 / health 未连接
+  // 不连协议端：等一拍再确认没有 WS 客户端 / health 未连接
   await new Promise((r) => setTimeout(r, 300))
   assert.equal(fake.clientCount, 0, '待配置模式不应发起 NapCat 连接')
   assert.equal(kernel.napcat.health().linked, false)
@@ -208,17 +208,17 @@ test('e2e：缺 adminQq → 待配置模式（控制台/工具可用、不连 Na
   assert.equal(saved.ok, true)
   assert.equal(kernel.configReady, true, '配置就绪后 configReady=true')
   await fake.waitForClient(8000)
-  await waitFor(() => kernel.napcat.health().linked, { label: '配置就绪后自动连接 NapCat' })
+  await waitFor(() => kernel.napcat.health().linked, { label: '配置就绪后自动连接协议端' })
   const checkAfter = await kernel.checkNapcat()
   assert.equal(checkAfter.ok, true, '连接后 checkNapcat 走 get_login_info 实测')
   assert.equal(checkAfter.selfId, 999999)
 })
 
-test('e2e：待配置模式下 reload 先热应用 NapCat 地址（不连接），补 adminQq 后自动连接', async (t) => {
+test('e2e：待配置模式下 reload 先热应用 协议端地址（不连接），补 adminQq 后自动连接', async (t) => {
   const fake = createFakeNapCat({ selfId: 999999, adminQq: ADMIN_QQ, groupId: GROUP_ID })
   const fakeUrls = await fake.start()
   const dataDir = tmpDir('e2e-pending-reload')
-  // 初始：NapCat 地址是占位死地址（非空，合法），只缺 adminQq → 待配置模式
+  // 初始：协议端地址是占位死地址（非空，合法），只缺 adminQq → 待配置模式
   writeInstanceConfig(dataDir, { wsUrl: 'ws://127.0.0.1:1', httpUrl: 'http://127.0.0.1:1' }, { adminQq: 0 })
   const ctx = createSharedMockCtx()
   t.after(async () => {
@@ -237,7 +237,7 @@ test('e2e：待配置模式下 reload 先热应用 NapCat 地址（不连接）�
   assert.equal(kernel.configReady, false)
   assert.equal(kernel.napcat.wsUrl, 'ws://127.0.0.1:1', '初始地址是占位死地址')
 
-  // 第 2 步：用户先填 NapCat 地址（仍缺 adminQq）→ reload 应热应用地址、保持待配置、不连接
+  // 第 2 步：用户先填 协议端地址（仍缺 adminQq）→ reload 应热应用地址、保持待配置、不连接
   const rawFile = path.join(dataDir, 'config.json')
   const raw = JSON.parse(fs.readFileSync(rawFile, 'utf8'))
   raw.napcat.wsUrl = fakeUrls.wsUrl
@@ -248,10 +248,10 @@ test('e2e：待配置模式下 reload 先热应用 NapCat 地址（不连接）�
   assert.equal(r.pending, true, '只缺 adminQq 的 reload 应返回 pending 而不是抛错')
   assert.equal(r.configReady, false, '仍缺 adminQq → configReady=false')
   assert.deepEqual(r.pendingErrors, ['adminQq 未配置：请在实例配置里填主人 QQ（必填项，无默认）'])
-  assert.equal(kernel.napcat.wsUrl, fakeUrls.wsUrl, '待配置模式也热应用 NapCat 地址')
+  assert.equal(kernel.napcat.wsUrl, fakeUrls.wsUrl, '待配置模式也热应用 协议端地址')
   assert.equal(kernel.napcat.httpUrl, fakeUrls.httpUrl)
   await new Promise((resolve) => setTimeout(resolve, 300))
-  assert.equal(fake.clientCount, 0, '待配置模式不自动连接 NapCat')
+  assert.equal(fake.clientCount, 0, '待配置模式不自动连接协议端')
 
   // 第 3 步：补上 adminQq → reload 返回就绪并自动连接
   raw.adminQq = ADMIN_QQ
