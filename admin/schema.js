@@ -210,24 +210,50 @@ export const CORE_CONTROLS = [
     hint: '先给群消息按语境打分（问句、正在热聊、它很久没说话…分高；@别人、纯表情分低），分够高才接。',
   },
   // ── 连续对话（2026-10-27）：被真人叫过并回过话之后，隔一会儿把这期间的新消息塞回模型再判一次 ──
-  // 控制台只放这 3 项；其余（每小时上限 5、最小间隔 5 分钟、一次唤醒只查 1 次、必须有人类新消息）
-  // 都是防止"自己转"的内部闸门，写在 kernel/pacing.js 的 REPLY_DEFAULTS.continuation 里就够了。
+  // 控制台：8 项全部暴露，但不平铺在页面上——`section:'连续对话'` 让前端收进「主动接话」页里
+  // 一个独立的折叠块（和「高级」按钮同一种交互），默认收起，免得把常用项挤下去。
   {
-    key: 'pacing.reply.continuation.enabled', group: '主动接话', type: 'bool', label: '连续对话（回完话后再看要不要补一句）', default: false,
-    hint: '开 = 被真人叫过、它回过话之后，等「多久后检查」这么久，把这期间群里新说的话再看一遍：'
+    key: 'pacing.reply.continuation.enabled', group: '主动接话', section: '连续对话', type: 'bool', label: '连续对话（回完话后再看要不要补一句）', default: false,
+    hint: '开 = 被真人叫过、它回过话之后，等「回完话后等多久检查」这么久，把这期间群里新说的话再看一遍：'
       + '想补就补一句，不想补就什么都不发。\n'
       + '防自转：只有真人唤醒才会开这条链，一次唤醒只检查一次，且必须有人类新消息才会检查。'
       + '总开关（允许主动接话）关掉时它也不工作。',
   },
   {
-    key: 'pacing.reply.continuation.delayMs', group: '主动接话', type: 'int', label: '连续对话：回完话后等多久检查', unit: '秒',
+    key: 'pacing.reply.continuation.delayMs', group: '主动接话', section: '连续对话', type: 'int', label: '回完话后等多久检查', unit: '秒',
     scale: 1000, min: 30, max: 300, step: 10, default: 120000,
     hint: '从它**发出回复**那一刻开始计时。到点时如果没人再叫它 → 看这期间有没有新的人类消息，再决定要不要补一句。',
   },
   {
-    key: 'pacing.reply.continuation.bonus', group: '主动接话', type: 'float', label: '连续对话：情境加分', min: 0, max: 3, step: 0.1, default: 1.5,
+    key: 'pacing.reply.continuation.bonus', group: '主动接话', section: '连续对话', type: 'float', label: '情境加分', min: 0, max: 3, step: 0.1, default: 1.5,
     hint: '和「主动接话」共用同一套语境权重与门槛，这里只是给"刚聊过"这个情境加的分（直接加到分数上）。\n'
       + '0 = 完全按原权重（续聊几乎永远过不了门槛）；调高 = 更容易补这一句。默认 1.5。',
+  },
+  {
+    key: 'pacing.reply.continuation.hourlyMax', group: '主动接话', section: '连续对话', type: 'int', label: '每群每小时最多补几次', unit: '次',
+    min: 1, max: 20, step: 1, default: 5,
+    hint: '防话痨：每个群每小时最多起几次续聊检查。和下面的「两次续聊最小间隔」一起，两个都满足才会触发。',
+  },
+  {
+    key: 'pacing.reply.continuation.minGapMs', group: '主动接话', section: '连续对话', type: 'int', label: '两次续聊最小间隔', unit: '分钟',
+    scale: 60000, min: 1, max: 60, step: 1, default: 300000,
+    hint: '两次续聊检查之间至少隔这么久，防止"刚补完又补"。默认 5 分钟。',
+  },
+  {
+    key: 'pacing.reply.continuation.maxPerChain', group: '主动接话', section: '连续对话', type: 'int', label: '一次唤醒最多检查几次', unit: '次',
+    min: 1, max: 3, step: 1, default: 1,
+    hint: '**防自转的核心**：一次真人唤醒最多只走 1 次续聊检查（默认 1）。'
+      + '调成 2~3 会让它在一段对话里多回看几次，也更容易显得"黏人"，建议先保持 1。',
+  },
+  {
+    key: 'pacing.reply.continuation.requireNewMessage', group: '主动接话', section: '连续对话', type: 'bool', label: '必须有人类新消息才检查', default: true,
+    hint: '开（推荐）：它回完之后，群里必须有人再说话，才会做续聊检查；没人说话就彻底不触发。\n'
+      + '关：即使没人接话也会隔一会儿自己回看一次——容易变成"自问自答"，不建议关。',
+  },
+  {
+    key: 'pacing.reply.continuation.quoteLastHuman', group: '主动接话', section: '连续对话', type: 'bool', label: '续聊时引用最后一条人类消息', default: false,
+    hint: '开 = 补的那一句会挂在"最后一条人类消息"下面（引用），视觉上更像在接话；关 = 普通发言。\n'
+      + '注意：主动接话/续聊默认不 @ 任何人，这里只控制引用（挂哪条消息）。',
   },
   {
     key: 'pacing.reply.maxChars', group: '主动接话', type: 'int', label: '主动接话最多多少字', unit: '字',
@@ -448,6 +474,8 @@ function coreEntries() {
     secret: c.secret === true,
     // 进阶项：控制台折叠显示（如「主动接话」页的「高级」按钮）
     advanced: c.advanced === true,
+    // 具名折叠块：同一标签页里再分小组（如「连续对话」），前端按 section 渲染成独立折叠块
+    section: c.section || '',
   }))
 }
 
@@ -669,6 +697,8 @@ function controlView(entry, rawConfig, kernel) {
   if (entry.secret) view.secret = true
   // 进阶项：控制台默认折叠在「高级」按钮里（比如主动接话的语境权重）
   if (entry.advanced) view.advanced = true
+  // 具名折叠块：前端据此在同一个标签页里额外渲染一个独立折叠区（如「连续对话」）
+  if (entry.section) view.section = entry.section
   // str 控件的输入建议（前端渲染 <datalist>）
   if (Array.isArray(entry.suggestions) && entry.suggestions.length) view.suggestions = entry.suggestions
   return view

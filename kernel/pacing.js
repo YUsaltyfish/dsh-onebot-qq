@@ -178,6 +178,8 @@ export function createPacing({ log = console, state, clock = null }) {
     const list = rings.get(key) || []
     list.push({
       ts: now,
+      // 记下消息 id：「续聊时引用最后一条人类消息」（quoteLastHuman）要用它挂引用
+      id: ev.messageId ?? null,
       text: text.slice(0, 200),
       mentionBot: !!ev.mentionedSelf,
       atOther: /@\d{4,}/.test(text),
@@ -403,10 +405,12 @@ export function createPacing({ log = console, state, clock = null }) {
       c.chain += 1
       c.lastFireAt = now
       fires.push(now)
-      log.info(`[连续对话] ${key} 起念（续聊分 ${(p * 100).toFixed(0)}%，新消息 ${humans.length} 条，第 ${c.chain}/${num(cf.maxPerChain, 1)} 次）`)
+      // 「引用最后一条人类消息」：只有开关打开、且这条消息有 id 时才带
+      const quoteTo = cf.quoteLastHuman ? (last.id ?? null) : null
+      log.info(`[连续对话] ${key} 起念（续聊分 ${(p * 100).toFixed(0)}%，新消息 ${humans.length} 条，第 ${c.chain}/${num(cf.maxPerChain, 1)} 次${quoteTo ? '，引用 ' + quoteTo : ''}）`)
       if (typeof onProactiveTurn === 'function') {
         Promise.resolve()
-          .then(() => onProactiveTurn({ chatKey: key, groupId: c.gid, reason: 'continuation', score: p, humanMsgs: humans.length }))
+          .then(() => onProactiveTurn({ chatKey: key, groupId: c.gid, reason: 'continuation', score: p, humanMsgs: humans.length, quoteTo }))
           .catch((e) => log.error(`[连续对话] 起回合失败 ${key}: ${e.stack || e.message}`))
       }
       // 默认只检查一次：起过就结束；要再续必须等新的真人唤醒

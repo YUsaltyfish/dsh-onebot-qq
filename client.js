@@ -721,9 +721,21 @@ window.__ModuleLoader__.load({
 			const { schema, status, busy, run, call } = props
 			const { useState } = react
 			const [showAdv, setShowAdv] = useState(false)
+			// 「连续对话」这类具名折叠块：每个 section 一个开合状态，默认收起
+			const [openSec, setOpenSec] = useState({})
 			const all = ((schema && schema.controls) || []).filter((c) => c.group === '主动接话')
-			const controls = all.filter((c) => !c.advanced)
-			const advanced = all.filter((c) => c.advanced)
+			// 三类：普通项 / 具名折叠块（如「连续对话」）/ 高级项
+			const sections = []
+			const controls = []
+			const advanced = []
+			for (const c of all) {
+				if (c.section) {
+					let s = sections.find((x) => x.name === c.section)
+					if (!s) { s = { name: c.section, rows: [] }; sections.push(s) }
+					s.rows.push(c)
+				} else if (c.advanced) advanced.push(c)
+				else controls.push(c)
+			}
 			const reply = (status && status.reply) || null
 			const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) } catch { return '?' } }
 			const groups = (reply && Array.isArray(reply.groups)) ? reply.groups : []
@@ -741,6 +753,20 @@ window.__ModuleLoader__.load({
 						? `当前：每小时最多 ${reply.hourlyMax} 次 · 实际间隔 ≥ ${Math.round((reply.minGapMs || 0) / 60000)} 分钟 · 语境门槛 ${Math.round((reply.threshold || 0) * 100)} 分`
 						: '当前：主动接话关着（上面「允许主动接话」打开即可）'),
 				...controls.map((c) => ctrlRow(c, props)),
+				// ═══ 具名折叠块（如「连续对话」）：和「高级」一样的按钮，但独立成栏、默认收起 ═══
+				...sections.map((sec) => {
+					const open = !!openSec[sec.name]
+					return h('div', { key: 'sec:' + sec.name }, [
+						h('div', { style: S.row, key: 'hd' }, [
+							h('button', {
+								key: 'b', style: S.btn, disabled: busy,
+								title: `共 ${sec.rows.length} 项 —— 默认收起，点开调整`,
+								onClick: () => setOpenSec({ ...openSec, [sec.name]: !open }),
+							}, (open ? '▾ ' : '▸ ') + sec.name + (open ? '（收起）' : '（展开）')),
+						]),
+						open ? h('div', { key: 'body' }, sec.rows.map((c) => ctrlRow(c, props))) : null,
+					])
+				}),
 				// ═══ 进阶项：默认收起，点一下展开、再点收起 ═══
 				h('div', { style: S.row, key: 'adv' }, [
 					h('button', {

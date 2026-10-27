@@ -496,13 +496,15 @@ export async function apply(ctx, bundleConfig = {}) {
   deliver.onDecorate((out) => {
     const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
     const kind = turnCtx?.wakeKind
-    // 主动接话 / 连续对话都是"它自己找的话"：不指人、不挂引用
+    // 主动接话 / 连续对话都是"它自己找的话"：默认不指人、不挂引用
     if (!turnCtx || (kind !== 'proactive' && kind !== 'continuation')) return
-    if (out.ats?.length || out.replyTo != null) {
+    // 例外：续聊开了「引用最后一条人类消息」时，只保留这一个引用目标（其余一律清掉）
+    const forceQuote = kind === 'continuation' ? (Number(turnCtx._forceReplyTo) || null) : null
+    if (out.ats?.length || (out.replyTo != null && out.replyTo !== forceQuote)) {
       log.info(`[主动接话] 丢掉 @/引用（${out.target}）：主动接话不指人、不挂引用`)
-      out.ats = []
-      out.replyTo = null
     }
+    out.ats = []
+    out.replyTo = forceQuote
     out.noForward = true
     const maxChars = Number(pacing.config?.reply?.maxChars) || 120
     if (out.text.length > maxChars) {
@@ -1099,7 +1101,7 @@ export async function apply(ctx, bundleConfig = {}) {
   }
 
   // ── 主动接话：没入站也能起一轮候选（走正规管线语义，出站不 @ 不引用由 decorate 钩子硬挡） ──
-  const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs }) => {
+  const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs, quoteTo }) => {
     const isContinuation = reason === 'continuation'
     const ev = createEvent({
       chatKey, isGroup: true, groupId,
@@ -1123,6 +1125,8 @@ export async function apply(ctx, bundleConfig = {}) {
       } catch (e) { log.warn(`[主动接话] 拉取群上文失败: ${e.message}`) }
     }
     ev.turnCtx = createTurnContext(ev)
+    // 续聊可选「引用最后一条人类消息」：把目标 message_id 带进本轮，出站钩子①会用它（其它轮一律清掉）
+    if (isContinuation && quoteTo) ev.turnCtx._forceReplyTo = Number(quoteTo) || null
     holdActiveTurn(chatKey, ev.turnCtx)
     log.info(`[${isContinuation ? '连续对话' : '主动接话'}] ${chatKey} 候选入站（${isContinuation ? '续聊检查' : reason === 'silence' ? '冷场找话' : '话题合适'}）→ 交模型判断接不接`)
     return turnStore.run(ev.turnCtx, () => state.serialize(ev.chatKey, () => runTurn(ev)))

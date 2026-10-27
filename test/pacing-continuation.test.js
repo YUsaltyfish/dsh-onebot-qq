@@ -18,7 +18,7 @@ function fakeState() {
 }
 
 /** 起一个可控时钟的 pacing，返回 { p, fired, advance, ev } */
-function setup({ enabled = true, bonus = 1.5, groups = { 100: true } } = {}) {
+function setup({ enabled = true, bonus = 1.5, groups = { 100: true }, cont = {} } = {}) {
   let now = Date.now()
   const fired = []
   const p = createPacing({ log: quiet, state: fakeState(), clock: () => now })
@@ -27,7 +27,10 @@ function setup({ enabled = true, bonus = 1.5, groups = { 100: true } } = {}) {
       enabled: true,
       groups,
       sensitivity: 0.45,
-      continuation: { enabled, delayMs: 120000, bonus, hourlyMax: 5, minGapMs: 300000, maxPerChain: 1, requireNewMessage: true },
+      continuation: {
+        enabled, delayMs: 120000, bonus, hourlyMax: 5, minGapMs: 300000,
+        maxPerChain: 1, requireNewMessage: true, quoteLastHuman: false, ...cont,
+      },
     },
   })
   p.start({ onProactiveTurn: (x) => { fired.push(x); return Promise.resolve() }, isBusy: () => false })
@@ -133,4 +136,51 @@ test('没回过话就不进检查', () => {
   p.noteInbound(ev({ text: '后来又说了一句' }))
   p.tickNow()
   assert.equal(fired.length, 0)
+})
+
+test('引用开关：开着时把最后一条人类消息的 id 传给合成轮', async () => {
+  const { p, fired, advance, ev } = setup({ cont: { quoteLastHuman: true } })
+  const e = ev({ wake: { kind: 'at' } })
+  p.noteInbound(e)
+  p.noteWake(e)
+  p.noteReplySent('group:100', { wakeKind: 'at' })
+  advance(121000)
+  p.noteInbound(ev({ messageId: 42, text: '后来又说了一句' }))
+  p.tickNow()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(fired.length, 1)
+  assert.equal(fired[0].quoteTo, 42)
+})
+
+test('引用开关：关着时不带引用目标', async () => {
+  const { p, fired, advance, ev } = setup()
+  const e = ev({ wake: { kind: 'at' } })
+  p.noteInbound(e)
+  p.noteWake(e)
+  p.noteReplySent('group:100', { wakeKind: 'at' })
+  advance(121000)
+  p.noteInbound(ev({ messageId: 42, text: '后来又说了一句' }))
+  p.tickNow()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(fired.length, 1)
+  assert.equal(fired[0].quoteTo, null)
+})
+
+test('一次唤醒检查两次（maxPerChain=2）时会再检查，但仍受新消息与链上限约束', async () => {
+  const { p, fired, advance, ev } = setup({ cont: { maxPerChain: 2, minGapMs: 60000 } })
+  const e = ev({ wake: { kind: 'at' } })
+  p.noteInbound(e)
+  p.noteWake(e)
+  p.noteReplySent('group:100', { wakeKind: 'at' })
+  advance(121000)
+  p.noteInbound(ev({ text: '后来又说了一句' }))
+  p.tickNow()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(fired.length, 1)
+  // 第二次：下一次检查在 delayMs 之后，且期间有人类新消息
+  advance(121000)
+  p.noteInbound(ev({ text: '又有人补了一句' }))
+  p.tickNow()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(fired.length, 2)
 })
