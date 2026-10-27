@@ -59,7 +59,7 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
    *
    * 待配置模式（首次安装：只缺 adminQq）：`allowPending:true` 时容忍**唯一**的
    * 「adminQq 未配置」校验错误并照常落盘；内核支持 pending reload（只缺 adminQq 时热应用其余配置、
-   * 不自动连接），所以照常 `reloadConfig()` —— 新用户先填 NapCat 地址也能立刻生效/测试连接，
+   * 不自动连接），所以照常 `reloadConfig()` —— 新用户先填协议端地址也能立刻生效/测试连接，
    * 填完主人 QQ 的最后一次保存自动连接。其它任何校验错误仍然拒绝写入。
    *
    * @param {object} nextRaw

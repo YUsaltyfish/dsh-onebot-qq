@@ -302,7 +302,7 @@ export default {
         const extra = tail.replace(/^\d+\s*/, '').trim()
         const list = await bot.napcat.groupHistory(ev.groupId, n + 2)
         if (!Array.isArray(list) || !list.length) {
-          await reply(ev, '⚠️ 取群记录失败（NapCat 没回数据），过会儿再试', 'history')
+          await reply(ev, '⚠️ 取群记录失败（协议端没回数据），过会儿再试', 'history')
           return
         }
         const rendered = []
@@ -318,7 +318,7 @@ export default {
           await reply(ev, '这一段里没有能读的文字消息', 'history')
           return
         }
-        ev.historyBlock = `[群历史: 最近 ${n} 条(旧→新; 来自 NapCat get_group_msg_history)]\n${block}`
+        ev.historyBlock = `[群历史: 最近 ${n} 条(旧→新; 来自 OneBot get_group_msg_history)]\n${block}`
         ev.text = extra // 正题交回正文，命令本身别再进 prompt
         ev.hint.push(extra
           ? `[主人命令] 拉本群最近 ${n} 条聊天记录（记录在下面）。主人的要求：「${extra}」——**先照他这句回答**，记录只是素材。`

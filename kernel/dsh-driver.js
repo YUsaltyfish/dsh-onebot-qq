@@ -50,7 +50,7 @@ const QUESTION_CUSTOM_REPLY = '请在 QQ 里直接用文字列出可选内容'
  * @param {string} [opts.workspaceId]  已注册的 QQ 工作区 id（由宿主自举后传入；传了就优先用它挂会话）
  * @param {string} opts.agentPreset    会话 preset（空 = 用 DSH 默认）
  * @param {object} opts.state          ChatState（群上文水位用）
- * @param {object} [opts.napcat]       NapCat 适配器（群上文用；不传则从内核服务上取）
+ * @param {object} [opts.napcat]       协议端适配器（群上文用；不传则从内核服务上取）
  */
 export function createDshDriver(opts) {
   const { ctx, log } = opts
@@ -169,7 +169,7 @@ export function createDshDriver(opts) {
 
   /**
    * 获取（或懒创建）一条 QQ 线对应的会话。
-   * nameHint 只用于日志：会话标题要用**群名 / 好友昵称**（得打 NapCat 取），取名不归驱动层；
+   * nameHint 只用于日志：会话标题要用**群名 / 好友昵称**（得打协议端取），取名不归驱动层；
    * 需要改标题的调用方直接用下面的 rename()。
    */
   async function ensureSession(chatKey, nameHint = '') {
@@ -185,7 +185,7 @@ export function createDshDriver(opts) {
       sessions.set(chatKey, sessionId)
       saveSessions()
       log.info(`为 ${chatKey} 创建 DSH 会话: ${sessionId}（${nameHint || '无名'}）preset=${settings.agentPreset || '默认'}`)
-      // 新建会话后**异步**补一次标题（取群名要打 NapCat，别拖慢第一条消息）。
+      // 新建会话后**异步**补一次标题（取群名要打协议端，别拖慢第一条消息）。
       // force 跳过节流：不然刚建的会话要等下一轮消息（最多再等 60s）才在侧栏显示成「群名 (群号)」。
       syncSessionTitles({ force: true }).catch(() => {})
       return sessionId
@@ -412,7 +412,7 @@ export function createDshDriver(opts) {
 
   // ── 健康探针 / 会话标题同步 ──────────────────────────────────
   /**
-   * NapCat 适配器：opts.napcat 留给显式注入（宿主装配时已经建好）；否则**运行期**从内核服务上取
+   * 协议端适配器：opts.napcat 留给显式注入（宿主装配时已经建好）；否则**运行期**从内核服务上取
    * （由 index.js 在装配时交给内核；这里只做兼容读取，不依赖 ctx 私有属性）。
    */
   function napcatOf() {
@@ -454,7 +454,7 @@ export function createDshDriver(opts) {
   }
 
   /**
-   * 取一份"号码→名字"全量名单（群列表 / 好友列表一次就是全量，别为每条线各打一次 NapCat）。
+   * 取一份"号码→名字"全量名单（群列表 / 好友列表一次就是全量，别为每条线各打一次协议端）。
    * 优先用适配器封装的方法（groupList/friendList），没有就直走 OneBot 接口。
    */
   async function loadNames(napcat, method, action, pickId, pickName) {

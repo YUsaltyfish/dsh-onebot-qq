@@ -738,7 +738,7 @@ export default {
           return await bot.napcat.fetchAvatar(target, raw)
         }
 
-        // QQ 头像是公开 CDN（NapCat 没有可用头像接口，实测 `get_qq_avatar` 回"不支持的Api"）
+        // QQ 头像是公开 CDN（协议端没有可用头像接口，实测 `get_qq_avatar` 回"不支持的Api"）
         const qq = raw
         const dir = avatarDirNow()
         fs.mkdirSync(dir, { recursive: true })

@@ -1,5 +1,5 @@
 /**
- * kernel/napcat-adapter.js — 唯一碰外部的地方（NapCat 正向 WS + HTTP API）。
+ * kernel/napcat-adapter.js — 唯一碰外部的地方（OneBot v11 正向 WS + HTTP API）。
  *
  * 纪律：
  *  · **不导出任何"裸 send"给插件**。所有出站只能走 `bot.deliver()`（脱敏/长度/引用/留档的唯一实现）；
@@ -15,22 +15,22 @@ import { resolveDataDir } from '../platform/paths.js'
 import { fromNapCatFileRef } from '../platform/cq-file.js'
 import { atomicWriteFileSync } from '../platform/atomic.js'
 
-const SEND_TIMEOUT_MS = 12000   // 单条发送超时：NapCat HTTP 半死时不能让一条消息把整轮对话拖死
+const SEND_TIMEOUT_MS = 12000   // 单条发送超时：协议端 HTTP 半死时不能让一条消息把整轮对话拖死
 const SEND_MAX_RETRY = 2        // 超时/网络错误/5xx 才重试，4xx 直接放弃（请求本身有问题，重试无意义）
 const MEDIA_TIMEOUT_MS = 180000 // 媒体要长超时：大文件/视频正常上传就要几十秒
 const API_TIMEOUT_MS = 10000
 const RECONNECT_MS = 3000
 const MEMBER_CACHE_MS = 5 * 60 * 1000
 /**
- * 假连接判定阈值：NapCat 每 30s 推一次心跳，超过这个时长一个帧都没有 = 连接已成僵尸
- * （TCP 还是 ESTAB、readyState 还是 OPEN，但 NapCat 早不认了）。
+ * 假连接判定阈值：协议端每 30s 推一次心跳，超过这个时长一个帧都没有 = 连接已成僵尸
+ * （TCP 还是 ESTAB、readyState 还是 OPEN，但协议端早不认了）。
  * 线上出现过掉线重登后静默数小时，就是缺这道看门狗。
  */
 const STALE_MS = 100 * 1000
 
-/** QQ 登录状态主动探测间隔（WS 连着不代表 QQ 在线：NapCat 可能仍保持心跳）。 */
+/** QQ 登录状态主动探测间隔（WS 连着不代表 QQ 在线：协议端可能仍保持心跳）。 */
 const LOGIN_CHECK_MS = 30000
-/** 同一检测结果的缓存时间，避免控制台 5s 轮询频繁打 NapCat。 */
+/** 同一检测结果的缓存时间，避免控制台 5s 轮询频繁打协议端。 */
 const LOGIN_CHECK_TTL_MS = 10000
 
 function chatTarget(chatKey) {
@@ -40,7 +40,7 @@ function chatTarget(chatKey) {
 }
 
 /**
- * 撤回失败的人话：NapCat 的原始报错（NTEvent / EventRet / decode failed…）**只进日志**，
+ * 撤回失败的人话：协议端的原始报错（NTEvent / EventRet / decode failed…）**只进日志**，
  * 绝不回显到 QQ 出站或模型上下文——2026-10-23 线上出过整段报错被当回复发出的问题。
  */
 function recallFailureText(raw, timedOut = false) {
@@ -73,19 +73,19 @@ export class NapCatAdapter {
     this.ws = null
     this.closed = false
     this.handlers = new Set()
-    this.lastFrameAt = 0      // 最近一次收到 NapCat 任何帧（含心跳/API 响应）的时刻
+    this.lastFrameAt = 0      // 最近一次收到协议端任何帧（含心跳/API 响应）的时刻
     this._waiters = new Map() // echo → wsApi 等待者
     this._memberCache = new Map() // gid → { at, list:[{qq,names}] }（只服务 [AT:名字] → 号码）
     this._connecting = false
     this._wsGen = 0            // socket 代际：旧 socket 的迟到事件一律忽略（防重连叠出第二条 WS）
     this._reconnectTimer = null
     this._livenessTimer = null
-    // QQ 登录状态（主动探测）：NapCat WS 连着但 QQ 掉线时，靠它发现并提醒
+    // QQ 登录状态（主动探测）：协议端 WS 连着但 QQ 掉线时，靠它发现并提醒
     this.loginOk = null
     this.loginCheckedAt = 0
     this.loginError = ''
     // 协议端自报的"接收链路健康"：SnowLuma 心跳/ get_status 里有 good（hook 卡住时会翻 false，
-    // 发得出去、收不进来）；NapCat 不提供这个字段时保持 null（未知，不参与判定）。
+    // 发得出去、收不进来）；协议端不提供这个字段时保持 null（未知，不参与判定）。
     this.receiveGood = null
     this._loginTimer = null
     this._loginChecking = null
@@ -176,9 +176,9 @@ export class NapCatAdapter {
     if (!this.wsUrl) { this.log.warn('未配置 napcat.wsUrl，NapCat 入站不可用'); return }
     this._connecting = true
     const gen = ++this._wsGen
-    // WS 鉴权兼容两种 OneBot 11 标准形态（纯客户端适配，**不动 NapCat 任何配置**）：
+    // WS 鉴权兼容两种 OneBot 11 标准形态（纯客户端适配，**不动协议端任何配置**）：
     //   · wsUrl 里已带 `access_token=` → 用它（部分部署把 token 直接拼在连接串上）；
-    //   · 否则 token 走 `Authorization: Bearer` 头（OneBot 11 标准，NapCat 认）。
+    //   · 否则 token 走 `Authorization: Bearer` 头（OneBot 11 标准，协议端认）。
     const headers = this.wsToken && !/access_token=/.test(this.wsUrl) ? { Authorization: `Bearer ${this.wsToken}` } : {}
     // 握手看门狗：10 秒不 open 视为失败。Node 的 WS 某些失败只触发 onerror 不触发 onclose，
     // 不补这道会永远卡在"正在连接"、日志里什么都不出现。
@@ -215,7 +215,7 @@ export class NapCatAdapter {
       try { data = JSON.parse(ev.data) } catch { return }
       if (data.echo !== undefined) { this._resolveApi(data); return } // API 响应
       if (data.post_type === 'meta_event') {
-        // 心跳顺便记协议端的接收链路自评（SnowLuma：status.good；NapCat：没有就忽略）
+        // 心跳顺便记协议端的接收链路自评（SnowLuma：status.good；其它实现没这个字段就忽略）
         const good = data?.status?.good
         if (typeof good === 'boolean') this.receiveGood = good
         return
@@ -234,7 +234,7 @@ export class NapCatAdapter {
       this._connecting = false
       this.ws = null
       this.loginOk = null
-      this.loginError = 'NapCat WS 断开'
+      this.loginError = '协议端 WS 断开'
       this.receiveGood = null
       this.log.info('NapCat WS 已断开')
       this._scheduleReconnect()
@@ -375,7 +375,7 @@ export class NapCatAdapter {
 
   /**
    * 发一条**带媒体的 CQ 串**（图/视频/文件）。
-   * ⚠️ **强制 retries:0**：发送非幂等 —— HTTP 超时只说明"我们不等了"，NapCat 收到请求后会继续上传并发出；
+   * ⚠️ **强制 retries:0**：发送非幂等 —— HTTP 超时只说明"我们不等了"，协议端收到请求后会继续上传并发出；
    * 此时重试 = 又发一遍（线上出现过同一个视频发好几遍）。长超时让大文件正常传完。
    */
   async sendMedia(chatKey, cqBody, opts = {}) {
@@ -384,7 +384,7 @@ export class NapCatAdapter {
 
   // ── 其它 OneBot 接口 ──────────────────────────────────────
 
-  /** 撤回一条消息（OneBot delete_msg）。加 15s 超时：NapCat recallMsg 会卡十几秒。 */
+  /** 撤回一条消息（OneBot delete_msg）。加 15s 超时：协议端 recallMsg 会卡十几秒。 */
   async recall(messageId) {
     try {
       const { data } = await this._post('delete_msg', { message_id: Number(messageId) }, 15000)
@@ -401,7 +401,7 @@ export class NapCatAdapter {
 
   /**
    * 群消息历史（升序；锚点 0 = 从最新开始）。失败返回 []，群上文/提取都只是锦上添花。
-   * 锚点参数名两端不同：NapCat 认 `message_seq`，SnowLuma 认 `message_id`（0 = 最新，负值锚点也合法）。
+   * 锚点参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`（0 = 最新，负值锚点也合法）。
    * 两边都会忽略自己不认识的键，所以两个都发（2026-10-27 SnowLuma 兼容）。
    */
   async groupHistory(groupId, count = 100) {
@@ -449,7 +449,7 @@ export class NapCatAdapter {
       const { data } = await this._post('get_forward_msg', { id: String(forwardId) }, 15000)
       if (data?.status !== 'ok' || !data?.data) return null
       const d = data.data
-      // NapCat 有的版本把 messages 直接放 data，有的放 data.data
+      // 协议端有的版本把 messages 直接放 data，有的放 data.data
       const messages = Array.isArray(d.messages) ? d.messages
         : (Array.isArray(d.data?.messages) ? d.data.messages : null)
       return messages ? { messages } : null
@@ -460,8 +460,8 @@ export class NapCatAdapter {
   }
 
   /**
-   * 按 file_id 溯源 NapCat 本地文件/直链（OneBot get_file）。
-   * 返回的 `file` 可能是 `file://` URL 或原生路径 → 统一经 fromNapCatFileRef() 归一成本地路径，
+   * 按 file_id 溯源协议端本地文件/直链（OneBot get_file）。
+   * 返回的 `file` 可能是 `file://` URL 或原生路径 → 统一经 from协议端FileRef() 归一成本地路径，
    * 调用方（入站文件/表情采集）就不用各写一份 URL 解析。
    */
   async getFile(fileId) {
@@ -514,7 +514,7 @@ export class NapCatAdapter {
    * 取登录账号（selfId / selfNickname）：先 WS，失败再 HTTP。
    * 为什么要有 HTTP 兜底：WS 刚 open 的那一下 API 偶发超时/未就绪，而 selfId 为空会让
    * "自己发的消息过滤"、合并卡片节点名、健康快照全跟着瞎 —— 两条通道都是 OneBot 11 标准，
-   * 纯客户端适配，不动 NapCat 任何配置。
+   * 纯客户端适配，不动协议端任何配置。
    */
   async _fetchLoginInfo() {
     return this.checkLogin({ force: true, quiet: true })
@@ -532,7 +532,7 @@ export class NapCatAdapter {
   }
 
   /**
-   * 主动检查 QQ 是否还在线。WS 连着只说明 NapCat 在，不代表 QQ 账号在线。
+   * 主动检查 QQ 是否还在线。WS 连着只说明协议端在，不代表 QQ 账号在线。
    * 先 WS get_login_info，失败再走 HTTP；成功置 loginOk=true，失败置 false 并记录原因。
    * @param {{force?:boolean, quiet?:boolean}} [opts]
    * @returns {Promise<{ok:boolean|null, selfId:number|null, nickname:string|null, error:string|null, checkedAt:number}>}
@@ -549,7 +549,7 @@ export class NapCatAdapter {
       }
       let info = null
       let err = null
-      // get_login_info 在 QQ 掉线后仍可能返回缓存账号（NapCat 实测），不能单独作为在线依据
+      // get_login_info 在 QQ 掉线后仍可能返回缓存账号（协议端实测），不能单独作为在线依据
       try { info = (await this.wsApi('get_login_info'))?.data } catch (e) { err = e }
       if (!info?.user_id) {
         try { info = (await this._post('get_login_info', {}))?.data?.data } catch (e) { err = e }
@@ -566,10 +566,10 @@ export class NapCatAdapter {
         return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
       }
 
-      // 协议端健康信号（SnowLuma 的 get_status 明确区分 online / good；NapCat 也有 get_status）：
+      // 协议端健康信号（SnowLuma 的 get_status 明确区分 online / good；多数实现也有 get_status）：
       // online=false → 已掉线；good=false → 接收链路停滞（hook 卡住时"发得出、收不进"，光看
       // get_stranger_info 会误判在线）。只在明确 false 时降级；拿不到/字段缺省继续走下面的探针，
-      // 不改变纯 NapCat 的既有判定（NapCat 的 get_status 会命中缓存，2026-10-22 实测）。
+      // 不改变纯协议端的既有判定（协议端的 get_status 会命中缓存，2026-10-22 实测）。
       let statusData = null
       try {
         const r = await this._post('get_status', {}, 6000)
@@ -592,7 +592,7 @@ export class NapCatAdapter {
         return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
       }
 
-      // 真·在线探测：get_stranger_info 需要 QQ 服务端往返。离线时 NapCat 会返回
+      // 真·在线探测：get_stranger_info 需要 QQ 服务端往返。离线时协议端会返回
       // retcode!=0 / "网络连接异常" / coreInfo null；在线时 retcode=0。
       // 仅用 get_status/get_login_info 都会命中缓存，发现不了这种掉线（2026-10-22 实测）。
       let probePayload = null
@@ -659,7 +659,7 @@ export class NapCatAdapter {
   /**
    * 取群友 / 自己的头像（契约 `bot.napcat.fetchAvatar`；产物要能直接拿去图生图）。
    *
-   * 为什么走 CDN：NapCat 没有通用头像接口（`get_qq_avatar` 在多数版本回"不支持的Api"），
+   * 为什么走 CDN：协议端没有通用头像接口（`get_qq_avatar` 在多数版本回"不支持的Api"），
    * `get_group_member_info` / `get_friend_list` 里也都没有头像字段。QQ 头像是公开的：
    * `https://q1.qlogo.cn/g?b=qq&nk=<QQ>&s=640`（实测 200 + JPEG）。
    *

@@ -36,7 +36,7 @@ const DEFAULT_LINES = [
 ]
 /** 模型模式默认风格要求（配置里 modelPrompt 为空时用） */
 const DEFAULT_MODEL_PROMPT = '用你平时在群里说话的口吻，写一句欢迎语：短一点、带点情绪，别像客服模板。'
-/** 图片池只认这些后缀（按扩展名筛；NapCat 发本地图用绝对路径） */
+/** 图片池只认这些后缀（按扩展名筛；协议端发本地图用绝对路径） */
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
 /** 群名缓存 TTL（取不到也退避这么久，别每条通知都打 API） */
 const GROUP_NAME_TTL_MS = 5 * 60 * 1000

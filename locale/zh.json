@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "QQ 机器人",
-    "description": "通用 QQ 机器人插件：微内核 + 可插拔子插件，经 NapCat / OneBot v11 运行在 DeepSeek Harness 进程内，支持 Linux 与 Windows。"
+    "description": "通用 QQ 机器人插件：微内核 + 可插拔子插件，经 OneBot v11 协议端运行在 DeepSeek Harness 进程内，支持 Linux 与 Windows。"
   }
 }

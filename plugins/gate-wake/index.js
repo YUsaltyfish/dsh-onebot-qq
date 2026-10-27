@@ -339,16 +339,16 @@ async function handlePoke(bot, ev, notice) {
 const RECALL_INTERNAL = /Timeout|NTEvent|EventRet|decode failed|recallMsg|result\s*[:=]?\s*7/i
 
 /**
- * 撤回失败时给群里看的话术：**绝不回显 NapCat 原始报错**（NTEvent/EventRet/decode failed…）。
+ * 撤回失败时给群里看的话术：**绝不回显协议端原始报错**（NTEvent/EventRet/decode failed…）。
  * 2026-10-23 15:37 线上事故：适配器把 `wording` 原样拼进 `res.msg`，gate-wake 又原样贴进群里。
  */
 function recallFailureNote(res) {
   const raw = String(res?.raw || '')
   const msg = String(res?.msg || '')
   if (RECALL_INTERNAL.test(raw) || RECALL_INTERNAL.test(msg)) {
-    return '撤回没成功：撤回接口超时/返回异常（这条可能已经过期、被删了，或 NapCat 临时抽风）'
+    return '撤回没成功：撤回接口超时/返回异常（这条可能已经过期、被删了，或协议端临时抽风）'
   }
-  if (/超时/.test(msg)) return '撤回没成功：撤回接口超时（这条可能已经过期，或 NapCat 临时故障）'
+  if (/超时/.test(msg)) return '撤回没成功：撤回接口超时（这条可能已经过期，或协议端临时故障）'
   if (/权限|permission|denied/i.test(msg)) return '撤回没成功：本机没有权限撤这条消息'
   if (msg && msg.length <= 80 && !/[\n{}]/.test(msg)) return msg // 适配器给的人话
   return '无法撤回（可能不是本机能撤的消息、没权限，或超过时限）'

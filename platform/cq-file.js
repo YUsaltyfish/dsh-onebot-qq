@@ -1,5 +1,5 @@
 /**
- * platform/cq-file.js — OneBot/NapCat 的 CQ 码与本地文件引用（唯一实现）。
+ * platform/cq-file.js — OneBot/协议端的 CQ 码与本地文件引用（唯一实现）。
  *
  * 背景：
  *   · CQ 码参数用逗号分隔，路径里出现裸逗号会把整条消息拆坏；

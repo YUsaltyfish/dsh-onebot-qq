@@ -10,7 +10,7 @@
  *  2. **端口占用必须优雅降级**：端口很可能已被旧进程占着（并跑模式）。EADDRINUSE 只记一条
  *     info，绝不 throw —— 兼容层起不来是小事，内核崩了是大事。
  *  3. 出站一律走 `kernel.deliver` / `kernel.sendMedia`（脱敏 / 长度 / 留档唯一实现），
- *     这里**不做**第二份脱敏、也不裸调 NapCat。
+ *     这里**不做**第二份脱敏、也不裸调协议端。
  *
  * 平台边界：图片白名单根由宿主传入（实例配置 `compat.imageRoots` + 临时目录），
  * 判定只走 `platform/paths.js` 的 `isInsidePath()`；媒体码只走 `platform/cq-file.js`。
@@ -148,7 +148,7 @@ export function startCompatServer({ host = '127.0.0.1', port = 3971, kernel, log
 
       return send(404, { ok: false, error: `未知端点: ${req.method} ${p}` })
     } catch (e) {
-      // 业务错（target 格式 / 超长 / NapCat 失败）按旧口径回 400 + 可读原因，脚本照旧判 ok
+      // 业务错（target 格式 / 超长 / 协议端失败）按旧口径回 400 + 可读原因，脚本照旧判 ok
       send(400, { ok: false, error: String(e?.message || e) })
     }
   })

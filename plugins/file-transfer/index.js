@@ -49,9 +49,9 @@ function destName(name) {
 
 /**
  * 取入站文件字节。`ev.files` 给 `{ name, url, size, fileId }`：
- *   · url 是服务器本地缓存路径（NapCat 常直接给）→ 直接读；
+ *   · url 是服务器本地缓存路径（协议端常直接给）→ 直接读；
  *   · url 是 http 直链 → 下载；
- *   · 只有 fileId 时回 NapCat 溯源（url 会过期，fileId 才是把手）；
+ *   · 只有 fileId 时回协议端溯源（url 会过期，fileId 才是把手）；
  *   · 都拿不到 → 抛错（如实把失败写进 hint，比静默吞掉强：模型能看出文件没到）。
  */
 async function fetchFileBytes(bot, f) {
@@ -62,7 +62,7 @@ async function fetchFileBytes(bot, f) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return Buffer.from(await res.arrayBuffer())
   }
-  // 溯源 NapCat 本地缓存；适配器把这个能力叫 getFile（只读视图已暴露）
+  // 溯源协议端本地缓存；适配器把这个能力叫 getFile（只读视图已暴露）
   if (f?.fileId && typeof bot.napcat?.getFile === 'function') {
     const info = await bot.napcat.getFile(f.fileId)
     const local = info?.file

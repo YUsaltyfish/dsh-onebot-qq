@@ -394,7 +394,7 @@ function extractCardUrl(seg) {
  * 把一条合并转发（get_forward_msg 的返回）渲染成可读文本。
  *
  * 为什么单独一个函数：转发是**嵌套结构**（一条转发里还有发送者、时间、以及任意段），
- * 内联在 extractText 里会和主流程互相纠缠；而且它是**纯函数**，测试不用起 NapCat。
+ * 内联在 extractText 里会和主流程互相纠缠；而且它是**纯函数**，测试不用起协议端。
  *
  * 取舍：
  *   · 每条前缀 `[昵称(QQ:号)]: `（跟群上文格式一致，模型认这个形状）
@@ -483,7 +483,7 @@ export function extractText(message, selfId) {
     } else if (type === 'record') parts.push('[语音]')
     else if (type === 'video') parts.push('[视频]')
     else if (type === 'file') {
-      // fileId 是回 NapCat 溯源本地文件的唯一把手（url 会过期）；name/url/size 按契约给插件用
+      // fileId 是回协议端溯源本地文件的唯一把手（url 会过期）；name/url/size 按契约给插件用
       const fileId = String(d.file_id ?? d.file ?? '')
       if (fileId) files.push({ name: String(d.name ?? ''), url: String(d.url ?? ''), size: Number(d.file_size ?? 0) || 0, fileId })
       parts.push('')
@@ -496,7 +496,7 @@ export function extractText(message, selfId) {
       if (url) cards.push(url)
       parts.push('')
     } else if (type === 'forward') {
-      // 合并转发。⚠️ 真机实测：NapCat 的 get_msg 已经把转发内容**内联**在
+      // 合并转发。⚠️ 真机实测：协议端的 get_msg 已经把转发内容**内联**在
       //   data.content 里了，而 get_forward_msg(id) 对这类消息常直接失败
       //   （"消息已过期或者为内层消息"）。所以先把 inline 内容带出去，别白跑一趟。
       // 纯函数不碰网络：这里只做结构整理，取不到才由 index.js 回退请求。

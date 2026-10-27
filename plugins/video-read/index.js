@@ -30,7 +30,7 @@ import fs from 'node:fs'
 /**
  * 从原始段里挖视频。
  *
- * OneBot v11 规范是 `{type:'video', data:{file, file_id, url, path}}`，但 **NapCat 实际给的字段
+ * OneBot v11 规范是 `{type:'video', data:{file, file_id, url, path}}`，但 **协议端实际给的字段
  * 不一定齐**：`file` 可能是个文件名、`file_id` 可能空、`url` 可能没有。所以这里按优先级收集
  * **所有可能的把手**，交给下游 resolveLocal 逐个试 —— 而不是只取第一个非空就返回。
  * @returns {{file:string, fileId:string, url:string, local:string, keys:string[]}|null} keys = 实际拿到值的字段名（排障用）
@@ -212,7 +212,7 @@ export default {
         //    那个阶段内核是 fire-and-forget 的，不等 async 完成，会出现
         //    "before-turn 判定没有视频段 → 0.5 秒后才反查回来"的时序 bug（踩过）。
         if (ev.replyToId && typeof bot.napcat?.msgById === 'function') {
-          // 每条引用都会走到这里：不是视频的结论按 messageId 缓存 100 条，别反复打 NapCat。
+          // 每条引用都会走到这里：不是视频的结论按 messageId 缓存 100 条，别反复打协议端。
           const noVideo = (ev._scratch['video-read:noVideo'] ||= new Set())
           if (noVideo.has(String(ev.replyToId))) return
           try {
@@ -314,7 +314,7 @@ export default {
       }
     })
 
-    /** 视频段 → 请求参数：拿本地路径（优先 NapCat 溯源，url 会过期，fileId 才是把手） */
+    /** 视频段 → 请求参数：拿本地路径（优先协议端溯源，url 会过期，fileId 才是把手） */
     async function videoRequest(ev, seg) {
       const cands = [seg.local, seg.file].filter(Boolean)
       for (const c of cands) {
@@ -324,7 +324,7 @@ export default {
           }
         } catch { /* 忽略 */ }
       }
-      // NapCat 溯源：**每个 handle 都试** —— file / file_id / url 在 NapCat 眼里是同一个东西的
+      // 协议端溯源：**每个 handle 都试** —— file / file_id / url 在协议端眼里是同一个东西的
       // 不同叫法，哪个能用取决于版本。只试 seg.fileId || seg.file 会漏掉"file 有值但其实是文件名"的情况。
       for (const id of [seg.fileId, seg.file].filter(Boolean)) {
         if (typeof bot.napcat?.getFile !== 'function') break
@@ -346,7 +346,7 @@ export default {
       }
       if (/^https?:\/\//.test(seg.url || '')) return { url: seg.url, platform: 'qq' }
       // 走到这里 = 所有把手都试过还拿不到。留一笔 warn（不是 debug），真机排障要靠它：
-      // 会直接告诉你 NapCat 给的段里到底有什么字段。
+      // 会直接告诉你协议端给的段里到底有什么字段。
       bot.log.warn(`[看视频] 拿不到视频文件：keys=[${(seg.keys || []).join(',')}] `
         + `file=${String(seg.file || '-').slice(0, 40)} id=${String(seg.fileId || '-').slice(0, 40)}`)
       return null

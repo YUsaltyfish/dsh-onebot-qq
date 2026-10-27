@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "QQ Bot",
-    "description": "General-purpose QQ bot for DeepSeek Harness: a microkernel with pluggable sub-plugins over NapCat / OneBot v11, on Linux and Windows."
+    "description": "General-purpose QQ bot for DeepSeek Harness: a microkernel with pluggable sub-plugins over any OneBot v11 backend, on Linux and Windows."
   }
 }

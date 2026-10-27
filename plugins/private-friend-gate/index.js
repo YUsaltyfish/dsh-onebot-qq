@@ -12,12 +12,12 @@
  *
  *   ① **`pre-gate` 里只查表，绝不 await 网络**。
  *      `pre-gate` 是 fail-closed 阶段（`kernel/state-pipeline.js:159-163`：插件抛错 = 这条消息被拦下）。
- *      如果在里面 await `napcat.friendList()`，NapCat 一超时就抛错 → **全部私聊被一起静默**，
+ *      如果在里面 await `napcat.friendList()`，协议端一超时就抛错 → **全部私聊被一起静默**，
  *      正是旧版特意避免的事故。所以：`passive-tap`（fail-open）负责刷新，`pre-gate` 只做纯查表。
  *
  *   ② **好友列表为空 = 拉取失败，按"不知道"放行**。
  *      `napcat.friendList()` 在异常时 catch 掉了、返回 `[]`（`kernel/napcat-adapter.js:421-431`），
- *      跟"真的没有好友"分不开。空列表一律不拦人 —— 宁可放过，也不因为 NapCat 抖一下就把所有人拉黑。
+ *      跟"真的没有好友"分不开。空列表一律不拦人 —— 宁可放过，也不因为协议端抖一下就把所有人拉黑。
  *
  * 已知能力缺口（不是 bug，是内核没透出来）：
  *   旧版第一道闸是私聊事件的 `sub_type !== 'friend'`（临时会话是 `"group"`）。
@@ -30,7 +30,7 @@
 
 /** 好友列表缓存 TTL：与旧机器人一致（10 分钟） */
 const CACHE_TTL_MS = 10 * 60 * 1000
-/** 拉取失败后的重试间隔：别把 NapCat 接口打爆 */
+/** 拉取失败后的重试间隔：别把协议端接口打爆 */
 const RETRY_MS = 60 * 1000
 /** 缓存"彻底过期"的上限：超过 3 个 TTL 还没刷新成功，就当不知道（放行） */
 const STALE_MS = CACHE_TTL_MS * 3
@@ -75,13 +75,13 @@ export default {
     failOpen: {
       type: 'bool', default: true, group: '门禁',
       label: '好友列表拉不到时放行',
-      hint: '建议保持开。关掉的话，NapCat 一卡住、好友列表拉不到，**所有私聊都会被静默**——'
+      hint: '建议保持开。关掉的话，协议端一卡住、好友列表拉不到，**所有私聊都会被静默**——'
         + '那是最难排查的故障。',
     },
     cacheMin: {
       type: 'int', default: 10, min: 1, max: 120, step: 1, group: '门禁',
       label: '好友列表缓存（分钟）',
-      hint: '隔多久重新拉一次 NapCat 的好友列表。太短会给 NapCat 添压力，太长则刚加的好友要等一会儿才认。',
+      hint: '隔多久重新拉一次协议端的好友列表。太短会给协议端添压力，太长则刚加的好友要等一会儿才认。',
     },
   },
 

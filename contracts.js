@@ -32,7 +32,7 @@ export const STAGES = ['pre-gate', 'passive-tap', 'intercept', 'wake', 'before-t
  *    1. extractAt   —— 抽 `[AT:名字]` / `[AT:qq=号]`（必须在脱敏前！）
  *    2. sanitize    —— 六项脱敏 + toWellFormedText（唯一豁免：主人私聊）
  *    3. decorate    —— ← 插件挂这里（引用锚定夺 / 长文卡片 / 拆条）
- *    4. send+archive—— 发 NapCat + 写 out 留档
+ *    4. send+archive—— 发协议端 + 写 out 留档
  */
 export const OUTBOUND_PHASE = 'decorate'
 

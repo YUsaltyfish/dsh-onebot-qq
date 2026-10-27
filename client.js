@@ -285,7 +285,7 @@ window.__ModuleLoader__.load({
 					? h('div', {
 						key: 'qqoffline',
 						style: { padding: '8px 10px', borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13, marginBottom: 8, lineHeight: 1.5 },
-					}, '🔴 QQ 账号已掉线（OneBot 连接还在）：机器人现在收发不到消息。请打开协议端 WebUI 重新登录（NapCat 默认 :6099，SnowLuma 默认 :5099）；'
+					}, '🔴 QQ 账号已掉线（OneBot 连接还在）：机器人现在收发不到消息。请打开协议端自带 WebUI 重新登录（端口见各实现文档，本机在用的 SnowLuma 默认 :5099）；'
 						+ (health.qqLoginError ? `原因：${health.qqLoginError}` : '登录后本页约 5 秒自动恢复。') + ' 也可点「检查 QQ 登录」立即重试。')
 					: null,
 
@@ -457,12 +457,12 @@ window.__ModuleLoader__.load({
 					h('button', { key: 't', style: S.btn, disabled: busy || busyLocal, onClick: test, title: '测试内核到 OneBot 协议端的连接，并主动 get_login_info 检查 QQ 是否在线' }, '🔌 测试连接 / 检查登录'),
 				]),
 				h('div', { key: 'hint', style: S.msg }, !linked
-					? 'OneBot 连接未建立：先检查协议端（NapCat / SnowLuma）是否启动、地址/token 是否正确。'
+					? 'OneBot 连接未建立：先检查协议端是否启动、地址/token 是否正确。'
 					: online
 						? 'QQ 已登录，机器人可以收发消息。状态与总览页同一来源，约 5 秒自动刷新。'
 						: loginUnknown
 							? '正在检查 QQ 登录状态…（每 30 秒自动检查一次，也可点上面按钮立即检查）'
-							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用协议端自带的 WebUI 扫码 / 密码登录（NapCat 默认 http://127.0.0.1:6099、SnowLuma 默认 http://127.0.0.1:5099）；登录后本页与总览会自动更新。`),
+							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用协议端自带的 WebUI 扫码 / 密码登录（端口见各实现文档，本机在用的 SnowLuma 默认 http://127.0.0.1:5099）；登录后本页与总览会自动更新。`),
 				note ? h('div', { key: 'note', style: S.msg }, note) : null,
 				h(SwitchGroup, Object.assign({}, props, { key: 'sw', group: 'OneBot 连接' })),
 			])

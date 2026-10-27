@@ -268,7 +268,7 @@ async function checkNapcat(kernel, runtime) {
     : `未连接：${toStr(r.error) || 'OneBot 未连接'}${where ? `；${where}` : ''}`
   return makeCheck(
     'napcat', 'OneBot 连接', true, ok, detail,
-    ok ? '' : '确认协议端（NapCat / SnowLuma）已启动并开启 OneBot v11 HTTP（默认 3000）/ 正向 WS（默认 3001）；在控制台「OneBot 连接」页核对地址/token 后点「测试 OneBot 连接」',
+    ok ? '' : '确认 OneBot 协议端已启动并开启 OneBot v11 HTTP（常见默认 3000）/ 正向 WS（常见默认 3001）；在控制台「OneBot 连接」页核对地址/token 后点「测试 OneBot 连接」',
   )
 }
 

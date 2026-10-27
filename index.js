@@ -2,7 +2,7 @@
  * index.js — `dsh-onebot-qq` 的宿主入口（**整条链路唯一的装配处**）。
  *
  * 结构：
- *   NapCat WS 帧 → normalizeEvent → Pipeline(5 阶段) → 决定是否进模型
+ *   协议端 WS 帧 → normalizeEvent → Pipeline(5 阶段) → 决定是否进模型
  *                                          └→ DshDriver.prompt → agent 一轮
  *   agent 调原生工具 → deliver()（唯一出站口：抽 [AT:] → 脱敏 → 插件 decorate → 发 + 留档）
  *
@@ -253,7 +253,7 @@ export async function apply(ctx, bundleConfig = {}) {
     if (onlyAdminQqMissing) {
       configReady = false
       log.warn('实例配置未完成（缺 adminQq）：已进入**待配置模式** —— 控制台与工具可用、暂不连接 NapCat；'
-        + '请在 设置 → QQ 控制台 → 新手向导 里填写「主人 QQ」和 NapCat 地址并保存，配置就绪后会自动连接。'
+        + '请在 设置 → QQ 控制台 → 新手向导 里填写「主人 QQ」和 OneBot 协议端地址并保存，配置就绪后会自动连接。'
         + `（配置文件：${configPath}）`)
     } else {
       throw new Error(`QQ 机器人配置未就绪：${errors.join('；')}（配置文件：${configPath}）`)
@@ -819,7 +819,7 @@ export async function apply(ctx, bundleConfig = {}) {
     // ⚠️ 关键：QQ 里「发转发」和「@它」**必然是两条消息**（客户端限制），第二条只能引用第一条。
     //    before-turn 跑在"@它"那条上，它的 _scratch.forwards 是空的 —— 转发 id 在被引消息里。
     //    所以这里必须**反查一次被引消息**把 forwards 挖出来。这跟 video-read 拿被引视频同构。
-    // forwards 现在是 [{ id, content }]：content 是 NapCat 在 get_msg 里已经内联好的转发正文
+    // forwards 现在是 [{ id, content }]：content 是协议端在 get_msg 里已经内联好的转发正文
     // （真机上 get_forward_msg(id) 常直接失败："消息已过期或者为内层消息"，所以内联才是主路径）
     let fwdItems = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
     if (ev.wake && !fwdItems.length && ev.replyToId) {
@@ -1253,8 +1253,8 @@ export async function apply(ctx, bundleConfig = {}) {
    * 应用一份新配置。
    * 两种情形：
    *   · 配置完整 → 正常热应用，configReady=true；若此前是待配置模式则自动连接一次。
-   *   · **只缺 adminQq**（新手先填 NapCat 地址、后填主人 QQ 的中间态）→ 进入/保持待配置模式：
-   *     其余配置（NapCat 地址/token、生图凭据、节奏…）**照常热应用**（否则「测试 NapCat 连接」会用旧地址），
+   *   · **只缺 adminQq**（新手先填协议端地址、后填主人 QQ 的中间态）→ 进入/保持待配置模式：
+   *     其余配置（协议端地址/token、生图凭据、节奏…）**照常热应用**（否则「测试 OneBot 连接」会用旧地址），
    *     但 configReady=false、不自动连接；返回 `{ok:true,pending:true,...}` 而不是抛错。
    *     其它必填错误仍然抛。
    */
@@ -1370,7 +1370,7 @@ export async function apply(ctx, bundleConfig = {}) {
    */
   kernel.checkNapcat = async () => {
     const t0 = Date.now()
-    // 先主动查一次登录状态：NapCat WS 连着但 QQ 掉线时，只有 get_login_info 能发现
+    // 先主动查一次登录状态：协议端 WS 连着但 QQ 掉线时，只有 get_login_info 能发现
     const login = await napcat.checkLogin?.({ force: true }).catch((e) => ({ ok: null, error: e?.message || String(e) }))
     const health = napcat.health?.() || {}
     const base = {

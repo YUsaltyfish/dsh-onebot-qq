@@ -118,7 +118,7 @@ function printHelp() {
                     --force            覆盖已存在的 config.json（先备份）
   doctor          环境与配置自检（✅/⚠️/❌；有 ❌ 时退出码 1）
                     --data-dir <dir>
-                    --no-net           跳过 NapCat 端口探测
+                    --no-net           跳过 OneBot 协议端端口探测
   import-legacy   旧版 config.json → v2 实例配置
                     <旧配置路径>       （必填）
                     --out <file>       输出路径（默认 <dataDir>/config.json）
@@ -245,8 +245,8 @@ function cmdInit(flags) {
 下一步（推荐：控制台新手向导，不用手改 JSON）：
   1) 安装/启动插件：DSH 插件管理器安装本包（或 dsh plugin --profile web add <tgz|目录|git URL>），
      然后启动/重启 dsh web。
-  2) 打开 设置 → QQ 控制台 →「新手向导」：填主人 QQ + NapCat 地址，
-     点「测试 NapCat 连接」→ 保存后自动连接（无需重启）。
+  2) 打开 设置 → QQ 控制台 →「新手向导」：填主人 QQ + OneBot 协议端地址，
+     点「测试 OneBot 连接」→ 保存后自动连接（无需重启）。
   3) 也可以手改实例配置：${configPath}
      （adminQq / napcat.wsUrl / napcat.httpUrl；缺 adminQq 时插件进入「待配置模式」，控制台仍可打开）
   4) 自检：
@@ -394,12 +394,12 @@ async function cmdDoctor(flags) {
     add(false, '临时目录可写', e.message)
   }
 
-  // 6) NapCat 端口探测（可选）
+  // 6) OneBot 协议端端口探测（可选）
   if (loaded && !noNet) {
     const nap = loaded.runtime.napcat || {}
     for (const [label, url, defPort] of [
-      ['NapCat WS 端口', nap.wsUrl, 3001],
-      ['NapCat HTTP 端口', nap.httpUrl, 3000],
+      ['OneBot WS 端口', nap.wsUrl, 3001],
+      ['OneBot HTTP 端口', nap.httpUrl, 3000],
     ]) {
       if (!url) {
         add(false, label, '未配置')
@@ -408,10 +408,10 @@ async function cmdDoctor(flags) {
       // eslint-disable-next-line no-await-in-loop
       const r = await probeEndpoint(url, defPort)
       if (r.ok) add(true, label, r.detail)
-      else warn(label, `${r.detail}（NapCat 未启动时正常；启动后重跑）`)
+      else warn(label, `${r.detail}（协议端未启动时正常；启动后重跑）`)
     }
   } else if (!noNet) {
-    warn('NapCat 端口探测', '配置不可用，跳过')
+    warn('OneBot 协议端端口探测', '配置不可用，跳过')
   }
 
   // 输出清单
