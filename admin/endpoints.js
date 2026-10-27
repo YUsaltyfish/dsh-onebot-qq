@@ -74,7 +74,7 @@ async function safeAsync(fn, fallback = null) {
   try { return await fn() } catch { return fallback }
 }
 
-/** Promise 超时兜底：NapCat 挂掉时 status 不能被群列表拖十几秒。 */
+/** Promise 超时兜底：协议端挂掉时 status 不能被群列表拖十几秒。 */
 function withTimeout(promise, ms) {
   let timer = null
   const timeout = new Promise((_, reject) => {
@@ -366,14 +366,14 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   /**
-   * 测一次 NapCat 连接：优先内核 `kernel.checkNapcat()`（A 提供）；
+   * 测一次 OneBot 协议端连接：优先内核 `kernel.checkNapcat()`（A 提供，函数名沿用旧名）；
    * 老内核退回「health + get_login_info（5s 超时）」。
    */
   async function checkNapcatNow() {
     if (typeof kernel?.checkNapcat === 'function') {
       const r = await safeAsync(() => kernel.checkNapcat(), null)
       if (r && typeof r === 'object') return r
-      return { ok: false, linked: false, error: 'NapCat 自检失败（checkNapcat 抛错，详见内核日志）' }
+      return { ok: false, linked: false, error: 'OneBot 连接自检失败（checkNapcat 抛错，详见内核日志）' }
     }
     const health = safe(() => kernel?.napcat?.health?.(), {}) || {}
     const base = {
@@ -383,7 +383,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       selfId: health.selfId ?? null,
       nickname: toStr(health.selfNickname),
     }
-    if (!base.linked) return { ok: false, ...base, error: 'NapCat 未连接（检查 NapCat 是否启动、WS 地址/token 是否正确）' }
+    if (!base.linked) return { ok: false, ...base, error: 'OneBot 未连接（检查协议端是否启动、WS 地址/token 是否正确）' }
     const t0 = Date.now()
     try {
       if (typeof kernel?.napcat?.wsApi !== 'function') return { ok: true, ...base, latencyMs: 0 }
@@ -397,7 +397,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         latencyMs: Date.now() - t0,
       }
     } catch (e) {
-      return { ok: false, ...base, latencyMs: Date.now() - t0, error: toStr(e?.message) || 'NapCat 无响应' }
+      return { ok: false, ...base, latencyMs: Date.now() - t0, error: toStr(e?.message) || '协议端无响应' }
     }
   }
 
@@ -427,7 +427,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
   }
 
-  /** NapCat 配置快照（token 只报"有没有填"，不回显）。 */
+  /** 协议端连接配置快照（token 只报"有没有填"，不回显）。 */
   function napcatStateOf(raw, health) {
     const nap = isPlainObject(raw?.napcat) ? raw.napcat : {}
     return {
@@ -460,8 +460,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         hint: adminQq > 0 ? `已填 ${adminQq}` : '在「群聊」页顶部填上你的 QQ（必填）',
       },
       {
-        id: 'napcat', label: 'NapCat 连接', required: true, ok: napOk,
-        hint: napOk ? '已连接' : '在「NapCat 连接」页填地址 → 点「测试 NapCat 连接」',
+        id: 'napcat', label: 'OneBot 连接', required: true, ok: napOk,
+        hint: napOk ? '已连接' : '在「OneBot 连接」页填地址 → 点「测试 OneBot 连接」',
       },
       {
         id: 'persona', label: '人设', required: true, ok: Boolean(persona?.current),
@@ -564,7 +564,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
     const services = hasOps(opsRef, 'systemdProbe') ? normalizeServiceProbe(await opsRef.systemdProbe()) : null
 
-    // 新手引导 / 连接状态（契约 §3.2）：路径、配置完成度、NapCat、生图（key 永不回显）
+    // 新手引导 / 连接状态（契约 §3.2）：路径、配置完成度、OneBot 连接、生图（key 永不回显）
     const paths = pathsOf()
     const imagegen = imagegenStateOf(raw)
     const napcat = napcatStateOf(raw, napcatHealth)
@@ -1319,7 +1319,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
     }
 
-    // ── 新手引导：NapCat 连接自检 / 重连 ────────────────────────
+    // ── 新手引导：OneBot 连接自检 / 重连 ────────────────────────
     if (id === 'napcat-check') {
       const result = await checkNapcatNow()
       const ok = result.ok !== false
@@ -1327,10 +1327,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const detail = result.latencyMs != null ? `（${result.latencyMs}ms）` : ''
       return {
         ok, id, ...(isPlainObject(result) ? result : {}),
-        error: ok ? undefined : (result.error || 'NapCat 未连接'),
+        error: ok ? undefined : (result.error || 'OneBot 未连接'),
         message: ok
-          ? `✅ NapCat 连接正常${detail}${who ? `：${who}` : ''}`
-          : `NapCat 未连接：${result.error || '未知原因'}`,
+          ? `✅ OneBot 连接正常${detail}${who ? `：${who}` : ''}`
+          : `OneBot 未连接：${result.error || '未知原因'}`,
       }
     }
 
@@ -1343,8 +1343,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       return {
         ok: true, id, ...(isPlainObject(health) ? health : {}),
         message: linked
-          ? '✅ 已重新连接 NapCat'
-          : '⚠️ 重连已发起，但当前仍未连接 —— 检查 NapCat 是否启动、WS 地址/token 是否正确（日志里有重连原因）',
+          ? '✅ 已重新连接 OneBot'
+          : '⚠️ 重连已发起，但当前仍未连接 —— 检查协议端是否启动、WS 地址/token 是否正确（日志里有重连原因）',
       }
     }
 

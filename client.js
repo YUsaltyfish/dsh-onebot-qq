@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
 		// ═══════════ 页内标签页（2026-10-18 起：一项功能一页）═══════════
 		// 固定页：总览 / 运维 / 群聊 / 子插件 / 群记忆；
 		// 功能页：后端 CONTROLS 的每个 group 自动成一页（顺序 = 后端首次出现的顺序）——
-		//   现在 = NapCat 连接 / 消息设置 / 主动接话 / 回话 / 生图 / 表情包 / 链接解析。
+		//   现在 = OneBot 连接 / 消息设置 / 主动接话 / 回话 / 生图 / 表情包 / 链接解析。
 		//   ⇒ 以后加一组开关：group 写新名字就自动多一页，前端不用改。
 		// PERSONA_GROUPS（默认空）：如有分组要跟着「人设」显示在总览页，由 schema.personaGroups 指定。
 		// 数据（schema / status / msg / busy / confirmBox）由**外壳统一持有**再往下传：
@@ -272,26 +272,26 @@ window.__ModuleLoader__.load({
 			const onboarding = Array.isArray(status.onboarding) ? status.onboarding : []
 			const fmtCheck = (ts) => { try { return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) } catch { return '' } }
 			return h('div', null, [
-				// ═══ 待配置模式提示条（首次安装还没填主人 QQ / NapCat 时最醒目）═══
+				// ═══ 待配置模式提示条（首次安装还没填主人 QQ / 协议端时最醒目）═══
 				(meta && meta.configReady === false)
 					? h('div', {
 						key: 'needcfg',
 						style: { padding: '8px 10px', borderRadius: 8, background: '#fef3c7', color: '#92400e', fontSize: 13, marginBottom: 8, lineHeight: 1.5 },
-					}, '⚠️ 还没完成必填配置（主人 QQ / NapCat），按下面清单填完即可')
+					}, '⚠️ 还没完成必填配置（主人 QQ / OneBot 协议端），按下面清单填完即可')
 					: null,
 
-				// ═══ QQ 掉线提醒：NapCat WS 还连着，但 QQ 服务端往返探测失败（get_stranger_info）═══
+				// ═══ QQ 掉线提醒：OneBot WS 还连着，但 QQ 服务端往返探测失败（get_stranger_info）═══
 				(health.napcatLinked && health.qqLoggedIn === false)
 					? h('div', {
 						key: 'qqoffline',
 						style: { padding: '8px 10px', borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13, marginBottom: 8, lineHeight: 1.5 },
-					}, '🔴 QQ 账号已掉线（NapCat WS 还连着）：机器人现在收发不到消息。请打开 NapCat WebUI 重新登录；'
+					}, '🔴 QQ 账号已掉线（OneBot 连接还在）：机器人现在收发不到消息。请打开协议端 WebUI 重新登录（NapCat 默认 :6099，SnowLuma 默认 :5099）；'
 						+ (health.qqLoginError ? `原因：${health.qqLoginError}` : '登录后本页约 5 秒自动恢复。') + ' 也可点「检查 QQ 登录」立即重试。')
 					: null,
 
 				h('div', { style: S.row, key: 'hc' }, [
 					h('span', { style: S.badge(health.dshLinked), key: 'd' }, `DSH ${health.dshLinked ? '已连' : '断开'}`),
-					h('span', { style: S.badge(health.napcatLinked && !health.napcatStale), key: 'n' }, `NapCat ${health.napcatLinked && !health.napcatStale ? '在线' : '异常'}`),
+					h('span', { style: S.badge(health.napcatLinked && !health.napcatStale), key: 'n' }, `OneBot ${health.napcatLinked && !health.napcatStale ? '在线' : '异常'}`),
 					h('span', {
 						style: S.badge(health.qqLoggedIn === true), key: 'q',
 						title: health.qqLoginError || '',
@@ -300,7 +300,7 @@ window.__ModuleLoader__.load({
 						: 'QQ 未知'),
 					h('button', {
 						key: 'ql', style: S.btn, disabled: busy,
-						title: '主动调用 get_stranger_info 验证 QQ 是否真的在线（NapCat 缓存的登录信息可能过期）',
+						title: '主动调用 get_stranger_info 验证 QQ 是否真的在线（协议端缓存的登录信息可能过期）',
 						onClick: () => run('检查 QQ 登录', () => call('action', { id: 'napcat-check' })),
 					}, '检查 QQ 登录'),
 					health.qqLoginCheckedAt
@@ -418,9 +418,9 @@ window.__ModuleLoader__.load({
 			])
 		}
 
-		// ═══════════ 标签页②：NapCat 连接（状态 + 连接测试 + 连接配置；登录/扫码交给 NapCat 自带 WebUI）═══════════
+		// ═══════════ 标签页②：OneBot 连接（状态 + 连接测试 + 连接配置；登录/扫码交给协议端自带 WebUI）═══════════
 		// 状态与总览**同一来源**（ConsoleShell 的 status，5 秒轮询）。
-		function NapCatTab(props) {
+		function OneBotTab(props) {
 			const { call, refresh, status, busy } = props
 			const { useState } = react
 			const [note, setNote] = useState('')
@@ -450,21 +450,21 @@ window.__ModuleLoader__.load({
 				h('div', { style: S.row, key: 'hd' }, [
 					h('span', { style: S.badge(linked), key: 'br' }, `内核 ${linked ? '已连接' : '断开'}`),
 					h('span', { style: S.badge(online), key: 'qq', title: loginErr || '' }, !linked
-						? 'QQ 未知（NapCat 未连接）'
+						? 'QQ 未知（OneBot 未连接）'
 						: online
 							? `QQ 已登录${selfId ? `：${nick || selfId}${nick ? `（${selfId}）` : ''}` : ''}`
 							: (loginUnknown ? 'QQ 检查中' : 'QQ 未登录/已掉线')),
-					h('button', { key: 't', style: S.btn, disabled: busy || busyLocal, onClick: test, title: '测试内核到 NapCat 的连接，并主动 get_login_info 检查 QQ 是否在线' }, '🔌 测试连接 / 检查登录'),
+					h('button', { key: 't', style: S.btn, disabled: busy || busyLocal, onClick: test, title: '测试内核到 OneBot 协议端的连接，并主动 get_login_info 检查 QQ 是否在线' }, '🔌 测试连接 / 检查登录'),
 				]),
 				h('div', { key: 'hint', style: S.msg }, !linked
-					? 'NapCat WS 未连接：先检查 NapCat 是否启动、地址/token 是否正确。'
+					? 'OneBot 连接未建立：先检查协议端（NapCat / SnowLuma）是否启动、地址/token 是否正确。'
 					: online
 						? 'QQ 已登录，机器人可以收发消息。状态与总览页同一来源，约 5 秒自动刷新。'
 						: loginUnknown
 							? '正在检查 QQ 登录状态…（每 30 秒自动检查一次，也可点上面按钮立即检查）'
-							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用 NapCat 自带 WebUI 扫码 / 密码登录（默认 http://127.0.0.1:6099，端口以你的 NapCat 配置为准）；登录后本页与总览会自动更新。`),
+							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用协议端自带的 WebUI 扫码 / 密码登录（NapCat 默认 http://127.0.0.1:6099、SnowLuma 默认 http://127.0.0.1:5099）；登录后本页与总览会自动更新。`),
 				note ? h('div', { key: 'note', style: S.msg }, note) : null,
-				h(SwitchGroup, Object.assign({}, props, { key: 'sw', group: 'NapCat 连接' })),
+				h(SwitchGroup, Object.assign({}, props, { key: 'sw', group: 'OneBot 连接' })),
 			])
 		}
 
@@ -830,7 +830,7 @@ window.__ModuleLoader__.load({
 
 		// 页内标签页定义：固定页（总览 / 运维 / 群聊 / 子插件 / 群记忆）+ 后端每个 group 一页。
 		// 顺序 = CONTROLS 里 group 首次出现的顺序；「群聊」组不单独成页（跟群卡片一起画在「群聊」页里）；
-		// 「NapCat 连接」= NapCatTab（状态/测试 + 连接配置），「入群欢迎」= WelcomeTab（都不是通用 GroupTab）；
+		// 「OneBot 连接」= OneBotTab（状态/测试 + 连接配置），「入群欢迎」= WelcomeTab（都不是通用 GroupTab）；
 		// 「其他」固定排最后（权限/门禁/文件/发图/头像 五组并进去的杂项页）。
 		function tabDefs(schema) {
 			const groups = []
@@ -961,7 +961,7 @@ window.__ModuleLoader__.load({
 				: curTab.id === 'overview' ? h(TabOverview, { key: 'o', ...api })
 					: curTab.id === 'ops' ? h(OpsTab, { key: 'op', ...api })
 						: curTab.id === 'groups' ? h(TabGroups, { key: 'g', ...api })
-							: curTab.group === 'NapCat 连接' ? h(NapCatTab, Object.assign({}, api, { key: 'nc' }))
+							: curTab.group === 'OneBot 连接' ? h(OneBotTab, Object.assign({}, api, { key: 'nc' }))
 							: curTab.group === '入群欢迎' ? h(WelcomeTab, Object.assign({}, api, { key: 'wt' }))
 								: curTab.group === '主动接话' ? h(ReplyModeTab, Object.assign({}, api, { key: 'rm' }))
 									: curTab.group ? h(GroupTab, Object.assign({}, api, { key: 'gt', group: curTab.group }))

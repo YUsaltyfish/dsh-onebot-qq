@@ -1266,7 +1266,7 @@ export async function apply(ctx, bundleConfig = {}) {
     configReady = !pending
     kernel.configReady = configReady
     if (pending) {
-      log.warn('配置仍缺 adminQq：已先热应用其余配置（待配置模式），暂不连接 NapCat；'
+      log.warn('配置仍缺 adminQq：已先热应用其余配置（待配置模式），暂不连接 OneBot 协议端；'
         + '填好主人 QQ 后保存会自动连接。')
     }
     runtime = next
@@ -1310,7 +1310,7 @@ export async function apply(ctx, bundleConfig = {}) {
     }
     // 首次配置完成（待配置模式 → 已就绪）：按 bundle 引导项自动连接一次；失败只警告，控制台可手动重连
     if (!pending && !wasReady && bundleConfig.autoConnect !== false) {
-      napcat.connect().catch((e) => log.warn(`配置就绪后自动连接 NapCat 失败（可在控制台点「重新连接 NapCat」）: ${e.message}`))
+      napcat.connect().catch((e) => log.warn(`配置就绪后自动连接协议端失败（可在控制台点「重新连接 OneBot」）: ${e.message}`))
     }
     return {
       ok: true,
@@ -1363,7 +1363,7 @@ export async function apply(ctx, bundleConfig = {}) {
     return napcat.health()
   }
   /**
-   * 控制台「测试 NapCat 连接」：未连接直接给出原因；已连接用 `get_login_info` 实测一次（5s 超时），
+   * 控制台「测试 OneBot 连接」：未连接直接给出原因；已连接用 `get_login_info` 实测一次（5s 超时），
    * 顺便刷新 selfId / 昵称。**不 throw**（端点契约要求业务失败返回 {ok:false,error}）。
    * @returns {Promise<{ok:boolean, linked:boolean, stale:boolean, lastFrameAgoMs:number|null,
    *   selfId:number|null, nickname:string|null, latencyMs?:number, error?:string}>}
@@ -1384,12 +1384,12 @@ export async function apply(ctx, bundleConfig = {}) {
       qqLoginCheckedAt: health.qqLoginCheckedAt ?? null,
       qqLoginError: health.qqLoginError || '',
     }
-    if (!base.linked) return { ...base, error: 'NapCat 未连接' }
+    if (!base.linked) return { ...base, error: 'OneBot 未连接' }
     if (health.qqLoggedIn === false) {
       return {
         ...base,
         ok: false,
-        error: `QQ 未登录或已掉线：${health.qqLoginError || login?.error || 'NapCat 未返回登录账号'}`,
+        error: `QQ 未登录或已掉线：${health.qqLoginError || login?.error || '协议端未返回登录账号'}`,
         latencyMs: Date.now() - t0,
       }
     }
@@ -1497,7 +1497,7 @@ export async function apply(ctx, bundleConfig = {}) {
   if (configReady && bundleConfig.autoConnect !== false) {
     napcat.connect().catch((e) => log.error(`NapCat 连接失败: ${e.message}`))
   } else if (!configReady) {
-    log.warn('待配置模式：已跳过 NapCat 自动连接（填完 adminQq / NapCat 地址后自动连接，或在控制台手动重连）')
+    log.warn('待配置模式：已跳过协议端自动连接（填完 adminQq / 协议端地址后自动连接，或在控制台手动重连）')
   }
 
   // ── 能力服务（可选；外部插件 inject: ['qqBot'] 用） ─────────

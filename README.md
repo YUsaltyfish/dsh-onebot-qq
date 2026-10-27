@@ -60,7 +60,7 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 ## 快速开始（4 步）
 
 1. 协议端登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（NapCat 可空，**SnowLuma 必填**）。
-2. DSH 设置 →「QQ 控制台」→「NapCat 连接」页（页签名沿用 NapCat，**接 SnowLuma 也在这里填**）填地址/token → 点「测试 NapCat 连接」。
+2. DSH 设置 →「QQ 控制台」→「OneBot 连接」页（NapCat / SnowLuma 都填这里）填地址/token → 点「测试 OneBot 连接」。
 3. 「群聊」页顶部填**主人 QQ**（必填）→ 保存后自动连接。
 4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 

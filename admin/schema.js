@@ -88,32 +88,32 @@ export const CORE_CONTROLS = [
     hint: '必填：只有这个 QQ 的私聊豁免出口脱敏，群里的“主人指令”也按它判。改完热生效（下一条消息起）。',
   },
 
-  // ── NapCat 连接（OneBot v11）────────────────────────────────
+  // ── OneBot 连接（OneBot v11 协议端：NapCat / SnowLuma）──────
   {
-    key: 'info.napcat', group: 'NapCat 连接', type: 'info',
-    text: '分三步接上 NapCat（OneBot v11）：\n'
-      + '① 先在本机装好并启动 NapCat（QQ 登录保持在线）；\n'
-      + '② 在 NapCat 的配置里打开「WebSocket 服务端」（默认 ws://127.0.0.1:3001）和「HTTP 服务端」（默认 http://127.0.0.1:3000），有 token 就一并填到下面；\n'
-      + '③ 填好地址/token 后先让输入框失焦（离开输入框就会保存），再点「运维」页的「🔌 测试 NapCat 连接」：出现 ✅ 就说明通了（测的是已保存的配置）。\n'
-      + '⚠️ 两个地址都在同一台机器时用 127.0.0.1 即可；跨机器要把 127.0.0.1 换成 NapCat 那台机器的 IP，并确认防火墙放行端口。',
+    key: 'info.napcat', group: 'OneBot 连接', type: 'info',
+    text: '分三步接上 OneBot 协议端（NapCat / SnowLuma 等 OneBot v11 实现）：\n'
+      + '① 先在本机装好并启动协议端并登录 QQ（NapCat 会自己拉起 QQ；SnowLuma 需要你先开 QQ，它再注入，详见 docs/安装与卸载.md §二·2.2）；\n'
+      + '② 在协议端配置里打开「WebSocket 服务端」（默认 ws://127.0.0.1:3001）和「HTTP 服务端」（默认 http://127.0.0.1:3000）；有 token 就一并填到下面（SnowLuma 强制要 token，两个都要填）；\n'
+      + '③ 填好地址/token 后先让输入框失焦（离开输入框就会保存），再点「运维」页的「🔌 测试 OneBot 连接」：出现 ✅ 就说明通了（测的是已保存的配置）。\n'
+      + '⚠️ 两个地址都在同一台机器时用 127.0.0.1 即可；跨机器要把 127.0.0.1 换成协议端那台机器的 IP，并确认防火墙放行端口。',
   },
   {
-    key: 'napcat.wsUrl', group: 'NapCat 连接', type: 'str', label: 'OneBot v11 正向 WS 地址',
+    key: 'napcat.wsUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot v11 正向 WS 地址',
     default: 'ws://127.0.0.1:3001',
-    hint: 'NapCat 的 WebSocket 服务地址（入站消息从这里来）。改了会重新连接。',
+    hint: '协议端的 WebSocket 服务地址（入站消息从这里来）。改了会重新连接。',
   },
   {
-    key: 'napcat.wsToken', group: 'NapCat 连接', type: 'str', label: 'WS Token', secret: true, default: '',
+    key: 'napcat.wsToken', group: 'OneBot 连接', type: 'str', label: 'WS Token', secret: true, default: '',
     hint: '可留空。填了就是 OneBot 的 access_token（走 Authorization: Bearer）。',
   },
   {
-    key: 'napcat.httpUrl', group: 'NapCat 连接', type: 'str', label: 'OneBot HTTP API 地址',
+    key: 'napcat.httpUrl', group: 'OneBot 连接', type: 'str', label: 'OneBot HTTP API 地址',
     default: 'http://127.0.0.1:3000',
     hint: '发消息 / 查群列表 / 取头像走这个 HTTP API。',
   },
   {
-    key: 'napcat.httpToken', group: 'NapCat 连接', type: 'str', label: 'HTTP Token', secret: true, default: '',
-    hint: '可留空；与 NapCat 的 HTTP token 一致。',
+    key: 'napcat.httpToken', group: 'OneBot 连接', type: 'str', label: 'HTTP Token', secret: true, default: '',
+    hint: 'NapCat 可留空；SnowLuma 必填（与协议端的 HTTP token 一致）。',
   },
 
   // ── 出站（回复长度 / 长文卡片 / 引用）───────────────────────
@@ -362,12 +362,12 @@ export const ACTIONS = [
 
   // 新手向导 / 连接自检（契约 §3.1）
   {
-    id: 'napcat-check', group: '运维', label: '🔌 测试 NapCat 连接',
-    hint: '向 NapCat 发一次 get_login_info：通了一次就能收到消息；失败会给出原因（未启动 / 地址错 / token 错）。',
+    id: 'napcat-check', group: '运维', label: '🔌 测试 OneBot 连接',
+    hint: '向协议端发一次 get_login_info：通了一次就能收到消息；失败会给出原因（未启动 / 地址错 / token 错）。',
   },
   {
-    id: 'napcat-reconnect', group: '运维', label: '↻ 重新连接 NapCat',
-    hint: '重连 NapCat 的 WebSocket（改完地址/token 但没自动重连时用）。',
+    id: 'napcat-reconnect', group: '运维', label: '↻ 重新连接 OneBot',
+    hint: '重连协议端的 WebSocket（改完地址/token 但没自动重连时用）。',
   },
   {
     id: 'ensure-workspace', group: '运维', label: '📁 检查 / 创建 QQ 工作区',
@@ -384,7 +384,7 @@ export const ACTIONS = [
   },
   {
     id: 'diagnose', group: '运维', label: '🩺 一键诊断 / 导出运维报告',
-    hint: '检查配置、DSH preset、工具注册、NapCat 连接、人设、目录可写、生图配置，生成脱敏报告并告诉你保存位置；可直接交给 DSH 本体修复。',
+    hint: '检查配置、DSH preset、工具注册、OneBot 连接、人设、目录可写、生图配置，生成脱敏报告并告诉你保存位置；可直接交给 DSH 本体修复。',
   },
 
   // 隐藏动作（由控制台特定页面调用，不出现在按钮列表里）

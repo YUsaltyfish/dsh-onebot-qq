@@ -46,12 +46,12 @@ function chatTarget(chatKey) {
 function recallFailureText(raw, timedOut = false) {
   const s = String(raw || '')
   if (timedOut || /Timeout|NTEvent|EventRet|decode failed|recallMsg/i.test(s)) {
-    return '撤回失败：撤回接口超时/返回异常（消息可能已过期、已删除，或 NapCat 临时故障）'
+    return '撤回失败：撤回接口超时/返回异常（消息可能已过期、已删除，或协议端临时故障）'
   }
   if (/权限|permission|denied|no\s+privilege|not\s+(the\s+)?(admin|owner)/i.test(s)) {
     return '撤回失败：本机没有权限撤这条消息'
   }
-  return '撤回失败：NapCat 拒绝了这次撤回（可能已过期或消息不存在）'
+  return '撤回失败：协议端拒绝了这次撤回（可能已过期或消息不存在）'
 }
 
 export class NapCatAdapter {
@@ -545,7 +545,7 @@ export class NapCatAdapter {
     if (this._loginChecking) return this._loginChecking
     const task = (async () => {
       if (!this.ws || this.ws.readyState !== 1) {
-        return { ok: null, selfId: this.selfId, nickname: this.selfNickname, error: 'NapCat WS 未连接', checkedAt: this.loginCheckedAt }
+        return { ok: null, selfId: this.selfId, nickname: this.selfNickname, error: 'OneBot 连接未建立', checkedAt: this.loginCheckedAt }
       }
       let info = null
       let err = null
@@ -560,7 +560,7 @@ export class NapCatAdapter {
       }
       if (!this.selfId) {
         this.loginOk = false
-        this.loginError = err ? String(err.message || err) : 'NapCat 未返回登录账号'
+        this.loginError = err ? String(err.message || err) : '协议端未返回登录账号'
         this.loginCheckedAt = Date.now()
         if (!quiet) this.log.warn(`QQ 登录状态检查失败: ${this.loginError}`)
         return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
@@ -616,7 +616,7 @@ export class NapCatAdapter {
         return { ok: true, selfId: this.selfId, nickname: this.selfNickname, error: null, checkedAt: this.loginCheckedAt }
       }
       this.loginOk = false
-      this.loginError = String(probePayload?.wording || probePayload?.message || probeError?.message || 'QQ 网络连接异常（NapCat 仍缓存了登录信息）')
+      this.loginError = String(probePayload?.wording || probePayload?.message || probeError?.message || 'QQ 网络连接异常（协议端仍缓存了登录信息）')
       if (!quiet) this.log.warn(`QQ 登录状态检查失败（已掉线）: ${this.loginError}`)
       return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
     })().finally(() => { this._loginChecking = null })

@@ -194,3 +194,14 @@ test('群聊页「入站条数上限」：标签写明是上限、解释讲清"�
   assert.equal(c.min, 0)
   assert.equal(c.max, 50)
 })
+
+test('控制台命名：协议端页签名是「OneBot 连接」，不再出现「NapCat 连接」', async (t) => {
+  const schema = await schemaOf(t)
+  const groups = schema.groups.map((g) => g.name)
+  assert.ok(groups.includes('OneBot 连接'), '应有「OneBot 连接」页')
+  assert.equal(groups.includes('NapCat 连接'), false, '旧页名「NapCat 连接」不应再出现')
+  // 运维页两个按钮：名字改了，id 不变（对外契约）
+  const ids = new Map(schema.actions.map((a) => [a.id, a.label]))
+  assert.equal(ids.get('napcat-check'), '🔌 测试 OneBot 连接')
+  assert.equal(ids.get('napcat-reconnect'), '↻ 重新连接 OneBot')
+})

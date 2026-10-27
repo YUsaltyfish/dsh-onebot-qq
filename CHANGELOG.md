@@ -32,6 +32,10 @@
 - **新增 `list_images` 工具 + 去掉每轮参考图提示**：`[参考图库:…]` 每轮拼进用户消息正文（约 100~350 token、看着烦）已删；改成按需工具 `list_images`，可列 `refs`（角色参考图）/`workspace`（QQ 工作区）/`uploads`（QQ 发来的文件）/`avatars`（头像缓存）/`all` 下的图片，返回绝对路径、文件名、字节数、尺寸（默认 30 张、最多 100）。`generate_image` 的 `image` 支持清单里的路径或文件名；名字找不到时报错并指引先调 `list_images`。白名单未放宽（仍只允许白名单目录内的真实图片）。
 - **生图新增「额外请求字段（JSON）」**：`pluginConfig.imagegen.extraBody`（多行文本，默认空），控制台「生图」页可改。不同平台字段不同，由用户自己补：文生图并进 JSON 请求体、图生图逐项追加为 multipart 字段、`openai-chat` 协议并进 `/chat/completions` 顶层。典型用法：sensenova／商汤默认给图加水印，填 `{"watermark": false}` 关掉。留空 = 与旧版行为完全一致；非法 JSON 直接报错、不发请求。
 
+### 变更（控制台文案）
+
+- **控制台里「NapCat」改名为「OneBot」**：页签「NapCat 连接」→「**OneBot 连接**」，按钮「测试 NapCat 连接」/「重新连接 NapCat」→「**测试 OneBot 连接**」/「**重新连接 OneBot**」，状态徽标「NapCat 在线/异常」→「OneBot 在线/异常」，诊断报告项与相关提示文案同步（协议端同时支持 NapCat 与 SnowLuma，界面不再只写其中一家）。**机器侧名字一律未改**：控制台动作 id 仍是 `napcat-check` / `napcat-reconnect`，配置键仍是 `napcat.*`，日志关键字仍是 `NapCat WS 已连接`（对外契约「只加不改」）。新增用例锁住新页签名与按钮名（`test/audit-console-groups.test.js`）。
+
 ### 文档
 
 - **SnowLuma 升为一等公民**：`docs/安装与卸载.md` 的「准备协议端」拆成 **NapCat / SnowLuma 两小节**（含 Linux 无头部署、ptrace 注入前提、token 必填、关掉自带 `#sl`、`get_file` 能力差异）；`docs/排错.md` 新增「接了 SnowLuma 之后」整节（注入失败 / `good=false` 收不进 / 二维码过期 / `#sl` 抢话等 9 条）；`docs/配置参考.md` 写明 `napcat.*` 键名沿用、SnowLuma 两个 token 必填；`docs/开发指南.md` 新增「协议端差异」对照表（负 `message_id` / 群历史锚点 / `get_status` 健康字段 / `get_file` 覆盖面）；`README.md`、`docs/README.md` 与 `Windows安装.md`、`使用说明书.md`、`运维接口.md` 的措辞改为「协议端」，并说明控制台页签/配置键名沿用 NapCat 是历史原因。

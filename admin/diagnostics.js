@@ -3,7 +3,7 @@
  *
  * 用户流程（契约 §0）：
  *   控制台 运维 → 「🩺 一键诊断 / 导出运维报告」
- *   → 跑检查（NapCat 检查 5s 超时）→ 写 `<dataDir>/reports/diagnose-YYYYMMDD-HHmmss.md`
+ *   → 跑检查（OneBot 连接检查 5s 超时）→ 写 `<dataDir>/reports/diagnose-YYYYMMDD-HHmmss.md`
  *   → 前端弹窗展示摘要 / 报告路径 / 正文 / 复制按钮；可直接把路径交给 DSH 本体修复。
  *
  * 纪律（契约 §2.3，**必须**）：
@@ -153,7 +153,7 @@ function checkConfig(store) {
     return {
       raw,
       check: makeCheck('config', '配置校验', false, false, '待配置模式：只缺「主人 QQ」，其余配置有效',
-        '在控制台「群聊」页顶部填写主人 QQ 并保存；填完会自动连接 NapCat'),
+        '在控制台「群聊」页顶部填写主人 QQ 并保存；填完会自动连接 OneBot 协议端'),
     }
   }
   return {
@@ -258,17 +258,17 @@ async function checkNapcat(kernel, runtime) {
     const health = safe(() => (typeof kernel?.napcat?.health === 'function' ? kernel.napcat.health() : null), null) || {}
     r = health.linked
       ? { ok: true, linked: true, selfId: health.selfId, stale: Boolean(health.stale), latencyMs: null }
-      : { ok: false, linked: false, stale: Boolean(health.stale), error: 'NapCat 未连接' }
+      : { ok: false, linked: false, stale: Boolean(health.stale), error: 'OneBot 未连接' }
   }
   const ok = r.ok !== false && r.linked !== false
   const selfId = r.selfId != null ? maskQq(r.selfId) : '（未知）'
   const latency = Number.isFinite(Number(r.latencyMs)) ? `，${Number(r.latencyMs)}ms` : ''
   const detail = ok
     ? `已连接（selfId ${selfId}${latency}）${where ? `；${where}` : ''}`
-    : `未连接：${toStr(r.error) || 'NapCat 未连接'}${where ? `；${where}` : ''}`
+    : `未连接：${toStr(r.error) || 'OneBot 未连接'}${where ? `；${where}` : ''}`
   return makeCheck(
-    'napcat', 'NapCat 连接', true, ok, detail,
-    ok ? '' : '确认 NapCat 已启动并开启 OneBot v11 HTTP（默认 3000）/ 正向 WS（默认 3001）；在控制台「NapCat 连接」页核对地址/token 后点「测试 NapCat 连接」',
+    'napcat', 'OneBot 连接', true, ok, detail,
+    ok ? '' : '确认协议端（NapCat / SnowLuma）已启动并开启 OneBot v11 HTTP（默认 3000）/ 正向 WS（默认 3001）；在控制台「OneBot 连接」页核对地址/token 后点「测试 OneBot 连接」',
   )
 }
 
@@ -481,7 +481,7 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
     checks.push(checkDsh(kernel))
     checks.push(await checkAgentPreset(kernel, runtime))
     checks.push(checkTools(kernel, runtime))
-    // ③ NapCat / 人设 / 目录
+    // ③ OneBot 连接 / 人设 / 目录
     checks.push(await checkNapcat(kernel, runtime))
     checks.push(checkPersona(kernel))
     checks.push(checkDirs(kernel))

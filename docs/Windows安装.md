@@ -65,7 +65,7 @@ SnowLuma v2.2.0 也是 OneBot v11 实现，有 Windows x64 发行包。接法和
 1. 装发行包，启动 `launcher.bat`；打开 WebUI <http://127.0.0.1:5099>（初始账号 `admin`，密码在**全新数据目录的首启日志里打印一次**；也可用环境变量 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 预置）。
 2. **先自己开 QQ 用手机扫码登录**，再让 SnowLuma 注入（它**不启动 QQ**，靠 native addon `ptrace` 注入已在运行的 QQ 进程；**没有 CLI、没有二维码 API**，只能对着 QQ 登录窗口扫）。
 3. WebUI 里配 OneBot：开正向 WS `3001`、HTTP `3000`（`messageFormat: array`）。**3000/3001 强制带 `accessToken`**（每个网络自动生成 32 字节 base64url，可在 WebUI 或 `config/onebot.json` 改）→ 两个 token 都抄下来。
-4. 控制台 →「NapCat 连接」页照旧填地址 / token（**页签名沿用 NapCat，接 SnowLuma 也在这里填**；配置键名沿用 `napcat.*`，历史原因），然后「运维 → 测试 NapCat 连接」。
+4. 控制台 →「OneBot 连接」页照旧填地址 / token（**NapCat / SnowLuma 都填这里**；配置键名沿用 `napcat.*`，历史原因），然后「运维 → 测试 OneBot 连接」。
 5. 建议关掉它自带的 `#sl` 状态指令（`statusCommand.enabled=false`）：默认开时群里发 `#sl` 框架会回一句，`swallow:false` 时还会把消息继续下发给机器人（机器人与框架各回一句）。
 
 > 排错补充：掉线看 `get_status` 的 `good`（`good=false` = 发得出、收不进）；`message_id` 是**非零有符号 int32，负值合法**，引用/撤回用返回的真实 id；`get_file` 只覆盖图片/语音缓存（群文件/视频溯源可能降级）。另建议冻结 QQ 静默热更新（`qqpatch.gtimg.cn` 指到 `0.0.0.0`），否则 hook 可能与 QQ 版本错位。
@@ -136,10 +136,10 @@ dsh web
    [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
    ```
 2. **打开控制台填写**：浏览器打开 <http://127.0.0.1:3080> → **设置 → QQ 控制台**：
-   - **总览 → 新手向导**：逐项 ✅/❌（配置文件 / 主人 QQ / NapCat 连接 / 人设 / 生图），每项一句「怎么做」；
-   - **NapCat 连接**页：`wsUrl` / `httpUrl` / token（**页签名沿用 NapCat，接 SnowLuma 也在这里填**；**「测试 NapCat 连接」/「重新连接」按钮在「运维」页**，先保存再测）；
+   - **总览 → 新手向导**：逐项 ✅/❌（配置文件 / 主人 QQ / OneBot 连接 / 人设 / 生图），每项一句「怎么做」；
+   - **OneBot 连接**页：`wsUrl` / `httpUrl` / token（**NapCat / SnowLuma 都填这里**；**「测试 OneBot 连接」/「重新连接」按钮在「运维」页**，先保存再测）；
    - **生图**页：协议 / API 地址 / 模型 / API Key（可选，不配不影响聊天）；人设已自动投递，换人设见 [使用说明书 §6](使用说明书.md#6-人设怎么写)。
-3. **填写顺序**：主人 QQ → NapCat 地址/token（离开输入框即保存）→ 到「运维」点「测试 NapCat 连接」→ 插件自动连接，向导里 NapCat 项变 ✅ 就能发消息。
+3. **填写顺序**：主人 QQ → NapCat 地址/token（离开输入框即保存）→ 到「运维」点「测试 OneBot 连接」→ 插件自动连接，向导里 NapCat 项变 ✅ 就能发消息。
 
 ### 手动填写配置（备选）
 
@@ -155,7 +155,7 @@ dsh web
 
 ## 七、启动与验证
 
-1. 协议端（NapCat / SnowLuma）在线、QQ 已登录；控制台「测试 NapCat 连接」返回 ok（按钮名沿用 NapCat），或日志出现 `[onebot-qq:napcat] NapCat WS 已连接`；
+1. 协议端（NapCat / SnowLuma）在线、QQ 已登录；控制台「测试 OneBot 连接」返回 ok（按钮名已是「OneBot」），或日志出现 `[onebot-qq:napcat] NapCat WS 已连接`；
 2. 私聊「ping」→ 有回复；群里 @ 机器人「ping」→ 有回复；
 3. `/status`（仅主人）→ 有回执；发一张本地图（`a.png` 放进 `<dataDir>\workspace\` 后说「发一下 a.png」）→ QQ 收到图；
 4. 重启 `dsh web` 后再发一条 → 仍是同一个 DSH 会话；异常走控制台「运维 → 🩺 一键诊断」，报告在 `<dataDir>\reports\`。
