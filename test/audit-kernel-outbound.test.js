@@ -19,6 +19,7 @@ import {
   buildPromptText,
   toWellFormedText,
   escapeCq,
+  parseWire,
 } from '../kernel/format.js'
 import { ChatState, Pipeline, createDeliver, currentTurn } from '../kernel/state-pipeline.js'
 import { createEvent, SENSITIVE_KINDS } from '../contracts.js'
@@ -381,6 +382,14 @@ test('deliver：target/空正文校验；@ 名字反查；显式 replyTo 与 0 �
   assert.equal(r0.replyTo, null)
   assert.equal(r0.mode, 'plain')
   assert.equal(sent.at(-1).wire.includes('[CQ:reply'), false)
+
+  // 负 message_id 必须照挂：SnowLuma 的 message_id 是有符号 int32 哈希（经常为负），
+  // 只有 0 才表示"不挂引用"（2026-10-27 SnowLuma 兼容）
+  const rn = await deliver(`group:${GROUP_ID}`, '引用一条负 id 的消息', { replyTo: -123456 })
+  assert.equal(rn.replyTo, -123456)
+  assert.equal(rn.mode, 'reply')
+  assert.ok(sent.at(-1).wire.startsWith('[CQ:reply,id=-123456]'))
+  assert.equal(parseWire(sent.at(-1).wire).replyTo, -123456, '留档/回报解析也要认负 id')
 })
 
 test('deliver：超长且无 @/引用 → 合并转发卡片；卡片失败自动降级普通发送，不吞话', async () => {

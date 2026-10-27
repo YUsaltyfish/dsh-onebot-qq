@@ -79,3 +79,59 @@ test('NapCat 适配器：撤回失败不把原始报错放进 msg（raw 只供�
   assert.equal(r2.ok, false)
   assert.equal(/timeout|aborted|NTEvent/i.test(r2.msg), false, `超时 msg 也不回显原始错误：${r2.msg}`)
 })
+
+test('NapCat 适配器：群历史同时带 message_id/message_seq（NapCat 认 seq，SnowLuma 认 id）', async (t) => {
+  const fake = createFakeNapCat()
+  const urls = await fake.start()
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-history-'))
+  const adapter = new NapCatAdapter({
+    wsUrl: urls.wsUrl, httpUrl: urls.httpUrl, log: quiet, avatarDir: path.join(dataDir, 'avatars'),
+  })
+  t.after(async () => {
+    adapter.close()
+    await fake.close()
+  })
+  await adapter.connect()
+  await waitFor(() => adapter.health().linked, 8000, 'WS 连接')
+  await adapter.groupHistory(fake.groupId, 5)
+  const call = fake.calls.find((c) => c.action === 'get_group_msg_history')
+  assert.ok(call, '应发出 get_group_msg_history')
+  assert.equal(call.params.group_id, fake.groupId)
+  assert.equal(call.params.message_id, 0, 'SnowLuma 认 message_id（0 = 最新）')
+  assert.equal(call.params.message_seq, 0, 'NapCat 认 message_seq（0 = 最新）')
+  assert.equal(call.params.count, 5)
+})
+
+test('NapCat 适配器：get_status 明确 online=false/good=false 优先判异常；心跳 good 进 health', async (t) => {
+  const fake = createFakeNapCat()
+  const urls = await fake.start()
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-status-'))
+  const adapter = new NapCatAdapter({
+    wsUrl: urls.wsUrl, httpUrl: urls.httpUrl, log: quiet, avatarDir: path.join(dataDir, 'avatars'),
+  })
+  t.after(async () => {
+    adapter.close()
+    await fake.close()
+  })
+  await adapter.connect()
+  await waitFor(() => adapter.health().linked, 8000, 'WS 连接')
+
+  const okRes = await adapter.checkLogin({ force: true })
+  assert.equal(okRes.ok, true, '正常状态仍判在线（get_stranger_info 探针照旧）')
+
+  // SnowLuma 场景：online 但接收链路停滞（发得出、收不进）→ 必须判异常，不能报"在线"
+  fake.setStatus({ online: true, good: false })
+  const stalled = await adapter.checkLogin({ force: true })
+  assert.equal(stalled.ok, false)
+  assert.match(String(stalled.error), /接收链路/)
+
+  fake.setStatus({ online: false, good: false })
+  const offline = await adapter.checkLogin({ force: true })
+  assert.equal(offline.ok, false)
+  assert.match(String(offline.error), /离线/)
+
+  // 心跳里的 status.good 也记进 health（SnowLuma 30s 一发；NapCat 没字段就保持 null）
+  fake.pushEvent({ post_type: 'meta_event', meta_event_type: 'heartbeat', status: { online: true, good: false } })
+  await sleep(150)
+  assert.equal(adapter.health().qqReceiveGood, false)
+})

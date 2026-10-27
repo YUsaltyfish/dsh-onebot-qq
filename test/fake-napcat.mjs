@@ -84,13 +84,17 @@ export function createFakeNapCat(opts = {}) {
   const groupId = Number(opts.groupId ?? 20001)
   const groupName = String(opts.groupName ?? '测试群')
   const sent = [] // { action, params, at }
+  const calls = [] // 所有收到的 action（含只读查询，供断言参数形状）
   const clients = new Set()
   let messageSeq = 10000
+  // get_status 的可变返回值：测试用 setStatus({online, good}) 造"在线但接收链路停滞"等状态
+  const status = { online: true, good: true }
 
   const ok = (data = {}) => ({ status: 'ok', retcode: 0, data })
 
   /** 每个 OneBot action 的假实现（HTTP 与 WS 共用）。 */
   function answer(action, params = {}) {
+    calls.push({ action, params })
     switch (action) {
       case 'send_group_msg':
       case 'send_private_msg':
@@ -102,6 +106,8 @@ export function createFakeNapCat(opts = {}) {
       }
       case 'get_login_info':
         return ok({ user_id: selfId, nickname: '测试机器人' })
+      case 'get_status':
+        return ok({ ...status })
       case 'get_group_list':
         return ok([{ group_id: groupId, group_name: groupName }])
       case 'get_friend_list':
@@ -211,6 +217,11 @@ export function createFakeNapCat(opts = {}) {
     groupId,
     groupName,
     sent,
+    calls,
+    /** 改 get_status 返回值（默认 {online:true, good:true}）。 */
+    setStatus(next = {}) {
+      Object.assign(status, next)
+    },
     /** 当前连上来的 WS 客户端数（判断"有没有发起连接"用） */
     get clientCount() {
       return clients.size

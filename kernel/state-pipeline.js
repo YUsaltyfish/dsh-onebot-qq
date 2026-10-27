@@ -272,11 +272,13 @@ export function createDeliver({ napcat, log = console, adminQq = null, longForwa
     }
     // ③ decorate：钩子可改 text / ats / replyTo / mode。钩子抛错只记日志 —— 话不能因为钩子崩了被吞
     const rawRt = Number(opts.replyTo)
+    // replyTo 的合法性：**0 是非零消息 id 里的"空"**（OneBot 用它表示"不挂引用"），负数合法 ——
+    // SnowLuma 的 message_id 是有符号 int32 哈希，经常为负；按 >0 过滤会让引用回复静默失效。
     const out = {
       target: to,
       text: toWellFormedText(safe.text),
       ats: [...new Set(ats)],
-      replyTo: opts.replyTo == null || !Number.isInteger(rawRt) || rawRt <= 0 ? null : rawRt,
+      replyTo: opts.replyTo == null || !Number.isInteger(rawRt) || rawRt === 0 ? null : rawRt,
       noReply: opts.replyTo !== undefined && opts.replyTo !== null && rawRt === 0,
       mode: 'plain',
       turnCtx: opts.turnCtx ?? null,

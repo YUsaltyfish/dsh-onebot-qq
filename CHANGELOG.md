@@ -8,6 +8,7 @@
 
 ### 修复
 
+- **兼容 SnowLuma 等其它 OneBot v11 协议端**：引用回复允许**负 `message_id`**（SnowLuma 的 id 是有符号 int32 哈希、经常为负；原来 `<=0` 当「不挂引用」会让引用静默失效 —— 现在只有 `0` 才表示不挂），`parseWire` 的引用解析同步认负号；`get_group_msg_history` 同时发 `message_id: 0` 与 `message_seq: 0`（SnowLuma 认 `message_id`、NapCat 认 `message_seq`，两边都忽略未知键）；在线探针优先看 `get_status`（`online=false` 判掉线、`good=false` 判「接收链路停滞」——SnowLuma hook 卡住时发得出收不进，光靠 `get_stranger_info` 会误判在线），心跳里的 `status.good` 记进 `health().qqReceiveGood`；拿不到 `get_status`/字段时行为与原来一致（纯 NapCat 不受影响）。
 - **写侧改用未截断原文**：积累器合并/备份不再拿读侧 24KB 截断文本当基准；超过 `maxBytes` 的尾部不再每轮丢失，旧版误写进正文的「…已截断」提示会在下次合并时清掉。
 - **水位口径**：`digestedAt` 改为「本轮实际喂给模型的最新消息 ts」，不再用 `Date.now()`（模型调用期间新到的消息不再被误标已消化）。
 - **采样可见**：每群超出 `accumulateMsgPerGroup` / `accumulateMaxChars` 的条数计入 `sampledOut`（日志 + 结果行），不再静默丢弃。

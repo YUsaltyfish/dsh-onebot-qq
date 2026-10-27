@@ -229,7 +229,7 @@ export function parseKeywordLines(input) {
 /** wire 串 → 可读文本（剥 CQ 码） */
 export function wireToText(wire) {
   return String(wire ?? '')
-    .replace(/\[CQ:reply,id=\d+\]\s*/g, '')
+    .replace(/\[CQ:reply,id=-?\d+\]\s*/g, '')
     .replace(/\[CQ:at,qq=(\d+)[^\]]*\]/g, '@$1')
     .replace(/\[CQ:image,[^\]]*\]/g, '[图片]')
     .replace(/\[CQ:face,[^\]]*\]/g, '[表情]')
@@ -240,7 +240,7 @@ export function wireToText(wire) {
 export function parseWire(wire) {
   const s = String(wire ?? '')
   const at = [...s.matchAll(/\[CQ:at,qq=(\d+)/g)].map((m) => Number(m[1]))
-  const reply = /\[CQ:reply,id=(\d+)\]/.exec(s)
+  const reply = /\[CQ:reply,id=(-?\d+)\]/.exec(s)
   const images = [...s.matchAll(/\[CQ:image,[^\]]*file=([^,\]]+)/g)].map((m) => m[1])
   return { at, replyTo: reply ? Number(reply[1]) : null, images }
 }

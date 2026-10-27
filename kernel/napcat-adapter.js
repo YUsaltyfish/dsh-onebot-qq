@@ -84,6 +84,9 @@ export class NapCatAdapter {
     this.loginOk = null
     this.loginCheckedAt = 0
     this.loginError = ''
+    // 协议端自报的"接收链路健康"：SnowLuma 心跳/ get_status 里有 good（hook 卡住时会翻 false，
+    // 发得出去、收不进来）；NapCat 不提供这个字段时保持 null（未知，不参与判定）。
+    this.receiveGood = null
     this._loginTimer = null
     this._loginChecking = null
   }
@@ -111,6 +114,7 @@ export class NapCatAdapter {
     this._loginTimer = null
     this.loginOk = null
     this.loginError = ''
+    this.receiveGood = null
     for (const w of this._waiters.values()) {
       clearTimeout(w.timer)
       w.reject(new Error('适配器已关闭'))
@@ -160,6 +164,7 @@ export class NapCatAdapter {
       qqLoggedIn: this.loginOk,
       qqLoginCheckedAt: this.loginCheckedAt || null,
       qqLoginError: this.loginError || '',
+      qqReceiveGood: this.receiveGood, // null=协议端没报/未知；false=接收链路异常
     }
   }
 
@@ -209,7 +214,12 @@ export class NapCatAdapter {
       let data
       try { data = JSON.parse(ev.data) } catch { return }
       if (data.echo !== undefined) { this._resolveApi(data); return } // API 响应
-      if (data.post_type === 'meta_event') return                     // 心跳
+      if (data.post_type === 'meta_event') {
+        // 心跳顺便记协议端的接收链路自评（SnowLuma：status.good；NapCat：没有就忽略）
+        const good = data?.status?.good
+        if (typeof good === 'boolean') this.receiveGood = good
+        return
+      }
       if (data.post_type === 'lifecycle') { this.log.info(`NapCat lifecycle: ${data.sub_type || 'connect'}`); return }
       if (data.post_type !== 'message' && data.post_type !== 'notice') return
       for (const h of this.handlers) {
@@ -225,6 +235,7 @@ export class NapCatAdapter {
       this.ws = null
       this.loginOk = null
       this.loginError = 'NapCat WS 断开'
+      this.receiveGood = null
       this.log.info('NapCat WS 已断开')
       this._scheduleReconnect()
     }
@@ -388,11 +399,15 @@ export class NapCatAdapter {
     }
   }
 
-  /** 群消息历史（升序；message_seq=0 从最新开始）。失败返回 []，群上文/提取都只是锦上添花。 */
+  /**
+   * 群消息历史（升序；锚点 0 = 从最新开始）。失败返回 []，群上文/提取都只是锦上添花。
+   * 锚点参数名两端不同：NapCat 认 `message_seq`，SnowLuma 认 `message_id`（0 = 最新，负值锚点也合法）。
+   * 两边都会忽略自己不认识的键，所以两个都发（2026-10-27 SnowLuma 兼容）。
+   */
   async groupHistory(groupId, count = 100) {
     try {
       const { data } = await this._post('get_group_msg_history', {
-        group_id: Number(groupId), message_seq: 0, count: Number(count) || 100,
+        group_id: Number(groupId), message_id: 0, message_seq: 0, count: Number(count) || 100,
       }, 8000)
       return Array.isArray(data?.data?.messages) ? data.data.messages : []
     } catch (e) {
@@ -546,6 +561,32 @@ export class NapCatAdapter {
       if (!this.selfId) {
         this.loginOk = false
         this.loginError = err ? String(err.message || err) : 'NapCat 未返回登录账号'
+        this.loginCheckedAt = Date.now()
+        if (!quiet) this.log.warn(`QQ 登录状态检查失败: ${this.loginError}`)
+        return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
+      }
+
+      // 协议端健康信号（SnowLuma 的 get_status 明确区分 online / good；NapCat 也有 get_status）：
+      // online=false → 已掉线；good=false → 接收链路停滞（hook 卡住时"发得出、收不进"，光看
+      // get_stranger_info 会误判在线）。只在明确 false 时降级；拿不到/字段缺省继续走下面的探针，
+      // 不改变纯 NapCat 的既有判定（NapCat 的 get_status 会命中缓存，2026-10-22 实测）。
+      let statusData = null
+      try {
+        const r = await this._post('get_status', {}, 6000)
+        if (r?.data?.status === 'ok' && r.data.data && typeof r.data.data === 'object') statusData = r.data.data
+      } catch { /* 协议端没有 get_status 时忽略 */ }
+      if (!statusData) {
+        try {
+          const r = await this.wsApi('get_status', {})
+          if (r?.status === 'ok' && r.data && typeof r.data === 'object') statusData = r.data
+        } catch { /* 忽略，走探针 */ }
+      }
+      if (statusData && typeof statusData.good === 'boolean') this.receiveGood = statusData.good
+      if (statusData && (statusData.online === false || statusData.good === false)) {
+        this.loginOk = false
+        this.loginError = statusData.online === false
+          ? 'QQ 已离线（协议端 get_status.online=false）'
+          : '协议端接收链路异常（get_status.good=false，发得出但收不进）'
         this.loginCheckedAt = Date.now()
         if (!quiet) this.log.warn(`QQ 登录状态检查失败: ${this.loginError}`)
         return { ok: false, selfId: this.selfId, nickname: this.selfNickname, error: this.loginError, checkedAt: this.loginCheckedAt }
