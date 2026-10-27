@@ -7,7 +7,7 @@
 > 一分钟看懂它是什么：
 
 ```text
-QQ 客户端 ↔ NapCat（OneBot v11 协议端） ↔ 本插件（DSH 进程内：微内核 + 13 个子插件） ↔ DSH（模型 / 会话 / 控制台）
+QQ 客户端 ↔ 协议端（OneBot v11：NapCat / SnowLuma） ↔ 本插件（DSH 进程内：微内核 + 13 个子插件） ↔ DSH（模型 / 会话 / 控制台）
 ```
 
 安装后只有一处入口要记：**DSH 设置 →「QQ 控制台」**（16 个页签，改配置热生效）。
@@ -20,7 +20,7 @@ QQ 客户端 ↔ NapCat（OneBot v11 协议端） ↔ 本插件（DSH 进程内�
 ① 装插件         dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
 ② 建数据目录     node bin/dsh-onebot-qq.mjs init      （首次启动也会自动投递默认人设）
 ③ 启动           dsh web                              （首次缺配置会进「待配置模式」）
-④ 连 QQ          控制台「新手向导」填主人 QQ + NapCat 地址 → 自动连接
+④ 连 QQ          控制台「新手向导」填主人 QQ + 协议端地址 → 自动连接
 ⑤ 试一句         QQ 里 @ 它 / 私聊发一句话 → 有回复即成功
 ```
 
@@ -57,7 +57,9 @@ QQ 客户端 ↔ NapCat（OneBot v11 协议端） ↔ 本插件（DSH 进程内�
 |---|---|
 | 从零安装、升级、卸载 | [安装与卸载](安装与卸载.md) |
 | Windows 从零到跑通 + 真机验证清单 | [Windows 安装](Windows安装.md) |
-| 首次配置 / 连 NapCat / 新手向导 | [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导) |
+| 首次配置 / 连协议端 / 新手向导 | [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导) |
+| 换协议端（NapCat ↔ SnowLuma） | [安装与卸载 §二](安装与卸载.md#二准备协议端onebot-v11napcat-或-snowluma) |
+| 接了 SnowLuma 之后的问题 | [排错 §二·二](排错.md#二二接了-snowluma-之后) |
 | 手动改 `config.json`，查某个键的默认值 | [配置参考](配置参考.md) |
 | 加装「QQ 线工具门」（挡掉全局工具） | [安装与卸载 §三](安装与卸载.md#可选qq-线工具门挡住全局工具) |
 | 出问题：连不上 / 不回消息 / 图片发不出 | [排错](排错.md) |

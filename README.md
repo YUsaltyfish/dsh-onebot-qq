@@ -1,6 +1,6 @@
 # dsh-onebot-qq
 
-DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBot v11 协议收发消息。
+DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端可换：[NapCat](https://napcat.napneko.icu/) 或 [SnowLuma](https://github.com/SnowLuma/SnowLuma) 等任何 OneBot v11 实现。
 微内核 + 可插拔子插件，**Linux / Windows通用**，装完在控制台填几项就能用。
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22-green) ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.1--rc.2-7c3aed)
@@ -29,8 +29,8 @@ DSH插件式的QQ机器人，经 [NapCat](https://napcat.napneko.icu/) 的 OneBo
 |---|---|
 | Node.js | `>= 22` |
 | DSH | `>= 0.2.1-rc.2 < 0.3.0`（`engines.dsh` 声明） |
-| NapCat | QQNT 客户端 + OneBot v11；需开启**正向 WebSocket** 与 **HTTP API** |
-| QQ 号 | NapCat 登录用（建议小号）；机器人靠它收发消息 |
+| 协议端（二选一） | **NapCat**（QQNT + OneBot v11，token 可空）或 **SnowLuma**（v2.x；token 必填、不自己启动 QQ）；两者都需开启**正向 WebSocket**（默认 3001）与 **HTTP API**（默认 3000），见 [安装与卸载 §二](docs/安装与卸载.md#二准备协议端onebot-v11napcat-或-snowluma) |
+| QQ 号 | 协议端登录用（建议小号）；机器人靠它收发消息 |
 
 ## 安装
 
@@ -59,12 +59,12 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 ## 快速开始（4 步）
 
-1. NapCat 登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（可空）。
-2. DSH 设置 →「QQ 控制台」→「NapCat 连接」填地址/token → 点「测试 NapCat 连接」。
+1. 协议端登录 QQ，开启 WebSocket（默认 `ws://127.0.0.1:3001`）与 HTTP（默认 `http://127.0.0.1:3000`），记下 token（NapCat 可空，**SnowLuma 必填**）。
+2. DSH 设置 →「QQ 控制台」→「NapCat 连接」页（页签名沿用 NapCat，**接 SnowLuma 也在这里填**）填地址/token → 点「测试 NapCat 连接」。
 3. 「群聊」页顶部填**主人 QQ**（必填）→ 保存后自动连接。
 4. 在 QQ 里 @ 机器人（或私聊）→ 有回复即可用。
 
-> 首次启动缺 `adminQq` 会进入「待配置模式」：控制台和工具可用、不连 NapCat，填完自动连接。
+> 首次启动缺 `adminQq` 会进入「待配置模式」：控制台和工具可用、不连协议端，填完自动连接。
 
 ## 控制台与人设
 
