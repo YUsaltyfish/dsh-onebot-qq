@@ -366,7 +366,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   /**
-   * 测一次 OneBot 协议端连接：优先内核 `kernel.checkOneBot()`（A 提供，函数名沿用旧名）；
+   * 测一次 OneBot 协议端连接：优先内核 `kernel.checkOneBot()`（A 提供）；
    * 老内核退回「health + get_login_info（5s 超时）」。
    */
   async function checkOneBotNow() {

@@ -91,7 +91,7 @@ export const CORE_CONTROLS = [
   // ── OneBot 连接（对接任意 OneBot v11 协议端）──────
   {
     key: 'info.onebot', group: 'OneBot 连接', type: 'info',
-    text: '分三步接上 OneBot 协议端（任意 OneBot v11 实现；下面键名沿用历史名 onebot.*，与本插件对接的实现无关）：\n'
+    text: '分三步接上 OneBot 协议端（任意 OneBot v11 实现；配置键是 onebot.*，与具体实现无关）：\n'
       + '① 先在本机装好并启动协议端并登录 QQ（各实现方式不同：有的自己拉起 QQ，有的注入已在运行的 QQ 进程，详见 docs/安装与卸载.md §二）；\n'
       + '② 在协议端配置里打开「WebSocket 服务端」（常见默认 ws://127.0.0.1:3001）和「HTTP 服务端」（常见默认 http://127.0.0.1:3000）；有 token 就一并填到下面（部分实现强制要 token，两个都要填）；\n'
       + '③ 填好地址/token 后先让输入框失焦（离开输入框就会保存），再点「运维」页的「🔌 测试 OneBot 连接」：出现 ✅ 就说明通了（测的是已保存的配置）。\n'

@@ -52,7 +52,7 @@ dsh web          # 首次启动会初始化 web profile（%USERPROFILE%\.dsh\pro
 3. 在它的 **OneBot v11** 配置里开启两个服务（都在 `127.0.0.1`，不要暴露公网）：
    - **WebSocket 服务（正向）**：常见默认端口 `3001`
    - **HTTP 服务 / HTTP API**：常见默认端口 `3000`
-   - 若设置了 token：记下来，后面填进实例配置（`onebot.wsToken` / `onebot.httpToken`；**键名沿用历史名，可对接任意 OneBot v11 协议端**）。
+   - 若设置了 token：记下来，后面填进实例配置（`onebot.wsToken` / `onebot.httpToken`；**任意 OneBot v11 协议端都填这里**）。
 4. 保存配置并**重启协议端**，确认 QQ 仍在线。
 
 > OneBot 配置的存放位置与界面各实现不同（多数在协议端自己的配置目录里），以该实现的官方文档为准。
@@ -65,7 +65,7 @@ SnowLuma v2.2.0 也是 OneBot v11 实现，有 Windows x64 发行包。接法和
 1. 装发行包，启动 `launcher.bat`；打开 WebUI <http://127.0.0.1:5099>（初始账号 `admin`，密码在**全新数据目录的首启日志里打印一次**；也可用环境变量 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 预置）。
 2. **先自己开 QQ 用手机扫码登录**，再让 SnowLuma 注入（它**不启动 QQ**，靠 native addon `ptrace` 注入已在运行的 QQ 进程；**没有 CLI、没有二维码 API**，只能对着 QQ 登录窗口扫）。
 3. WebUI 里配 OneBot：开正向 WS `3001`、HTTP `3000`（`messageFormat: array`）。**3000/3001 强制带 `accessToken`**（每个网络自动生成 32 字节 base64url，可在 WebUI 或 `config/onebot.json` 改）→ 两个 token 都抄下来。
-4. 控制台 →「OneBot 连接」页照旧填地址 / token（**任意 OneBot v11 协议端都填这里**；配置键名沿用 `onebot.*`，历史原因），然后「运维 → 测试 OneBot 连接」。
+4. 控制台 →「OneBot 连接」页照旧填地址 / token（**任意 OneBot v11 协议端都填这里**；配置键是 `onebot.*`），然后「运维 → 测试 OneBot 连接」。
 5. 建议关掉它自带的 `#sl` 状态指令（`statusCommand.enabled=false`）：默认开时群里发 `#sl` 框架会回一句，`swallow:false` 时还会把消息继续下发给机器人（机器人与框架各回一句）。
 
 > 排错补充：掉线看 `get_status` 的 `good`（`good=false` = 发得出、收不进）；`message_id` 是**非零有符号 int32，负值合法**，引用/撤回用返回的真实 id；`get_file` 只覆盖图片/语音缓存（群文件/视频溯源可能降级）。另建议冻结 QQ 静默热更新（`qqpatch.gtimg.cn` 指到 `0.0.0.0`），否则 hook 可能与 QQ 版本错位。
@@ -148,7 +148,7 @@ dsh web
 
 - 用**正斜杠**（`"C:/dsh-data/qq-bot"`）或双反斜杠（`"C:\\dsh-data\\qq-bot"`），避免转义错误；
 - 相对路径（如 `"workspace"`）相对**数据目录**解析，跨机器迁移最省事；
-- 必填 `adminQq` / `onebot.wsUrl` / `onebot.httpUrl`（协议端连接配置，**键名沿用 `onebot.*`，历史原因**）；协议端开了鉴权就填 `wsToken` / `httpToken`（接 SnowLuma 时两个都**必须**填）；
+- 必填 `adminQq` / `onebot.wsUrl` / `onebot.httpUrl`（协议端连接配置，键为 `onebot.*`）；协议端开了鉴权就填 `wsToken` / `httpToken`（接 SnowLuma 时两个都**必须**填）；
 - 生图凭据建议用环境变量（见 §九），不要写进 JSON；**手改配置后要重启一次 dsh-web**（控制台改是热生效）。
 
 自检：`node bin\dsh-onebot-qq.mjs doctor`（无 QQ/协议端时加 `--no-net`）；❌ 项修完再启动，⚠️（如 symlink 不可用、协议端未启动）属正常提示。
