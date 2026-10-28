@@ -55,7 +55,7 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 > `dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq-opsgate`（必须装在 `dsh-onebot-qq` 之后）。
 > 不装也能正常用，只是 QQ 会话的工具面更大，token消耗略微增加，可能导致群聊天时调用不该用的工具而产生风险。详见 [`docs/安装与卸载.md`](docs/安装与卸载.md)。
 
-> **可选**：「看视频 / 看视频链接」需要另跑一个本地解析侧车（ffmpeg 抽帧，独立服务）；不装也完全不影响聊天，只是视频/链接按普通消息处理。
+> **可选**：「看视频 / 看视频链接 / 链接解析」需要**自己准备一个本地解析侧车**（独立小服务）；不装也完全不影响聊天，详见下节 [解析侧车](#可选解析侧车链接解析--看视频--看视频链接)。
 
 ## 快速开始（4 步）
 
@@ -70,6 +70,77 @@ dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
 
 - **控制台**集成在 DSH 内置设置页，可配置程度高：16 个页签、热改即生效。
 - **人设**可以直接让 AI 照随包的 `personas/_模板.md` 写一份；优秀程度看用心程度，推荐让模型多用示范对话。
+
+## 可选：解析侧车（链接解析 / 看视频 / 看视频链接）
+
+> 这三个功能**本仓库不附带**，要你自己跑一个本地小服务。不装也完全不影响聊天与其余功能。
+
+### 「侧车」是什么
+
+主插件只负责**在 QQ 里收发消息、拼提示词、调模型**。而「下载 B 站/抖音视频、用 ffmpeg 抽帧转码」这类活儿需要额外装 Python/ffmpeg、可能还要登录 cookie，体积大、坑多，不适合塞进插件包 ——
+所以把它拆成**一个独立的小 HTTP 服务**跑在同一台机器上，插件通过 HTTP 调它干活。这种「主程序旁边挂一个专职小服务」的做法叫 **sidecar（侧车）**：像摩托车的跨斗，自己不跑，但能载货。
+
+### 哪些功能依赖它
+
+| 功能 | 子插件 | 默认 | 调用的接口 | 没有侧车时 |
+|---|---|---|---|---|
+| **链接解析**（B站/抖音链接 → 直接把视频、图集发到群里） | `link-parser` | **关** | `POST /parse` | 链接按普通消息交给模型（模型只看到链接文字） |
+| **看视频**（群里发的视频 → 抽几帧给模型看） | `video-read` | **开** | `POST /read` | 群里如实回一句「看视频的服务没起来」 |
+| **看视频链接**（B 站/抖音链接的视频 → 抽帧给模型看） | `video-link-read` | **开** | `POST /read` | 同上 |
+
+> ⚠️ 后两个**默认是开的**：没装侧车时，群里一出现视频/视频链接，机器人就会说「看视频的服务没起来，这视频我看不了」。
+> 不想看到这句 → 控制台「文件与图片」页把这两个开关关掉；想用 → 按下面搭个侧车。
+
+### 自己搭侧车，最少要实现什么
+
+一个监听本机端口的 HTTP 服务（默认 `3972`）即可，语言随意（Python / Node / Go），只要实现两个 JSON 接口：
+
+**① `POST /parse`** —— 链接解析（`link-parser` 用）
+
+```jsonc
+// 请求
+{ "url": "https://b23.tv/xxxx", "session": "会话标识（可忽略）", "limit": 9 }
+// 响应
+{
+  "media":   [ { "path": "/tmp/xxx.mp4", "kind": "video", "size": 1234567 },
+               { "path": "/tmp/y1.jpg",  "kind": "image", "size": 88000  } ],
+  "skipped": [ { "reason": "too_big", "cover": "/tmp/cover.jpg" } ]   // 可选：跳过的原因 + 兜底封面
+}
+```
+> `kind` 取 `video` / `image`；`path` 必须是**本机真实文件**（插件直接读它发到 QQ）。视频没合流成功时，用 `skipped[].cover` 先发封面。
+
+**② `POST /read`** —— 看视频（`video-read` / `video-link-read` 用）
+
+```jsonc
+// 请求
+{ "url": "/tmp/in.mp4 或 https://b23.tv/xxxx", "platform": "bilibili",
+  "frames": 8, "maxSide": 1024, "maxSeconds": 600 }
+// 成功
+{ "ok": true, "durationSec": 95, "title": "视频标题", "platform": "bilibili",
+  "frames": [ { "path": "/tmp/f1.jpg", "sec": 0 }, { "path": "/tmp/f2.jpg", "sec": 12 } ] }
+// 失败（机器人有对应的中文回执）
+{ "ok": false, "code": "too_long", "error": "时长超过 600s" }
+```
+> `code` 只认这几个词，其余都按「没看成」处理：
+> `too_long`（太长）/ `too_big`（太大）/ `busy`（正忙）/ `nomatch`（链接打不开）/ `download_failed`（下载失败，常见于平台要求登录）。
+
+### 侧车本身需要装什么
+
+- **ffmpeg** —— 抽帧、B 站 DASH 音视频合流，**视频功能必需**（不装就只能发封面/图文）；
+- **下载器** —— `yt-dlp` 或各平台自己的接口；抖音通常需要配 cookie，否则会 `download_failed`；
+- **运行环境** —— Python 3 或 Node，随你顺手。
+
+### 怎么开启与配置
+
+| 位置 | 要做什么 |
+|---|---|
+| 控制台 →「链接解析」页 | 打开「链接解析」；「侧车地址」填 `http://127.0.0.1:3972`（默认值） |
+| 控制台 →「文件与图片」页 | 「让模型看视频内容」/「点开 B 站 / 抖音链接看视频」两个开关 + 各自的「侧车地址」 |
+| 配置键（手改 `config.json` 时） | `pluginConfig.link-parser.parserUrl`、`pluginConfig.video-read.sidecarUrl`、`pluginConfig.video-link-read.sidecarUrl` |
+
+- 地址**留空 = 不解析/不看**（等于关掉该功能）；
+- 侧车换个端口/换台机器也能用（跨机器就把 `127.0.0.1` 换成那台机器的内网 IP，注意别把侧车暴露到公网）；
+- 侧车自己也要卡体积/时长（插件侧还有一道 `maxBytes` 上限，默认 100MB）。
 
 ## 文档
 
