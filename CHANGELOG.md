@@ -11,7 +11,8 @@
 - **`qzone` 子插件**：给机器人一个自己的 QQ 空间当日记本，每个会话每天最多一条，由它自己判断写不写；到点（默认 22:00 后）在它下一条被唤醒的消息里提醒一次（挂 `ev.hint`，不改静态系统提示）。新增三个模型工具 `post_qzone` / `skip_qzone` / `qzone_status`。
   - **「不写」绝不进空间**：`skip_qzone` 独立成一个工具，只记状态不发任何内容；`post_qzone` 对「不写」类正文另有硬性拦截 —— 合并工具 + 传空值的写法会让模型把不写的理由当正文发进公开空间。
   - **配图不污染表情库**：只接受本地文件路径，并拒绝 `qq-stickers/` 下的文件（包含判定走 `platform/paths.js` 的 `isInsidePath`）。
-  - **配额进 ChatState**：状态挂 `_scratch`、按 chatKey 隔离，`/reset` 能干净清理，群与私聊互不影响。
+  - **额度落盘、跨重启保留**：状态存 `<dataDir>/qzone-state.json`（按会话记录当天条数与是否跳过），重启不会把额度重置回 0 —— 内存态会导致「早上发过、下午重启又能发第二条」。
+  - **控制台显示实时额度**：`configSchema.info.text` 改成 getter，装配时把 dataDir/limit 记到模块级槽，每次读 schema 现算 `📔 今日已发 N/M`（今天所有会话的合计，跳过过会额外标注）。
 - **适配器新增 `sendQzoneMsg()`**：包装协议端 `send_qzone_msg` 扩展（非 OneBot v11 标准）；失败返回 `{ok:false,msg}` 不抛错，不支持的实现自动降级。插件侧经 `bot.onebot.sendQzoneMsg` 调用，仍拿不到裸 send。
 ## 未发布 — 2026-10-23
 

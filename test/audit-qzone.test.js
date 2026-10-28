@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { bootKernel, GROUP_ID, ADMIN_QQ } from './helpers.mjs'
+import QZONE from '../plugins/qzone/index.js'
 
 const GROUP_KEY = `group:${GROUP_ID}`
 const PRIVATE_KEY = `private:${ADMIN_QQ}`
@@ -209,3 +210,103 @@ test('超长正文被截断而不是报错', async () => {
     dispose()
   }
 })
+
+// ── 额度持久化（跨重启）─────────────────────────────────────
+
+test('额度落盘：写过之后 qzone-state.json 存在且记录了条数', async () => {
+  const { tool, dataDir, dispose } = await boot()
+  try {
+    await tool('post_qzone').execute({ target: GROUP_KEY, content: '要落盘的一条' })
+    const file = path.join(dataDir, 'qzone-state.json')
+    assert.ok(fs.existsSync(file), '应有 qzone-state.json')
+    const st = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const d = new Date()
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    assert.ok(st[GROUP_KEY], '应有本会话的记录')
+    assert.equal(st[GROUP_KEY].date, key)
+    assert.equal(st[GROUP_KEY].posted, 1)
+  } finally {
+    dispose()
+  }
+})
+
+test('额度跨重启保留：卸载后用同一 dataDir 重装，配额仍然占着', async () => {
+  const first = await boot()
+  const { dataDir, tool, dispose } = first
+  try {
+    assert.equal((await tool('post_qzone').execute({ target: GROUP_KEY, content: '第一次' })).ok, true)
+  } finally {
+    dispose()
+  }
+
+  // 模拟重启：同一 dataDir 重新装配
+  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const calls2 = []
+  env2.kernel.onebot.sendQzoneMsg = async (p) => { calls2.push(p); return { ok: true } }
+  const tool2 = (n) => env2.ctx._registeredTools.get(`mcp__qq__${n}`)
+  try {
+    const s = await tool2('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(s.used, 1, '重启后应记得已经写过 1 条')
+    assert.equal(s.remaining, 0)
+    const r = await tool2('post_qzone').execute({ target: GROUP_KEY, content: '重启后的第二条' })
+    assert.equal(r.ok, false, '额度应该已经被占住')
+    assert.equal(calls2.length, 0, '不该真的发出去')
+  } finally {
+    env2.dispose()
+  }
+})
+
+test('skip 也落盘（重启后仍记得今天跳过过）', async () => {
+  const first = await boot()
+  const { dataDir, tool, dispose } = first
+  try {
+    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '没想写的' })
+  } finally {
+    dispose()
+  }
+
+  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const tool2 = (n) => env2.ctx._registeredTools.get(`mcp__qq__${n}`)
+  try {
+    const s = await tool2('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(s.skippedToday, true)
+    assert.equal(s.used, 0, 'skip 不占发布额度')
+  } finally {
+    env2.dispose()
+  }
+})
+
+// ── 控制台计数 ──────────────────────────────────────────────
+
+test('控制台 info 显示「今日已发 N/M」', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    // 0 条时
+    let text = getQzoneInfoText()
+    assert.match(text, /今日已发 0\/1/, `零条时应显示 0/1，实际：${text.slice(0, 60)}`)
+
+    // 写过 1 条后
+    await tool('post_qzone').execute({ target: GROUP_KEY, content: '计数测试' })
+    text = getQzoneInfoText()
+    assert.match(text, /今日已发 1\/1/, `写过之后应显示 1/1，实际：${text.slice(0, 60)}`)
+  } finally {
+    dispose()
+  }
+})
+
+test('控制台 info：跳过之后带上「今天已写过 skip」', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '今天不写' })
+    const text = getQzoneInfoText()
+    assert.match(text, /今日已发 0\/1/)
+    assert.match(text, /已写过 skip/, '应提示今天跳过过')
+  } finally {
+    dispose()
+  }
+})
+
+/** 取插件 configSchema.info.text（它会走 getter，现算计数） */
+function getQzoneInfoText() {
+  return String(QZONE.configSchema.info.text)
+}

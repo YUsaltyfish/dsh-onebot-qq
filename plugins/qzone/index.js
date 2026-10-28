@@ -1,4 +1,4 @@
-﻿/**
+/**
  * qzone — QQ 空间日记（order 62）
  *
  * 给机器人一个自己的 QQ 空间当日记本：每天最多一条，由它自己决定写不写。
@@ -27,10 +27,66 @@ function localDate() {
   return `${d.getFullYear()}-${mm}-${dd}`
 }
 
-/** 取本会话的日记槽（懒建；state 不可用时退化为本轮内存，不影响聊天） */
-function slotOf(bot, chatKey) {
-  const st = bot.state?.get?.(chatKey) ?? {}
-  return (st._scratch ||= Object.create(null))
+/**
+ * 额度落盘（跨重启保留）。
+ *
+ * 为什么不用 `bot.state._scratch`：那是内存态，进程重启就清空 —— 早上发过、下午重启，
+ * 额度又变回 0/M，能发第二条。日记本要「每天一条」就必须跨重启记住。
+ * 路径取 `bot.core.dataDir`（内核权威值，插件不自己拼 DSH_HOME）。
+ */
+function statePath(dataDir) {
+  return path.join(String(dataDir || '.'), 'qzone-state.json')
+}
+
+const readState = (dataDir) => {
+  try {
+    return JSON.parse(fs.readFileSync(statePath(dataDir), 'utf8')) || {}
+  } catch {
+    return {}
+  }
+}
+
+const writeState = (dataDir, value) => {
+  try {
+    fs.mkdirSync(path.dirname(statePath(dataDir)), { recursive: true })
+    fs.writeFileSync(statePath(dataDir), JSON.stringify(value, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 今日汇总（控制台计数用）：所有会话今天发了几条、跳过几次 */
+function todaySummary(dataDir) {
+  const all = readState(dataDir)
+  const d = localDate()
+  let posted = 0
+  let skipped = 0
+  let chats = 0
+  for (const v of Object.values(all)) {
+    if (!v || v.date !== d) continue
+    chats += 1
+    posted += Number(v.posted) || 0
+    if (v.skipped) skipped += 1
+  }
+  return { date: d, posted, skipped, chats }
+}
+
+/**
+ * 控制台顶部的计数行。
+ *
+ * 为什么读模块级 `RUNTIME`：内核渲染 schema 时只是把 `configSchema.info.text` 取出来
+ * （`String(entry.text || '')`），我们的 setup 还没跑过 —— 拿不到 `bot`。
+ * 所以在 setup 里把 dataDir/limit 记到 RUNTIME，getter 现算。
+ */
+const RUNTIME = { dataDir: '', limit: 1, ready: false }
+
+function consoleSummary() {
+  if (!RUNTIME.ready) return '📔 今日已发 —/—（等插件首次装配）'
+  const s = todaySummary(RUNTIME.dataDir)
+  const tail = s.skipped > 0 ? '（今天已写过 skip）' : ''
+  const where = s.chats > 1 ? `，涉及 ${s.chats} 个会话` : ''
+  return `📔 今日已发 ${s.posted}/${RUNTIME.limit}${tail}${where}`
 }
 
 export default {
@@ -41,11 +97,15 @@ export default {
   configSchema: {
     info: {
       type: 'info', group: '空间日记',
-      text: '给机器人一个自己的 QQ 空间当日记本。\n'
-        + '· 每天最多 1 条，由它自己决定写不写；不写不算欠账，第二天不补也不解释。\n'
-        + '· 到点后会提醒它考虑一次（提醒 ≠ 强制，它可以不理会）。\n'
-        + '· 配图只接受本地文件路径，不会往固定表情包图库里写东西。\n'
-        + '· 需要协议端支持 `send_qzone_msg` 扩展；不支持的实现会自动降级为「发不出去」并如实告知。',
+      // text 用 getter：每次读 schema 时现算，控制台刷新就能看到最新额度
+      get text() {
+        return consoleSummary() + '\n\n'
+          + '给机器人一个自己的 QQ 空间当日记本。\n'
+          + '· 每天最多 1 条，由它自己决定写不写；不写不算欠账，第二天不补也不解释。\n'
+          + '· 到点后会提醒它考虑一次（提醒 ≠ 强制，它可以不理会）。\n'
+          + '· 配图只接受本地文件路径，不会往固定表情包图库里写东西。\n'
+          + '· 需要协议端支持 `send_qzone_msg` 扩展；不支持的实现会自动降级为「发不出去」并如实告知。'
+      },
     },
     enabled: {
       type: 'bool', default: true, group: '空间日记',
@@ -81,11 +141,21 @@ export default {
 
   setup(bot) {
     const cfg = () => bot.cfg || {}
+    const dataDir = String(bot.core?.dataDir || '')
 
-    /** 本会话今天的日记槽（跨轮，按 chatKey 隔离） */
+    // 让控制台的 getter 能拿到真实路径与上限（schema 渲染早于 setup）
+    RUNTIME.dataDir = dataDir
+    RUNTIME.limit = Math.max(1, Number(cfg().dailyLimit) || 1)
+    RUNTIME.ready = true
+
+    /**
+     * 本会话今天的日记槽（跨重启保留）。
+     * 返回 `{ q, save }`：改完 `q` 要调 `save()` 才落盘。
+     */
     const todaySlot = (chatKey) => {
-      const s = slotOf(bot, chatKey)
-      const q = (s['qzone:today'] ||= {})
+      const all = readState(dataDir)
+      const key = String(chatKey || '')
+      const q = all[key] || { date: '', posted: 0, skipped: false, reminded: false }
       const d = localDate()
       if (q.date !== d) {
         q.date = d
@@ -93,7 +163,15 @@ export default {
         q.skipped = false
         q.reminded = false
       }
-      return q
+      all[key] = q
+      // 只留最近 60 天，避免文件无限长
+      const dates = new Set([])
+      for (const v of Object.values(all)) if (v?.date) dates.add(v.date)
+      if (dates.size > 60) {
+        const keep = new Set([...dates].sort().slice(-60))
+        for (const [k, v] of Object.entries(all)) if (!keep.has(v?.date)) delete all[k]
+      }
+      return { q, save: () => writeState(dataDir, all) }
     }
 
     const limit = () => Math.max(1, Number(cfg().dailyLimit) || 1)
@@ -145,7 +223,7 @@ export default {
         if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
         if (cfg().enabled === false) return { ok: false, reason: '空间日记未启用' }
 
-        const q = todaySlot(chatKey)
+        const { q, save } = todaySlot(chatKey)
         if (q.posted >= limit()) {
           return { ok: false, reason: `今天已经写过 ${q.posted} 条了（上限 ${limit()}），明天再来` }
         }
@@ -178,6 +256,10 @@ export default {
         if (!res?.ok) return { ok: false, reason: res?.msg || '发说说失败' }
 
         q.posted += 1
+        if (!save()) {
+          // 落盘失败不影响这次发布（说说已经发出去了），但要能看见
+          bot.log.warn('[空间] 额度落盘失败：重启后可能重复计数')
+        }
         bot.log.info(`[空间] 发出日记 ${body.length} 字${paths.length ? ` + ${paths.length} 张图` : ''}`
           + `（今天第 ${q.posted}/${limit()} 条）`)
         return { ok: true, posted: true, chars: body.length, images: paths.length }
@@ -199,7 +281,9 @@ export default {
         const chatKey = String(args.target || '')
         if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
         const why = String(args.reason ?? '').trim() || '(没说原因)'
-        todaySlot(chatKey).skipped = true
+        const { q, save } = todaySlot(chatKey)
+        q.skipped = true
+        save()
         bot.log.info(`[空间] 今天不写：${why}`)
         return { ok: true, skipped: true }
       },
@@ -217,7 +301,8 @@ export default {
       async execute(args = {}) {
         const chatKey = String(args.target || '')
         if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
-        const q = todaySlot(chatKey)
+        const { q } = todaySlot(chatKey)
+        const sum = todaySummary(dataDir)
         return {
           ok: true,
           enabled: cfg().enabled !== false,
@@ -226,6 +311,8 @@ export default {
           limit: limit(),
           remaining: Math.max(0, limit() - q.posted),
           skippedToday: q.skipped,
+          // 所有会话的今日汇总，方便模型/排障判断"今天到底写没写"
+          todayAll: { posted: sum.posted, chats: sum.chats, skipped: sum.skipped },
         }
       },
     })
@@ -238,10 +325,11 @@ export default {
       if (startHour <= 0) return
       if (new Date().getHours() < startHour) return
 
-      const q = todaySlot(ev.chatKey)
+      const { q, save } = todaySlot(ev.chatKey)
       if (q.reminded || q.posted > 0 || q.skipped) return
 
       q.reminded = true
+      save()
       if (!Array.isArray(ev.hint)) return
       ev.hint.push('[日记:今天还没写空间。想写就调 post_qzone(target, content, images?)，'
         + '每个会话一天只有这一条机会；不想写就调 skip_qzone(target, reason) '
