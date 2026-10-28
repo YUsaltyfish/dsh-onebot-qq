@@ -1,4 +1,4 @@
-/**
+﻿/**
  * kernel/onebot-adapter.js — 唯一碰外部的地方（OneBot v11 正向 WS + HTTP API）。
  *
  * 纪律：
@@ -396,6 +396,35 @@ export class OneBotAdapter {
       const raw = String(e?.message || e)
       this.log.warn(`[撤回] 请求异常 (message_id=${messageId}): ${raw.slice(0, 500)}`)
       return { ok: false, raw, msg: recallFailureText(raw, e?.name === 'TimeoutError') }
+    }
+  }
+
+  /**
+   * 发一条 QQ 空间说说（协议端扩展 API `send_qzone_msg`，非 OneBot v11 标准）。
+   *
+   * 返回 `{ ok: true }` / `{ ok: false, msg }`，不抛错 —— 说说失败不该拖垮聊天链路。
+   * 协议端不支持该扩展时，返回 ok:false 并说明原因，调用方自行降级。
+   *
+   * @param {{ content: string, images?: string[] }} params
+   *   content — 说说正文（必填）
+   *   images  — 可选，本地图片绝对路径数组（最多 9 张，协议端限制）
+   */
+  async sendQzoneMsg({ content = '', images = [] } = {}) {
+    const text = String(content || '').trim()
+    if (!text) return { ok: false, msg: '说说内容不能为空' }
+    const params = { content: text }
+    const list = (Array.isArray(images) ? images : [images]).filter(Boolean).map(String)
+    if (list.length) params.images = list.slice(0, 9)
+    try {
+      const { data } = await this._post('send_qzone_msg', params, 30000)
+      if (data.status === 'ok') return { ok: true }
+      const raw = String(data?.wording || data?.message || data?.retcode || '')
+      this.log.warn(`[空间] 发说说失败: ${raw.slice(0, 300) || '（无原文）'}`)
+      return { ok: false, raw, msg: raw || '协议端返回失败' }
+    } catch (e) {
+      const raw = String(e?.message || e)
+      this.log.warn(`[空间] 发说说请求异常: ${raw.slice(0, 300)}`)
+      return { ok: false, raw, msg: e?.name === 'TimeoutError' ? '发说说超时' : raw }
     }
   }
 

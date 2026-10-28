@@ -208,6 +208,7 @@ export function stubNapcat(kernel) {
   kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: ADMIN_QQ, nickname: '主人' }, message: '被引用的消息' })
   kernel.onebot.recall = async () => ({ ok: true })
   kernel.onebot.poke = async () => ({ ok: true })
+  kernel.onebot.sendQzoneMsg = async () => ({ ok: true })
   kernel.onebot.fetchAvatar = async () => ({ ok: true, path: '' })
   kernel.onebot.getFile = async () => ''
   kernel.onebot.resolveMemberByName = async (_gid, name) => (name === '奶茶' ? 123456789 : null)

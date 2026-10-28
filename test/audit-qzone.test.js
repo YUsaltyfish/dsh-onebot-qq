@@ -1,0 +1,211 @@
+/**
+ * test/audit-qzone.test.js — QQ 空间日记子插件（order 62）
+ *
+ * 覆盖三条最容易回归的行为：
+ *   · **"不写"绝不进空间**：skip_qzone 一次都不调协议端；post_qzone 收到"不写"正文时拒绝
+ *   · **配额**：每会话每天上限；跨会话互不干扰
+ *   · **配图**：拒绝表情包库里的文件（防污染固定图库）
+ *
+ * 打桩方式：直接替掉 kernel.onebot.sendQzoneMsg，不碰真实协议端。
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+
+import { bootKernel, GROUP_ID, ADMIN_QQ } from './helpers.mjs'
+
+const GROUP_KEY = `group:${GROUP_ID}`
+const PRIVATE_KEY = `private:${ADMIN_QQ}`
+
+/** 起内核 + 给 sendQzoneMsg 打桩；返回调用记录 */
+async function boot() {
+  const env = await bootKernel({ config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const calls = []
+  env.kernel.onebot.sendQzoneMsg = async (params) => {
+    calls.push(params)
+    return { ok: true }
+  }
+  const tool = (name) => env.ctx._registeredTools.get(`mcp__qq__${name}`)
+  return { ...env, calls, tool }
+}
+
+test('qzone 插件已装配，三个工具都在', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    for (const name of ['post_qzone', 'skip_qzone', 'qzone_status']) {
+      assert.ok(tool(name), `应注册 ${name}`)
+    }
+  } finally {
+    dispose()
+  }
+})
+
+test('skip_qzone 不发任何内容', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const r = await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '今天没啥好写的' })
+    assert.equal(r.ok, true)
+    assert.equal(r.skipped, true)
+    assert.equal(calls.length, 0, 'skip 不该调用协议端')
+  } finally {
+    dispose()
+  }
+})
+
+test('post_qzone 正文是「不写」时拒绝（不发出去）', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: '今天不写' })
+    assert.equal(r.ok, false)
+    assert.match(r.reason, /skip_qzone/)
+    assert.equal(calls.length, 0, '被拦下时不该调用协议端')
+  } finally {
+    dispose()
+  }
+})
+
+test('post_qzone 正常内容会发出去，且带内容与字数', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: '今天遇到一件小事。' })
+    assert.equal(r.ok, true)
+    assert.equal(r.posted, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].content, '今天遇到一件小事。')
+    assert.equal(r.chars, '今天遇到一件小事。'.length)
+  } finally {
+    dispose()
+  }
+})
+
+test('配额：同一会话当天第二条被拒', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const first = await tool('post_qzone').execute({ target: GROUP_KEY, content: '第一条' })
+    assert.equal(first.ok, true)
+    const second = await tool('post_qzone').execute({ target: GROUP_KEY, content: '第二条' })
+    assert.equal(second.ok, false)
+    assert.match(second.reason, /今天已经写过/)
+    assert.equal(calls.length, 1, '第二条不该发出去')
+  } finally {
+    dispose()
+  }
+})
+
+test('配额按会话隔离：群写过不影响私聊', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    assert.equal((await tool('post_qzone').execute({ target: GROUP_KEY, content: '群里的' })).ok, true)
+    // 私聊是另一条线，额度独立
+    assert.equal((await tool('post_qzone').execute({ target: PRIVATE_KEY, content: '私聊的' })).ok, true)
+  } finally {
+    dispose()
+  }
+})
+
+test('qzone_status 反映当天使用情况', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    const before = await tool('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(before.used, 0)
+    assert.equal(before.remaining, 1)
+    await tool('post_qzone').execute({ target: GROUP_KEY, content: '写一条' })
+    const after = await tool('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(after.used, 1)
+    assert.equal(after.remaining, 0)
+  } finally {
+    dispose()
+  }
+})
+
+test('skip 之后状态里能看到 skippedToday', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '不想写' })
+    const s = await tool('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(s.skippedToday, true)
+    assert.equal(s.used, 0)
+  } finally {
+    dispose()
+  }
+})
+
+test('配图：拒绝引用表情包库里的文件（防污染固定图库）', async () => {
+  const { tool, calls, dataDir, dispose } = await boot()
+  try {
+    const stickerDir = path.join(dataDir, 'qq-stickers')
+    fs.mkdirSync(stickerDir, { recursive: true })
+    const sticker = path.join(stickerDir, '1-abc.png')
+    fs.writeFileSync(sticker, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+
+    const r = await tool('post_qzone').execute({
+      target: GROUP_KEY, content: '带图的一条', images: [sticker],
+    })
+    assert.equal(r.ok, false)
+    assert.match(r.reason, /污染/)
+    assert.equal(calls.length, 0)
+  } finally {
+    dispose()
+  }
+})
+
+test('配图：不存在的路径直接被拒', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const r = await tool('post_qzone').execute({
+      target: GROUP_KEY, content: '带图的一条', images: ['/definitely/not/here.png'],
+    })
+    assert.equal(r.ok, false)
+    assert.match(r.reason, /不存在/)
+    assert.equal(calls.length, 0)
+  } finally {
+    dispose()
+  }
+})
+
+test('配图：合法路径会作为 images 传给协议端', async () => {
+  const { tool, calls, dataDir, dispose } = await boot()
+  try {
+    const okDir = path.join(dataDir, 'qzone-imgs')
+    fs.mkdirSync(okDir, { recursive: true })
+    const pic = path.join(okDir, 'diary.png')
+    fs.writeFileSync(pic, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: '配一张图', images: pic })
+    assert.equal(r.ok, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].images.length, 1)
+    assert.equal(calls[0].images[0], fs.realpathSync(pic))
+  } finally {
+    dispose()
+  }
+})
+
+test('协议端失败时如实返回 ok:false，且不记账', async () => {
+  const { tool, kernel, dispose } = await boot()
+  try {
+    kernel.onebot.sendQzoneMsg = async () => ({ ok: false, msg: '协议端不支持' })
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: '会失败的一条' })
+    assert.equal(r.ok, false)
+    assert.match(r.reason, /协议端不支持/)
+    // 失败的尝试不该占用当天额度
+    const s = await tool('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(s.used, 0)
+  } finally {
+    dispose()
+  }
+})
+
+test('超长正文被截断而不是报错', async () => {
+  const { tool, calls, dispose } = await boot()
+  try {
+    const long = '啊'.repeat(400) // 默认上限 300
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: long })
+    assert.equal(r.ok, true)
+    assert.equal(r.chars, 300)
+    assert.equal(calls[0].content.length, 300)
+  } finally {
+    dispose()
+  }
+})

@@ -695,6 +695,9 @@ export async function apply(ctx, bundleConfig = {}) {
         poke: (...a) => onebot.poke(...a),
         recall: (...a) => onebot.recall(...a),
         fetchAvatar: (...a) => onebot.fetchAvatar(...a),
+        // QQ 空间说说：不是聊天消息，不经过 deliver（脱敏/留档只针对聊天出站），
+        // 但它仍属于受控动作 —— 由内核封装、失败降级，插件拿不到裸 send。
+        sendQzoneMsg: (...a) => onebot.sendQzoneMsg(...a),
         health: () => onebot.health(),
       }
     },
