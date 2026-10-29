@@ -29,6 +29,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { senderNameOf } from '../../kernel/format.js'
 import { readJsonFile, writeJsonFileSync, atomicWriteFileSync } from '../../platform/atomic.js'
 import { ensureDir } from '../../platform/paths.js'
 
@@ -104,10 +106,24 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
    * 两者差一轮模型调用的时长：用 Date.now() 会把积累期间新到的消息一起标成已消化（旧版会丢这些消息）。
    */
   const digestedAtOf = (gid) => Number(state.groups?.[gid]?.digestedAt) || 0
-  function markDigested(gid, ts) {
+  // ID 不跨方向复用；无 ID 的旧留档用内容指纹，轮转/裁剪后仍稳定。
+  const messageKey = (row) => createHash('sha256').update(JSON.stringify(
+    row.messageId != null
+      ? [row.dir, String(row.messageId), row.ts]
+      : [row.dir, row.ts, row.sender, row.text],
+  )).digest('hex')
+  function isDigested(gid, row, seen) {
+    const group = state.groups[gid] || {}
+    if (Array.isArray(group.seenMessages)) {
+      return Number(row.ts) < (Number(group.legacyDigestedBefore) || 0) || (seen || new Set(group.seenMessages.map(([key]) => key))).has(messageKey(row))
+    }
+    return Number(row.ts) < digestedAtOf(gid) // 旧水位边界重放一次，不回灌更早历史
+  }
+  function markDigested(gid, ts, checkpoint) {
     const at = Number(ts)
     if (!(at > 0)) return false // 没喂到任何消息 → 不推水位（下轮重试）
-    state.groups[gid] = { ...(state.groups[gid] || {}), digestedAt: at, at: Date.now() }
+    const old = state.groups[gid] || {}
+    state.groups[gid] = { ...old, ...checkpoint, digestedAt: Math.max(digestedAtOf(gid), at), at: Date.now() }
     return true
   }
 
@@ -144,7 +160,8 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
 
   /**
    * 读某群「上次消化之后」的聊天留档（jsonl，含轮转文件），按时间升序。
-   * 水位是**包含式**的（ts <= digestedAt 视为已处理），避免把边界那条无限重喂。
+   * 在既有 lookback 窗口内重叠读取，以稳定消息键去重，接住同秒/乱序迟到消息。
+   * 旧版纯 ts 水位只重放边界一次；更早的旧历史保持已处理语义。
    * @returns {{rows:Array, total:number, newestTs:number}} rows = 最近 msgPerGroup 条窗口（更早的计入 total）
    */
   function readRecentMessages(gid) {
@@ -158,7 +175,11 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
         .map((x) => x.n)
     } catch { return { rows: [], total: 0, newestTs: 0 } }
     // 只取「上次消化之后」的新消息；从没消化过就取最近 lookback 窗口
-    const since = digestedAtOf(gid) || (Date.now() - lookbackMs())
+    const group = state.groups[gid] || {}
+    const since = Array.isArray(group.seenMessages)
+      ? Math.max(Number(group.replayFrom) || 0, Date.now() - lookbackMs())
+      : (digestedAtOf(gid) || (Date.now() - lookbackMs()))
+    const seen = new Map(Array.isArray(group.seenMessages) ? group.seenMessages : [])
     const out = []
     for (const n of names) {
       let text = ''
@@ -168,20 +189,30 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
         if (!s) continue
         let row
         try { row = JSON.parse(s) } catch { continue }
+        if (!row || typeof row !== 'object') continue
         const ts = Number(row?.ts) || 0
-        if (ts && ts <= since) continue
+        if (ts && ts < since) continue
+        const key = messageKey(row)
+        if (seen.has(key)) continue
+        seen.set(key, ts)
         const msg = String(row?.text ?? '').replace(/\s+/g, ' ').trim()
         if (!msg) continue
         if (/^\[CQ:[^\]]+\]$/.test(msg)) continue // 纯图片/表情占位不喂给模型
         const outbound = row?.dir === 'out'
-        const nick = String(row?.sender?.nickname || row?.sender?.card || '').trim()
+        const nick = String(senderNameOf(row.sender) || '').trim()
         const qq = String(row?.sender?.qq ?? '').trim()
-        out.push({ ts, out: outbound, who: outbound ? '机器人' : (nick && qq ? `${nick}(${qq})` : (nick || qq || '未知')), text: msg })
+        out.push({ ts, out: outbound, who: outbound ? '机器人' : (nick && qq && nick !== qq ? `${nick}(${qq})` : (nick || qq || '未知')), text: msg })
       }
     }
     out.sort((a, b) => a.ts - b.ts)
     const newestTs = out.length ? out[out.length - 1].ts : 0
-    return { rows: out.slice(-msgPerGroup()), total: out.length, newestTs }
+    // 去重状态只保留回看窗口；不能按条数截断同秒边界，否则迟到消息会再次漏掉。
+    const checkpoint = {
+      replayFrom: since,
+      legacyDigestedBefore: Number(group.legacyDigestedBefore) || (!Array.isArray(group.seenMessages) ? digestedAtOf(gid) : 0),
+      seenMessages: [...seen].filter(([, ts]) => ts >= since),
+    }
+    return { rows: out.slice(-msgPerGroup()), total: out.length, newestTs, checkpoint }
   }
 
   /**
@@ -563,6 +594,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       if (!m || !groups.has(m[1])) continue
       const gid = m[1]
       const digestedAt = digestedAtOf(gid)
+      const seen = new Set((state.groups[gid]?.seenMessages || []).map(([key]) => key))
       const file = path.join(dir, n)
       let text = ''
       try { text = fs.readFileSync(file, 'utf8') } catch { continue }
@@ -570,19 +602,20 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       let removed = 0
       for (const line of text.split('\n')) {
         if (!line.trim()) continue
-        let ts = 0
-        try { ts = Number(JSON.parse(line)?.ts) || 0 } catch { ts = 0 }
+        let row
+        try { row = JSON.parse(line) || {} } catch { row = {} }
+        const ts = Number(row?.ts) || 0
         const expired = cutoff > 0 && ts > 0 && ts < cutoff
-        const digested = digestedAt > 0 && ts <= digestedAt
+        const digested = digestedAt > 0 && isDigested(gid, row, seen)
         if (expired && digested) { removed += 1; continue }
-        rows.push({ line, ts })
+        rows.push({ line, ts, digested })
       }
       if (keepRows > 0 && rows.length > keepRows) {
         const overflow = rows.length - keepRows
         let dropped = 0
         const kept = []
         for (const r of rows) {
-          if (dropped < overflow && digestedAt > 0 && r.ts <= digestedAt) { dropped += 1; removed += 1; continue }
+          if (dropped < overflow && r.digested) { dropped += 1; removed += 1; continue }
           kept.push(r)
         }
         rows.length = 0
@@ -815,7 +848,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       throw new Error('points 里没有解析到任何 Markdown 列表行；请按 `- **昵称(QQ)**：…` / `- 风格：…` / `- 其它：…` 重新提交，没有新增写「（无新增）」')
     }
     const fedTs = b.lastFedTs?.get?.(gid) || 0
-    markDigested(gid, fedTs)
+    markDigested(gid, fedTs, b.checkpoints.get(gid))
     b.applied.add(gid)
     b.result.sampledOut = (b.result.sampledOut || 0) + (b.sampled?.get?.(gid) || 0)
     recordGroup(b.result, gid, (m.added || m.updated || m.dropped) ? 'updated' : 'skipped')
@@ -869,7 +902,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       if (!parsed.size) return { gid, status: 'failed', detail: '模型输出为空或格式不符', sampled }
       const m = mergeDigest(gid, parsed.get(gid))
       if (!m.parsed && !m.none) return { gid, status: 'failed', detail: '模型提交的内容没有可解析的列表行，未写盘（不推水位）', sampled }
-      markDigested(gid, lastFedTs)
+      markDigested(gid, lastFedTs, item0.checkpoint)
       return {
         gid,
         status: (m.added || m.updated || m.dropped) ? 'updated' : 'skipped',
@@ -880,7 +913,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       }
     }
     const r = applyModelText(gid, res?.text)
-    if (r.status !== 'failed') markDigested(gid, lastFedTs)
+    if (r.status !== 'failed') markDigested(gid, lastFedTs, item0.checkpoint)
     return { ...r, sampled }
   }
 
@@ -902,14 +935,14 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       const sampled = Math.max(0, Number(d.total || d.rows.length) - tr.included.length)
       const size = (old?.text || '').length + tr.text.length + 400
       if (cur.length && curLen + size > batchMaxCharsOf()) { chunks.push(cur); cur = []; curLen = 0 }
-      cur.push({ gid: d.gid, rows: d.rows, oldText: old?.text || '', transcript: tr.text, lastFedTs, sampled })
+      cur.push({ gid: d.gid, rows: d.rows, oldText: old?.text || '', transcript: tr.text, lastFedTs, sampled, checkpoint: d.checkpoint })
       curLen += size
     }
     if (cur.length) chunks.push(cur)
 
     for (const chunk of chunks) {
       const items = chunk.map((it) => ({
-        gid: it.gid, oldText: it.oldText, transcript: it.transcript, lastFedTs: it.lastFedTs, sampled: it.sampled,
+        gid: it.gid, oldText: it.oldText, transcript: it.transcript, lastFedTs: it.lastFedTs, sampled: it.sampled, checkpoint: it.checkpoint,
       }))
       const mode = accumulateMode() === 'rewrite' ? 'rewrite' : 'digest'
       const gids = new Set(items.map((it) => it.gid))
@@ -922,6 +955,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
           gids,
           result,
           applied: viaTool,
+          checkpoints: new Map(items.map((it) => [it.gid, it.checkpoint])),
           lastFedTs: new Map(items.map((it) => [it.gid, it.lastFedTs])),
           sampled: new Map(items.map((it) => [it.gid, it.sampled])),
         }
@@ -967,7 +1001,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
                 result.failed.push({ gid: it.gid, detail: '正文里没有可解析的列表行，未写盘（不推水位）' })
                 continue
               }
-              markDigested(it.gid, it.lastFedTs)
+              markDigested(it.gid, it.lastFedTs, it.checkpoint)
               result.sampledOut = (result.sampledOut || 0) + (it.sampled || 0)
               recordGroup(result, it.gid, (m.added || m.updated || m.dropped) ? 'updated' : 'skipped')
               result.digest.push({ gid: it.gid, ...m, via: 'text' })
@@ -994,7 +1028,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
         try {
           const r = applyModelText(it.gid, text)
           if (r.status !== 'failed') {
-            markDigested(it.gid, it.lastFedTs)
+            markDigested(it.gid, it.lastFedTs, it.checkpoint)
             result.sampledOut = (result.sampledOut || 0) + (it.sampled || 0)
             if (r.status === 'updated') result.updated.push(it.gid)
             else result.skipped.push(it.gid)
@@ -1042,7 +1076,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
         result.skipped.push(gid)
         continue
       }
-      due.push({ gid, rows: rd.rows, total: rd.total, newestTs: rd.newestTs })
+      due.push({ gid, rows: rd.rows, total: rd.total, newestTs: rd.newestTs, checkpoint: rd.checkpoint })
     }
     if (due.length) {
       if (accumulateMode() === 'per-group') {

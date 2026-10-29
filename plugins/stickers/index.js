@@ -18,6 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { cqImage } from '../../platform/cq-file.js'
 import { createShelf, readIndex } from './shelf.js'
+import { readLocalBytes, fetchBytes as downloadBytes } from '../../kernel/media-bytes.js'
 
 /** 是不是 GIF（GIF87a / GIF89a）。**按内容魔数判，不看扩展名** —— 扩展名改成 .jpg 也拦得住。 */
 function isGif(buf) {
@@ -95,7 +96,8 @@ export default {
   setup(bot) {
     const cfg = bot.cfg || {}
     const log = bot.log
-    const dir = String(cfg.dir || '').trim() || path.join(String(bot.core?.dataDir || '.'), 'qq-stickers')
+    const dirNow = () => String(cfg.dir || '').trim() || path.join(String(bot.core?.dataDir || '.'), 'qq-stickers')
+    let dir = dirNow()
     // 单位口径（与 admin-bridge 一致）：schema 写 unit:'秒' + scale:1000 ⇒ 配置存**人话单位（秒）**，
     // 用的时候乘回毫秒。全文件只有这一处换算 —— 内核若改成存毫秒，只改这一行。
     const cooldownMs = () => Math.max(0, Number(cfg.offerCooldownMs) || 0) * 1000
@@ -112,13 +114,28 @@ export default {
     const offerAt = new Map() // chatKey -> 上次提醒时间（丢了也只会早提醒一次，不值得进 ChatState）
 
     // 存储核心（自己的实现，见 ./shelf.js）。单写者 = 本插件那条串行队列。
-    const shelf = createShelf({
+    const createCurrentShelf = () => createShelf({
       dir,
-      maxItems: Math.max(1, Number(cfg.max) || 200),
+      maxItems: () => Math.max(1, Number(cfg.max) || 200),
       maxBytes: 2 * 1024 * 1024, // 单张 ≤2MB（表情常见 1~2MB）
       minBytes: 1024, // 挡掉 icon 那种几十字节的垃圾
       log: (...a) => log.info('[表情] ' + a.join(' ')),
     })
+    let shelf = createCurrentShelf()
+    // Capture the destination at enqueue time; only switch resources between jobs.
+    // A download already in flight must finish in its original library.
+    function withShelf(fn) {
+      const wanted = dirNow()
+      return queue.push(() => {
+        if (dir !== wanted) {
+          dir = wanted
+          shelf = createCurrentShelf()
+          prunedAt = 0
+          recentSent.length = 0
+        }
+        return fn(shelf)
+      })
+    }
 
     /**
      * 取图字节：① 段里的 file 是现成本地文件就直接读；② 原始 url 直链兜底。
@@ -129,26 +146,25 @@ export default {
     async function fetchBytes(file, url) {
       const tried = []
       const local = String(file || '')
+      const limits = { maxBytes: 2 * 1024 * 1024, timeoutMs: 15000 }
       if (local && fs.existsSync(local)) {
-        try { if (fs.statSync(local).isFile()) return fs.readFileSync(local) } catch (e) { tried.push(`本地读取失败 ${e.message}`) }
+        try { return await readLocalBytes(local, limits) } catch (e) {
+          if (e.code === 'MEDIA_TOO_LARGE') throw e
+          tried.push(`本地读取失败 ${e.message}`)
+        }
       }
       if (local && !/^https?:\/\//.test(local) && typeof bot.onebot?.getFile === 'function') {
         try {
           const info = await bot.onebot.getFile(local)
-          if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) return fs.readFileSync(info.file)
-          if (info?.url && /^https?:\/\//.test(info.url)) {
-            const r = await fetch(info.url, { signal: AbortSignal.timeout(15000) })
-            if (r.ok) return Buffer.from(await r.arrayBuffer())
-            tried.push(`溯源直链 HTTP ${r.status}`)
-          }
-        } catch (e) { tried.push(`get_file ${e.message}`) }
+          if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) return await readLocalBytes(info.file, limits)
+          if (info?.url && /^https?:\/\//.test(info.url)) return await downloadBytes(info.url, limits)
+        } catch (e) {
+          if (e.code === 'MEDIA_TOO_LARGE') throw e
+          tried.push(`get_file ${e.message}`)
+        }
       }
       const link = /^https?:\/\//.test(String(url || '')) ? url : (/^https?:\/\//.test(local) ? local : '')
-      if (link) {
-        const res = await fetch(link, { signal: AbortSignal.timeout(15000) })
-        if (res.ok) return Buffer.from(await res.arrayBuffer())
-        tried.push(`直链 HTTP ${res.status}`)
-      }
+      if (link) return downloadBytes(link, limits)
       throw new Error(tried.join(' / ') || '没有可用的图片来源')
     }
 
@@ -280,10 +296,11 @@ export default {
     }
 
     /** 随机池大小（只读盘，不排队）：掷骰前置判断"挑得到才提示"。 */
-    const pickableCount = () => readIndex(dir).items.filter((i) => !i.blocked && i.file).length
+    const pickableCount = () => readIndex(dirNow()).items.filter((i) => !i.blocked && i.file).length
 
     /** 控制台「表情包」页顶部那行实时概况（数量随时变 → 由这里现算，不写进 schema 静态文字）。 */
     bot.shared.stickerStats = () => {
+      const dir = dirNow()
       // 数量必须和磁盘对得上：只算文件真实存在的条目（手删图片后控制台立刻少一张）
       const all = readIndex(dir).items.filter((i) => !i.blocked && i.file)
       const items = all.filter((i) => fs.existsSync(path.join(dir, i.file)))
@@ -314,7 +331,7 @@ export default {
       if (ev?.historyBlock) ctx += '\n' + strip(ev.historyBlock)
       if (!ctx.trim()) return ''
       let items = []
-      try { items = readIndex(dir).items } catch { return '' }
+      try { items = readIndex(dirNow()).items } catch { return '' }
       const hit = new Set()
       for (const it of items) {
         if (!it || it.blocked || !it.file) continue
@@ -332,7 +349,7 @@ export default {
     /** 挑图（工具与自检共用；所有触碰索引的动作都走这条队列）。 */
     async function pick(query) {
       if (cfg.enabled === false) return { ok: false, reason: '表情库没开' }
-      return queue.push(async () => {
+      return withShelf(async (shelf) => {
         try { return await pickLocked(shelf, query) } catch (e) {
           log.warn(`[表情] 挑图失败: ${e.message}`)
           return { ok: false, reason: '挑图出错' }
@@ -348,7 +365,7 @@ export default {
       // 直接从**原始段**读协议字段：这条判据是我们自己钉的，不借道适配器算好的 ev.images[].isSticker（防它改宽）
       const segs = (ev.rawSegments || []).filter((s) => s && s.type === 'image' && isStickerSeg(s))
       if (!segs.length) return
-      queue.push(() => harvest(segs, ev)).catch((e) => log.warn(`[表情] 采集失败（不影响聊天）: ${e.message}`))
+      withShelf(() => harvest(segs, ev)).catch((e) => log.warn(`[表情] 采集失败（不影响聊天）: ${e.message}`))
     })
 
     // ── 入口 ②：主动想起（内核管概率、模型管语境、本插件管挑图） ───────────────
@@ -437,7 +454,7 @@ export default {
       parameters: {
         limit: { type: 'number', description: '最多列几条，默认 30' },
       },
-      execute: async (args) => queue.push(async () => {
+      execute: async (args) => withShelf(async (shelf) => {
         try {
           await pruneLocked(shelf)
           return {

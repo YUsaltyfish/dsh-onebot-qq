@@ -67,6 +67,8 @@ export function createDshDriver(opts) {
   const turnEndFns = new Map()    // sessionId -> Set<fn>
   const turnStartFns = new Map()  // sessionId -> Set<fn>
   const unsubs = []               // ctx.on(...) 的 disposer
+  const isolatedTasks = new Set() // 调用结束不等于 agent 结束；超时后仍保留隔离和结束订阅
+  let closed = false
 
   // 会话标题同步的状态（每次 sync 都读写这个小文件，不塞进会话映射里 —— 两者生命周期不同）
   let autoTitlesFile = path.join(path.dirname(settings.sessionsFile), 'session-titles.json')
@@ -173,15 +175,21 @@ export function createDshDriver(opts) {
    * 需要改标题的调用方直接用下面的 rename()。
    */
   async function ensureSession(chatKey, nameHint = '') {
+    if (closed) throw new Error('会话驱动已关闭')
     const existing = sessions.get(chatKey)
     if (existing) {
       await ensureUnarchived(existing)   // 被归档的会话 = 每步都被门禁挡死，先解档再说
+      if (closed) throw new Error('会话驱动已关闭')
       return existing
     }
     const inflight = creating.get(chatKey)
     if (inflight) return inflight      // 同一条线两条消息同秒进来时，别建出两条会话
     const task = (async () => {
       const sessionId = await ipCreateSession()
+      if (closed) {
+        try { await archive(sessionId) } catch (e) { log.debug(`归档未提交会话失败 (${sessionId}): ${e.message}`) }
+        throw new Error('会话驱动已关闭')
+      }
       sessions.set(chatKey, sessionId)
       saveSessions()
       log.info(`为 ${chatKey} 创建 DSH 会话: ${sessionId}（${nameHint || '无名'}）preset=${settings.agentPreset || '默认'}`)
@@ -275,13 +283,14 @@ export function createDshDriver(opts) {
    *   · 不进 sessions.json（不占用 QQ 线映射）；cwd = 数据目录，不挂 QQ 工作区；
    *   · 用当前 QQ preset（工具面已裁剪），并且内核会在工具入口拒绝「后台任务会话」调用工具
    *     （`kernel.maintSessionIds`）—— 双保险，绝不会把积累结果发到群里；
-   *   · 超时/失败都会归档清场，不留在侧栏。
+   *   · 超时/卸载会请求取消；只有确认结束或准入失败才撤销隔离并归档。
    * @param {{name?:string, prompt:string, timeoutMs?:number}} opts
    * @returns {Promise<{ok:boolean, sessionId:string, text:string, reason:string}>}
    */
   async function runIsolatedTask({ name = '后台任务', prompt: taskPrompt, timeoutMs = 10 * 60000, cwd = '' } = {}) {
     const text = String(taskPrompt ?? '').trim()
     if (!text) throw new Error('runIsolatedTask 需要 prompt')
+    if (closed) throw new Error('会话驱动已关闭')
     if (typeof ctx.sessionController?.create !== 'function') throw new Error('sessionController 服务不可用，无法执行后台任务')
     const created = await ctx.sessionController.create({
       cwd: String(cwd || settings.workspacePath || '').trim() || undefined,
@@ -291,30 +300,70 @@ export function createDshDriver(opts) {
     if (!sessionId) throw new Error('创建后台任务会话失败（没有 sessionId）')
     if (opts.maintSessionIds?.add) opts.maintSessionIds.add(sessionId)
     let reason = ''
-    const finished = new Promise((resolve, reject) => {
-      let off = null
-      const timer = setTimeout(() => {
-        off?.()
-        reject(new Error(`${name}超时（${Math.round(Number(timeoutMs) / 1000)}s）`))
-      }, Math.max(30000, Number(timeoutMs) || 600000))
-      timer.unref?.()
-      off = onTurnEnd(sessionId, (event) => {
-        clearTimeout(timer)
-        off?.()
-        reason = String(event?.reason || '')
-        resolve(event)
-      })
-    })
-    try {
-      await prompt(sessionId, text)
-      await finished
-      const out = await readLastAssistantText(sessionId)
-      return { ok: Boolean(out), sessionId, text: out, reason }
-    } finally {
+    let admitted = false
+    let ended = false
+    let stopped = null
+    let cleanupPromise = null
+    let resolveFinished
+    // 生命周期信号只 resolve：即使准入尚未返回，也不会留下延迟未处理拒绝。
+    const finished = new Promise((resolve) => { resolveFinished = resolve })
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise
+      clearTimeout(timer)
+      off()
+      isolatedTasks.delete(task)
       try { opts.maintSessionIds?.delete?.(sessionId) } catch { /* ignore */ }
-      // 归档：后台会话不该留在侧栏；失败只记 debug
-      try { await archive(sessionId) } catch (e) { log.debug(`归档后台任务会话失败 (${sessionId}): ${e.message}`) }
+      cleanupPromise = (async () => {
+        try { await archive(sessionId) } catch (e) { log.debug(`归档后台任务会话失败 (${sessionId}): ${e.message}`) }
+      })()
+      if (closed && !isolatedTasks.size) releaseSubscriptions()
+      return cleanupPromise
     }
+    const task = {
+      stop(error) {
+        if (stopped || ended) return
+        stopped = error
+        clearTimeout(timer)
+        resolveFinished({ error })
+        // cancel 只是请求，不是终止确认；准入还在途时，必须等其返回后再取消。
+        if (admitted) void cancel(sessionId)
+      },
+    }
+    const off = onTurnEnd(sessionId, (event) => {
+      ended = true
+      reason = String(event?.reason || '')
+      resolveFinished({})
+      void cleanup()
+    })
+    const timer = setTimeout(() => {
+      task.stop(new Error(`${name}超时（${Math.round(Number(timeoutMs) / 1000)}s）`))
+    }, Math.max(30000, Number(timeoutMs) || 600000))
+    timer.unref?.()
+    isolatedTasks.add(task)
+    if (closed) task.stop(new Error('会话驱动已关闭'))
+    // close 可能发生在 create 的等待期间，此时不得再提交。
+    const admission = (async () => {
+      if (closed) {
+        await cleanup()
+        return { error: stopped }
+      }
+      try {
+        await prompt(sessionId, text)
+        admitted = true
+        if (stopped && !ended) void cancel(sessionId)
+        return null
+      } catch (error) {
+        await cleanup()
+        return { error }
+      }
+    })()
+    const first = await Promise.race([admission, finished])
+    if (first?.error) throw first.error
+    const result = first || await finished
+    if (result.error) throw result.error
+    await cleanup()
+    const out = await readLastAssistantText(sessionId)
+    return { ok: Boolean(out), sessionId, text: out, reason }
   }
 
   /** 统一入口：失败先丢图重发纯文本的降级策略，底层提交走 sessionController。 */
@@ -335,6 +384,7 @@ export function createDshDriver(opts) {
 
   /** 提交：唯一正确路径就是 sessionController.prompt（理由见文件头）。 */
   async function submitPrompt(sessionId, content) {
+    if (closed) throw new Error('会话驱动已关闭')
     await ctx.sessionController.prompt(
       { requestId: crypto.randomUUID(), sessionId, mode: 'queue', content },
       new AbortController().signal,   // 本驱动不主动中断准入阶段；取消走 cancel()
@@ -608,12 +658,20 @@ export function createDshDriver(opts) {
   }
 
   // ── 卸载 ────────────────────────────────────────────────────
-  function close() {
+  function releaseSubscriptions() {
     for (const off of unsubs.splice(0)) {
       try { off() } catch { /* 上下文可能已卸载 */ }
     }
     turnEndFns.clear()
     turnStartFns.clear()
+  }
+
+  function close() {
+    if (closed) return
+    closed = true
+    for (const task of isolatedTasks) task.stop(new Error('会话驱动已关闭'))
+    // 尚未结束的后台 agent 仍受工具守卫约束，晚到 turn/end 才能释放身份。
+    if (!isolatedTasks.size) releaseSubscriptions()
   }
 
   /**

@@ -6,6 +6,10 @@
 
 群记忆正确性与控制台修复（不新增功能、不改对外配置键）：
 
+### 删除
+
+- 删除视频内容识别及视频链接抽帧两个子插件、对应配置入口与专用测试；保留链接解析及媒体发送能力。
+
 ### 修复
 
 - **兼容 SnowLuma 等其它 OneBot v11 协议端**：引用回复允许**负 `message_id`**（SnowLuma 的 id 是有符号 int32 哈希、经常为负；原来 `<=0` 当「不挂引用」会让引用静默失效 —— 现在只有 `0` 才表示不挂），`parseWire` 的引用解析同步认负号；`get_group_msg_history` 同时发 `message_id: 0` 与 `message_seq: 0`（SnowLuma 认 `message_id`、NapCat 认 `message_seq`，两边都忽略未知键）；在线探针优先看 `get_status`（`online=false` 判掉线、`good=false` 判「接收链路停滞」——SnowLuma hook 卡住时发得出收不进，光靠 `get_stranger_info` 会误判在线），心跳里的 `status.good` 记进 `health().qqReceiveGood`；拿不到 `get_status`/字段时行为与原来一致（纯 NapCat 不受影响）。
@@ -89,21 +93,17 @@
 
 ## 0.1.1 — 2026-10-21
 
-新增 4 个可选子插件（来自社区 PR #1），并修掉 review 发现的问题。
+新增可选子插件（来自社区 PR #1），并修掉 review 发现的问题。
 
 ### 新增
 
 - `anti-repeat`：同一个人同一句话刷屏冷却（超过次数甩一句 + 整线冷却，零 token）。
 - `private-friend-gate`：私聊只回好友（好友列表缓存；拉取失败时 fail-open，不误伤）。
-- `video-read` / `video-link-read`：群视频 / B 站·抖音链接抽帧给模型看（需要本地解析侧车；没装或没起时自动降级）。
-- 控制台对应开关（「唤醒」页防刷屏、「文件与图片」页看视频、「其他」页私聊门禁）。
+- 控制台对应开关（「唤醒」页防刷屏、「其他」页私聊门禁）。
 
 ### 修复（review）
 
-- 移除 `video-read` 的排障 trace（不再写临时日志），并给被引消息加负缓存。
-- `video-link-read` 移除 `blockParserAfterRead`：`link-parser` 在 intercept 阶段已经处理，before-turn 拦不住，原选项语义相反。
-- `video-link-read` 补上缺失的 `onlyWhenAddressed` 配置。
-- `bot.napcat` 契约补充 `friendList / msgById / getFile`；README / 说明书 / 架构文档同步为 13 个子插件。
+- `bot.napcat` 契约补充 `friendList / msgById / getFile`；README / 说明书 / 架构文档同步。
 
 ## 0.1.0 — 2026-10-20
 

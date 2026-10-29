@@ -10,12 +10,12 @@
  *
  * 两条纪律（写代码时踩过，别改回去）：
  *
- *   ① **`pre-gate` 里只查表，绝不 await 网络**。
+ *   ① **`pre-gate` 判定只查表，绝不 await 网络**。
  *      `pre-gate` 是 fail-closed 阶段（`kernel/state-pipeline.js:159-163`：插件抛错 = 这条消息被拦下）。
  *      如果在里面 await `onebot.friendList()`，协议端一超时就抛错 → **全部私聊被一起静默**，
- *      正是旧版特意避免的事故。所以：`passive-tap`（fail-open）负责刷新，`pre-gate` 只做纯查表。
+ *      正是旧版特意避免的事故。所以：`pre-gate` 非阻塞触发单飞刷新，再按已有缓存判定，绝不等待网络。
  *
- *   ② **好友列表为空 = 拉取失败，按"不知道"放行**。
+ *   ② **好友列表为空 = 拉取失败；缓存未知时按 failOpen 配置判定**。
  *      `onebot.friendList()` 在异常时 catch 掉了、返回 `[]`（`kernel/onebot-adapter.js:421-431`），
  *      跟"真的没有好友"分不开。空列表一律不拦人 —— 宁可放过，也不因为协议端抖一下就把所有人拉黑。
  *
@@ -87,6 +87,9 @@ export default {
 
   setup(bot) {
     const cfg = () => bot.cfg || {}
+    let disposed = false
+    let refreshing = false
+    bot.onDispose(() => { disposed = true })
     const ttl = () => Math.max(60_000, (Number(cfg().cacheMin) || 10) * 60_000)
 
     /** 只查缓存，**不发请求**（给 fail-closed 的 pre-gate 用）。 */
@@ -101,13 +104,16 @@ export default {
      * 刷新好友列表（fail-open）。**绝不抛**：失败只记日志 + 负缓存。
      */
     async function refresh() {
+      if (disposed || refreshing) return
       const slot = cacheOf(bot)
       if (!slot) return
       const now = Date.now()
       if (slot.at && now - slot.at < ttl()) return
       if (slot.failedAt && now - slot.failedAt < RETRY_MS) return
+      refreshing = true
       try {
         const list = await bot.onebot?.friendList?.()
+        if (disposed) return
         const ids = new Set((Array.isArray(list) ? list : [])
           .map((f) => Number(f?.qq ?? f?.user_id))
           .filter((n) => Number.isInteger(n) && n > 0))
@@ -122,25 +128,22 @@ export default {
         slot.failedAt = 0
         bot.log.debug(`[私聊门禁] 好友列表已刷新：${ids.size} 人`)
       } catch (e) {
+        if (disposed) return
         slot.failedAt = now
-        bot.log.warn(`[私聊门禁] 好友列表刷新失败（本轮放行）: ${e.message}`)
+        bot.log.warn(`[私聊门禁] 好友列表刷新失败: ${e.message}`)
+      } finally {
+        refreshing = false
       }
     }
 
-    // ── ① passive-tap：刷新缓存（fail-open，绝不阻塞主链） ──
-    bot.on('passive-tap', (ev) => {
-      if (cfg().enabled === false) return
-      if (ev.isGroup) return
-      refresh().catch(() => {})
-    })
-
-    // ── ② pre-gate：纯查表判定（fail-closed 阶段，所以这里不许有 await） ──
+    // pre-gate：先非阻塞触发刷新，再查表；严格模式拦截不妨碍下次恢复。
     bot.on('pre-gate', (ev) => {
-      if (cfg().enabled === false) return
+      if (disposed || cfg().enabled === false) return
       if (ev.isGroup) return
       if (ev._scratch?.notice) return                  // 通知事件不是"某个人发的消息"
       const qq = Number(ev.sender?.qq)
       if (!Number.isInteger(qq) || qq <= 0) return
+      void refresh()
       if (ev.sender?.isMaster === true) return          // 主人永远放行
       if (toNumList(cfg().allowList).includes(qq)) return
 

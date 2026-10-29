@@ -3,7 +3,7 @@
  *
  * 历史 bug：A 聊完一轮后 B/C 唤醒机器人，回复却引用了 A。
  * 根因是锚在 prompt admission 时就被 pop，出站只能回退 activeTurns / 最后一个提交的回合。
- * 现在锚从 turn/start 活到 turn/end：出站取队首＝正在回的那轮。
+ * 现在出站直接取 turn/start 绑定的上下文；不再按队首或超时猜测归属。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -90,6 +90,27 @@ test('出站引用跟随 turn/start：A 生成中 B/C 已提交，A 仍引 A；�
   await emitRaw(h.kernel, groupAtEvent({ text: '/help', messageId: 1005, at: false }))
   await waitFor(() => h.sent.length >= 4, { label: '/help 回复' })
   assert.equal(h.sent.at(-1).wire.includes('[CQ:reply'), false, `/help 不应引用上一轮：${h.sent.at(-1).wire}`)
+})
+
+test('超过五轮排队及长回合：引用只认本轮，不被队列容量或TTL挤掉', async (t) => {
+  const h = await boot(t)
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  for (let i = 0; i < 7; i += 1) {
+    await emitRaw(h.kernel, groupAtEvent({ text: `消息${i}`, messageId: 3001 + i }))
+  }
+  await waitFor(() => h.ctx._prompts.length === 7, { label: '七轮准入' })
+  const sid = h.ctx._prompts[0].sessionId
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  emitTurn(h.ctx, sid, 'turn/start')
+  t.mock.timers.tick(6 * 60000)
+  await send.execute({ target: `group:${GROUP_ID}`, text: '长回合回复' }, { agent: { session: { id: sid } } })
+  assert.match(h.sent.at(-1).wire, /\[CQ:reply,id=3001\]/)
+  assert.equal(h.kernel.turnBySession.get(sid).triggerMsgId, 3001)
+  emitTurn(h.ctx, sid, 'turn/end')
+  assert.equal(h.kernel.turnBySession.has(sid), false)
+  emitTurn(h.ctx, sid, 'turn/start')
+  await send.execute({ target: `group:${GROUP_ID}`, text: '下一轮回复' }, { agent: { session: { id: sid } } })
+  assert.match(h.sent.at(-1).wire, /\[CQ:reply,id=3002\]/)
 })
 
 test('未到 turn/start 就失败：不留下永久锚', async (t) => {

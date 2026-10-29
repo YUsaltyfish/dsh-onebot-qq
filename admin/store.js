@@ -12,6 +12,18 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { loadConfig, saveConfig, validateConfig } from '../kernel/config-store.js'
 import { readJsonFile } from '../platform/atomic.js'
+import { canonicalPath, normForCompare } from '../platform/paths.js'
+
+// 配置事务属于文件，而非控制器实例；失败也必须释放队列。
+const transactions = new Map()
+function serialize(file, run) {
+  const key = normForCompare(canonicalPath(file))
+  const pending = (transactions.get(key) || Promise.resolve()).then(run)
+  const tail = pending.then(() => {}, () => {})
+  transactions.set(key, tail)
+  void tail.then(() => { if (transactions.get(key) === tail) transactions.delete(key) })
+  return pending
+}
 
 const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
 const clone = (v) => (typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v)))
@@ -66,8 +78,13 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
    * @param {{what?:string, allowPending?:boolean}} [opts]
    * @returns {Promise<{ok:true, configPath:string, backup:string, what:string, pending?:boolean}>}
    */
-  async function save(nextRaw, { what = '', allowPending = false } = {}) {
+  async function save(nextRaw, opts = {}) {
     const file = fileOf()
+    const next = clone(nextRaw)
+    return serialize(file, () => saveUnlocked(file, next, opts))
+  }
+
+  async function saveUnlocked(file, nextRaw, { what = '', allowPending = false, rollbackEffect = null } = {}) {
     if (!file) throw new Error('没有配置文件路径：控制台无法落盘（bundle 未配置 dataDir/configPath）')
     if (!isPlainObject(nextRaw)) throw new Error('要写入的配置不是 JSON 对象')
     const next = clone(nextRaw)
@@ -89,7 +106,7 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
 
     // ②' 待配置模式：照常热重载（内核 pending 分支会热应用其余配置、不自动连接）。
     //     旧内核若不支持 pending reload 会抛错 → 降级为"只落盘不热重载"，不让新用户卡死。
-    if (pendingOnly) {
+    if (pendingOnly && !rollbackEffect) {
       let applied = false
       let pendingErrors = []
       try {
@@ -111,8 +128,6 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
     // ③ 热重载：失败 → 回滚 → 再尽力重载回老配置
     try {
       if (typeof kernel?.reloadConfig === 'function') await maybe(kernel.reloadConfig())
-      // 二次保险（幂等）：让 adapter/kernel 级参数（onebot 地址、adminQq…）也重新应用
-      if (typeof kernel?.applyRuntimeConfig === 'function') await maybe(kernel.applyRuntimeConfig(kernel.runtime))
     } catch (e) {
       let rolled = false
       try {
@@ -123,6 +138,7 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
       } catch (rollbackErr) {
         logWarn(`配置回滚失败（${path.resolve(file)}）：${rollbackErr.message}`)
       }
+      if (rollbackEffect) await rollbackEffect()
       try {
         if (typeof kernel?.reloadConfig === 'function') await maybe(kernel.reloadConfig())
       } catch { /* 回滚后的重载失败只能留给下次启动 */ }
@@ -131,7 +147,7 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
     }
 
     logInfo(`${what || '写配置'} → 已写入并热重载${saved.backup ? `（备份 ${saved.backup}）` : ''}`)
-    return { ok: true, configPath: path.resolve(file), backup: saved.backup || '', what, pending: false, configReady: true }
+    return { ok: true, configPath: path.resolve(file), backup: saved.backup || '', what, pending: pendingOnly, configReady: !pendingOnly }
   }
 
   /**
@@ -139,17 +155,34 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
    * @param {(raw:object)=>(unknown|Promise<unknown>)} mutate
    * @param {{what?:string}} [opts]
    */
-  async function update(mutate, { what = '', allowPending = false } = {}) {
+  async function update(mutate, { what = '', allowPending = false, effect = null } = {}) {
     if (typeof mutate !== 'function') throw new Error('update(mutate) 需要函数')
-    const base = read()
-    const next = clone(base)
-    const extra = await mutate(next)
-    const saved = await save(next, { what, allowPending })
-    return {
-      ...saved,
-      ...(isPlainObject(extra) ? extra : {}),
-      raw: next,
-    }
+    const file = fileOf()
+    return serialize(file, async () => {
+      const next = clone(read())
+      const extra = await mutate(next)
+      // 外部投递与配置共用事务；返回句柄后直到保存/重载成功才提交。
+      const transaction = effect ? await effect(next) : null
+      let rolledBack = false
+      const rollbackEffect = async () => {
+        if (rolledBack || !transaction) return
+        rolledBack = true
+        try { await transaction.rollback() } catch (e) { logWarn(`关联文件回滚失败：${e.message}`) }
+      }
+      let saved
+      try {
+        saved = extra?.unchanged === true && !transaction
+          ? { ok: true, backup: '' }
+          : await saveUnlocked(file, next, { what, allowPending, rollbackEffect: transaction ? rollbackEffect : null })
+      } catch (e) {
+        await rollbackEffect()
+        throw e
+      }
+      if (transaction) {
+        try { await transaction.commit() } catch (e) { logWarn(`关联文件提交后清理失败：${e.message}`) }
+      }
+      return { ...saved, ...(isPlainObject(extra) ? extra : {}), raw: next }
+    })
   }
 
   return { read, save, update, get configPath() { return fileOf() } }

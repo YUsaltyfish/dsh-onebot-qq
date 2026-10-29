@@ -2,7 +2,7 @@
 
 > 目标：一台**干净的 Windows 10/11 x64**，装上 Node、DSH、协议端（OneBot v11）、本插件，让 QQ 群里 @ 机器人能收到回复。
 > 全程只用 Windows 自带工具 + PowerShell；不需要 WSL、不需要 bash、不需要管理员权限（安装 Node 时除外）。
-> 每一步都有「怎么确认成功」，卡住时看 [排错](排错.md) 的 Windows 部分。
+> 本文提供待部署机执行的验证步骤；Windows CI / 路径测试不等于已完成真实 QQ 真机验收。每一步都有「怎么确认成功」，卡住时看 [排错](排错.md) 的 Windows 部分。
 > 本文是 Windows 专用全流程；通用安装 / 升级 / 卸载 / 回滚见 [安装与卸载](安装与卸载.md)。
 > §三 给的是**任意 OneBot v11 协议端**的通用步骤；本机线上在用的是 **SnowLuma**（有 Windows x64 发行包），专属接法见 §三末「用 SnowLuma（可选，本机在用）」。
 
@@ -63,7 +63,7 @@ dsh web          # 首次启动会初始化 web profile（%USERPROFILE%\.dsh\pro
 SnowLuma v2.2.0 也是 OneBot v11 实现，有 Windows x64 发行包。接法和上面的通用步骤基本一样，差别就三点：**它不启动 QQ**、**token 是强制的**、**登录只有扫码**。
 
 1. 装发行包，启动 `launcher.bat`；打开 WebUI <http://127.0.0.1:5099>（初始账号 `admin`，密码在**全新数据目录的首启日志里打印一次**；也可用环境变量 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 预置）。
-2. **先自己开 QQ 用手机扫码登录**，再让 SnowLuma 注入（它**不启动 QQ**，靠 native addon `ptrace` 注入已在运行的 QQ 进程；**没有 CLI、没有二维码 API**，只能对着 QQ 登录窗口扫）。
+2. **先自己开 QQ 用手机扫码登录**，再让 SnowLuma 注入（它**不启动 QQ**，由其平台对应的注入机制接入已在运行的 QQ 进程（Linux 的 ptrace 说明不能作为 Windows 验证依据）；**没有 CLI、没有二维码 API**，只能对着 QQ 登录窗口扫）。
 3. WebUI 里配 OneBot：开正向 WS `3001`、HTTP `3000`（`messageFormat: array`）。**3000/3001 强制带 `accessToken`**（每个网络自动生成 32 字节 base64url，可在 WebUI 或 `config/onebot.json` 改）→ 两个 token 都抄下来。
 4. 控制台 →「OneBot 连接」页照旧填地址 / token（**任意 OneBot v11 协议端都填这里**；配置键是 `onebot.*`），然后「运维 → 测试 OneBot 连接」。
 5. 建议关掉它自带的 `#sl` 状态指令（`statusCommand.enabled=false`）：默认开时群里发 `#sl` 框架会回一句，`swallow:false` 时还会把消息继续下发给机器人（机器人与框架各回一句）。
@@ -76,7 +76,7 @@ Windows 常用写法是命令行装本地目录；GitHub / tgz / 插件管理器
 [安装与卸载 §三](安装与卸载.md#三安装本插件三选一)。
 
 ```powershell
-# 本地目录（link: 方式，改代码立即生效）
+# 本地目录（link 不复制源码；修改后需插件重载或重启 DSH）
 dsh plugin --profile web add link:C:\path\to\dsh-onebot-qq
 ```
 
@@ -88,7 +88,7 @@ dsh plugin --profile web add link:C:\path\to\dsh-onebot-qq
 **重启 dsh-web**（Ctrl+C 后重新 `dsh web`），日志出现 `dsh-onebot-qq` 输出即挂载成功；还没填 QQ 号会进入「待配置模式」，按 §六 填即可：
 
 ```
-[onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
+[onebot-qq:kernel] 内核就绪（契约 v1，插件 11/11，工具 10，命令 7）
 ```
 
 ## 五、创建数据目录（含默认人设）
@@ -103,10 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1
 powershell -ExecutionPolicy Bypass -File .\examples\windows\setup.ps1 -DataDir 'C:\dsh-data\qq-bot'
 ```
 
-> ⚠️ 脚本只复制文件、**不激活人设**；要 init 的完整效果（自动投递默认人设）用跨平台 CLI
-> `node bin\dsh-onebot-qq.mjs init [--data-dir ...]`，与全手动建目录的做法一并见
-> [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导)
-> （不跑也行：插件首次启动会自动投递内置默认人设「蓝色大肥鱼」）。
+> 脚本直接委托跨平台 CLI `init`，包括默认人设投递；实际目录、配置保留/覆盖及投递结果以 CLI 输出为准，不另指定人设名。未传 `-DataDir` 时由 CLI 统一解析 `DSH_QQ_DATA_DIR` / `DSH_HOME` 与旧目录兼容。完整语义见 [安装与卸载 §四](安装与卸载.md#四首次配置推荐控制台新手向导)。
 
 ### 自定义数据目录要同时告诉插件
 
@@ -133,7 +130,7 @@ dsh web
    日志会看到（此时**没有**「OneBot WS 已连接」是预期）：
    ```
    [onebot-qq:kernel] 实例配置未完成（缺 adminQq）…控制台可继续配置
-   [onebot-qq:kernel] 内核就绪（契约 v1，插件 13/13，工具 10，命令 7）
+   [onebot-qq:kernel] 内核就绪（契约 v1，插件 11/11，工具 10，命令 7）
    ```
 2. **打开控制台填写**：浏览器打开 <http://127.0.0.1:3080> → **设置 → QQ 控制台**：
    - **总览 → 新手向导**：逐项 ✅/❌（配置文件 / 主人 QQ / OneBot 连接 / 人设 / 生图），每项一句「怎么做」；
@@ -149,9 +146,9 @@ dsh web
 - 用**正斜杠**（`"C:/dsh-data/qq-bot"`）或双反斜杠（`"C:\\dsh-data\\qq-bot"`），避免转义错误；
 - 相对路径（如 `"workspace"`）相对**数据目录**解析，跨机器迁移最省事；
 - 必填 `adminQq` / `onebot.wsUrl` / `onebot.httpUrl`（协议端连接配置，键为 `onebot.*`）；协议端开了鉴权就填 `wsToken` / `httpToken`（接 SnowLuma 时两个都**必须**填）；
-- 生图凭据建议用环境变量（见 §九），不要写进 JSON；**手改配置后要重启一次 dsh-web**（控制台改是热生效）。
+- 生图凭据建议用环境变量（见 §九），不要写进 JSON；**手改配置后要重启一次 dsh-web**（控制台按字段热应用；初始化资源/装配项见 [热改说明](配置参考.md#热改说明)）。
 
-自检：`node bin\dsh-onebot-qq.mjs doctor`（无 QQ/协议端时加 `--no-net`）；❌ 项修完再启动，⚠️（如 symlink 不可用、协议端未启动）属正常提示。
+CLI doctor / persona 仅支持默认 config.json/personas/workspace 布局，自定义运行路径请用控制台检查，见 [安装与卸载](安装与卸载.md#5-自检)。自检：`node bin\dsh-onebot-qq.mjs doctor`（无 QQ/协议端时加 `--no-net`）；❌ 项修完再启动，⚠️（如 symlink 不可用、协议端未启动）属正常提示。
 
 ## 七、启动与验证
 
@@ -171,7 +168,7 @@ node bin\dsh-onebot-qq.mjs persona list
 node bin\dsh-onebot-qq.mjs persona use 蓝色大肥鱼
 ```
 
-- `init` 已自动投递过「蓝色大肥鱼」；想换成自带模板或自己的：`persona use 蓝色大肥鱼` / `persona use <你的名字>`；
+- `init` 已尝试投递内置默认人设，结果以其输出为准；换人设请先 `persona list`，再 `persona use <列表中的名字>`，不要使用不存在的模板名；
 - 结果里 `mode` 会是 `copy`；`workspace\` 下会出现 `AGENTS.local.md` / `lines.txt` / `wake.txt` 等**真实文件**；
 - 之后换人设 = 再跑一次 `persona use <名字>`（覆盖复制）；
 - 想用软链：Windows 设置 → 隐私和安全性 → 开发者选项 → 打开「开发者模式」；
@@ -191,7 +188,7 @@ node bin\dsh-onebot-qq.mjs persona use 蓝色大肥鱼
    dsh web
    ```
    协议怎么选、冷却与失败不重试等规则见 [使用说明书 §5.4](使用说明书.md#54-生图--图生图)。
-3. **表情包**：群里发过的表情自动入库（`<dataDir>\qq-stickers`）；用法与开关见 [使用说明书 §5.6](使用说明书.md#56-表情包)。
+3. **表情包**：采集 `collect` 默认关闭（只读）；显式开启后群里发过的合规表情才自动入库（`<dataDir>\qq-stickers`）；用法与开关见 [使用说明书 §5.6](使用说明书.md#56-表情包)。
 4. **入群欢迎**：图片放 `<dataDir>\qq-welcome-images`；群开关与欢迎语见 [使用说明书 §5.7](使用说明书.md#57-入群欢迎)。
 
 ### CQ 文件引用真机验证清单（重要）
@@ -261,7 +258,7 @@ node --test test\e2e.test.js   # 只跑假协议端（fake OneBot）端到端（
 
 | 现象 | 处理 |
 |---|---|
-| `dsh : 无法将“dsh”项识别为...` | `npm install -g` 的 bin 目录不在 PATH；重开终端或 `npm bin -g` 找到路径加 PATH |
+| `dsh : 无法将“dsh”项识别为...` | `npm install -g` 的 bin 目录不在 PATH；重开终端或 `npm prefix -g` 查询全局前缀（Windows 可执行入口就在该目录）并加 PATH |
 | `dsh web` 打不开 3080 | 端口冲突/防火墙；`dsh web --port 3090` |
 | PowerShell 执行脚本被拦 | `-ExecutionPolicy Bypass`（见 setup.ps1 用法）；或改用 `node bin\dsh-onebot-qq.mjs init` |
 | 配置里反斜杠报 JSON 错误 | 用正斜杠 `C:/...` 或双反斜杠 `C:\\...` |

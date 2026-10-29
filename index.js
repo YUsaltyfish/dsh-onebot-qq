@@ -389,6 +389,7 @@ export async function apply(ctx, bundleConfig = {}) {
   const archive = makeArchiver(archiveCfg, log)
   const greetedSessions = new Set() // sessionId 集合：首轮带 [QQ会话 chatKey｜...]，后续轮只带 [本条消息ID ...]
 
+  let disposed = false
   const kernel = {
     log, onebot, state, pipeline, pacing, tmp,
     adminQq: Number(runtime.adminQq) || 0,
@@ -512,7 +513,7 @@ export async function apply(ctx, bundleConfig = {}) {
     }
   })
 
-  // ── 内置出站钩子②：自动引用（锚在 turn/start → turn/end 之间有效，取队首＝正在回的那轮） ──
+  // ── 内置出站钩子②：自动引用只认本轮上下文，不猜队首 ──
   deliver.onDecorate((out) => {
     // 只有模型经 send_message 发的回复才自动挂引用。命令 / 答应声 / 冷却 / 生图失败
     // 这些出站没有自己的回合上下文，以前回退 activeTurns 会把引用挂到上一个人身上。
@@ -523,9 +524,9 @@ export async function apply(ctx, bundleConfig = {}) {
     if (out.noReply || out.replyTo != null || out.ats?.length) return
     const need = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     if (need <= 0) return
-    // 锚队列队首 = 正在回的那一轮（turn/start 后才存在，turn/end 就消费掉）
-    const q = state.quoteNeed(out.target, need)
-    if (q.allow && q.triggerId != null) out.replyTo = q.triggerId
+    const arrivals = Number(state.get(out.target).arrivalSequence || 0) - Number(turnCtx.arrivalSequence || 0)
+    turnCtx.arrivedDuringTurn = arrivals
+    if (arrivals >= need && turnCtx.triggerMsgId != null) out.replyTo = turnCtx.triggerMsgId
   })
 
   // ── DSH 会话驱动（只保留 in-process） ──────────────────────────
@@ -709,6 +710,7 @@ export async function apply(ctx, bundleConfig = {}) {
       pipeline.use(stage, fn, { order: opts.order ?? this.__order, pluginId: this.id })
     },
     onOutbound(fn) { return deliver.onDecorate(fn) },
+    onAfterSend(fn) { return deliver.onAfterSend(fn) },
     registerCommand(cmdName, def) { kernel.commands.set(String(cmdName).toLowerCase(), { ...def, pluginId: this.id }) },
     registerTool(toolName, def) { kernel.toolDefs.set(toolName, { ...def, pluginId: this.id }) },
     deliver: (target, text, opts = {}) => deliver(target, text, { turnCtx: resolveCurrentTurn(target), ...opts }),
@@ -786,7 +788,15 @@ export async function apply(ctx, bundleConfig = {}) {
     if (!t.startsWith('/')) return
     const [head, ...rest] = t.slice(1).trim().split(/\s+/)
     const def = kernel.commands.get(String(head || '').toLowerCase())
-    if (def) await def.handler(ev, rest)
+    if (!def) return
+    const permission = def.permission ?? 'any'
+    if (permission !== 'any' && (permission !== 'master' || ev.sender?.isMaster !== true)) {
+      ev.stopped = true
+      ev.stopReason = `commands:${String(head).toLowerCase()}`
+      await deliver(ev.chatKey, permission === 'master' ? '🙅 这个命令只有主人能用' : '🙅 这个命令的权限配置无效，暂不可用')
+      return
+    }
+    await def.handler(ev, rest)
   }, { order: 5, pluginId: 'kernel:commands' })
 
   // ── 内置管线钩子 2：before-turn 补齐群聊增量上文、引用消息与多模态识图缩放 ──────────
@@ -818,7 +828,7 @@ export async function apply(ctx, bundleConfig = {}) {
     //
     // ⚠️ 关键：QQ 里「发转发」和「@它」**必然是两条消息**（客户端限制），第二条只能引用第一条。
     //    before-turn 跑在"@它"那条上，它的 _scratch.forwards 是空的 —— 转发 id 在被引消息里。
-    //    所以这里必须**反查一次被引消息**把 forwards 挖出来。这跟 video-read 拿被引视频同构。
+    //    所以这里必须**反查一次被引消息**把 forwards 挖出来。
     // forwards 现在是 [{ id, content }]：content 是协议端在 get_msg 里已经内联好的转发正文
     // （真机上 get_forward_msg(id) 常直接失败："消息已过期或者为内层消息"，所以内联才是主路径）
     let fwdItems = Array.isArray(ev._scratch?.forwards) ? ev._scratch.forwards : []
@@ -907,6 +917,11 @@ export async function apply(ctx, bundleConfig = {}) {
             render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }],
           },
           async execute(args, exec) {
+            if (disposed) throw new Error('QQ 插件已卸载，不能执行工具')
+            const sessionId = String(exec?.agent?.session?.id || '')
+            if (sessionId && !kernel.maintSessionIds.has(sessionId) && !dsh.findChatKeyBySession(sessionId)) {
+              throw new Error('此会话不属于当前 QQ 插件，不能执行 QQ 工具')
+            }
             // 工具守卫（两道）：
             // ① 后台任务会话（群记忆积累等）只允许 memory_append（提交群记忆要点），其它工具一律拒；
             // ② memory_append 反过来只允许后台任务会话调，普通 QQ 会话调不到（不让它顺手改记忆）。
@@ -940,39 +955,16 @@ export async function apply(ctx, bundleConfig = {}) {
   //    开始跑是之后的事。所以：
   //    · prompt 提交后先放 pendingTurns（等 turn/start）；
   //    · turn/start 才把这一轮挂到 turnBySession / activeTurns（工具执行时按它认轮）；
-  //    · turn/end 才清上下文 + 消费引用锚（旧桥接 consumeTrigger 的语义）。
+  //    · turn/end 才清上下文，出站始终使用本轮触发消息和到达计数。
   //    以前在 runTurn.finally（admission 时）就 pop 锚/清映射，回复发出时只能猜"最后一轮"，
   //    这正是引用引错人的根因。
-  const ACTIVE_TURN_TTL_MS = 5 * 60000
-  const activeTurnTimers = new Map()
-  // 会话 id → TurnContext：工具 execute 拿到的 exec.agent.session.id 就是它。
-  const turnSessionTimers = new Map()
+  // 上下文由真实 turn/end 释放；耗时长不代表回合已经结束。
   const holdTurnSession = (sessionId, turnCtx) => {
-    if (!sessionId) return
-    const key = String(sessionId)
-    kernel.turnBySession.set(key, turnCtx)
-    const old = turnSessionTimers.get(key)
-    if (old) clearTimeout(old)
-    const timer = setTimeout(() => {
-      if (kernel.turnBySession.get(key) === turnCtx) kernel.turnBySession.delete(key)
-      turnSessionTimers.delete(key)
-    }, ACTIVE_TURN_TTL_MS)
-    timer.unref?.()
-    turnSessionTimers.set(key, timer)
+    if (sessionId) kernel.turnBySession.set(String(sessionId), turnCtx)
   }
-  const holdActiveTurn = (chatKey, turnCtx) => {
-    kernel.activeTurns.set(chatKey, turnCtx)
-    const old = activeTurnTimers.get(chatKey)
-    if (old) clearTimeout(old)
-    const timer = setTimeout(() => {
-      if (kernel.activeTurns.get(chatKey) === turnCtx) kernel.activeTurns.delete(chatKey)
-      activeTurnTimers.delete(chatKey)
-    }, ACTIVE_TURN_TTL_MS)
-    timer.unref?.()
-    activeTurnTimers.set(chatKey, timer)
-  }
+  const holdActiveTurn = (chatKey, turnCtx) => kernel.activeTurns.set(chatKey, turnCtx)
 
-  // ── DSH 回合与引用锚的绑定 ──────────────────────────────────
+  // ── DSH 回合与上下文的绑定 ──────────────────────────────────
   const boundTurnHooks = new Set()
   const pushPendingTurn = (sessionId, turnCtx) => {
     const key = String(sessionId || '')
@@ -1022,21 +1014,13 @@ export async function apply(ctx, bundleConfig = {}) {
     if (turnCtx) {
       if (kernel.turnBySession.get(key) === turnCtx) kernel.turnBySession.delete(key)
       if (kernel.activeTurns.get(turnCtx.chatKey) === turnCtx) kernel.activeTurns.delete(turnCtx.chatKey)
-      // 一轮真正结束才消费锚：一轮发多条也只消费一次
-      if (turnCtx._hasAnchor) state.consumeTurnAnchor(turnCtx.chatKey, turnCtx.triggerMsgId)
       log.debug(`turn/end 清理 ${key} → ${turnCtx.chatKey}#${turnCtx.triggerMsgId ?? '-'}`)
-    }
-    const st = turnSessionTimers.get(key)
-    if (st) { clearTimeout(st); turnSessionTimers.delete(key) }
-    if (turnCtx) {
-      const at = activeTurnTimers.get(turnCtx.chatKey)
-      if (at) { clearTimeout(at); activeTurnTimers.delete(turnCtx.chatKey) }
     }
   }
 
   // ── 入站：一条消息走完全部阶段，末端交给 agent ───────────────
   const runTurn = async (ev) => {
-    if (!ev.wake) return
+    if (disposed || !ev.wake) return
     // 第二道防线：chatKey 必须是 group:<数字> / private:<数字>。异常事件（如无身份的 notice）
     // 曾造出 `private:undefined` 会话；到这里一律丢弃并留一行错误日志，绝不建会话。
     if (!/^(group|private):\d{1,12}$/.test(String(ev.chatKey || ''))) {
@@ -1050,10 +1034,7 @@ export async function apply(ctx, bundleConfig = {}) {
     // 连续对话的起点：只有"真人唤醒"才会登记链（pacing 内部还会再按 wake.kind 过滤一次）
     pacing.noteWake(ev)
     turnCtx.quoteAfterMsgs = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
-    // 引用锚：入站事件自带 message_id，记下来；活到这一轮的 DSH turn/end
-    turnCtx._hasAnchor = ev.wake.kind !== 'proactive' && ev.wake.kind !== 'continuation'
     turnCtx._turnStarted = false
-    if (turnCtx._hasAnchor) state.markTurnAnchor(ev.chatKey, ev.messageId)
 
     let sessionId = ''
     try {
@@ -1064,6 +1045,7 @@ export async function apply(ctx, bundleConfig = {}) {
         fileHint: ev._scratch.fileHint || '',
       })
       const submit = async (sid) => {
+        if (disposed) return
         turnCtx.sessionId = sid
         turnCtx.promptText = makePrompt(sid)
         bindTurnHooks(sid)
@@ -1074,6 +1056,7 @@ export async function apply(ctx, bundleConfig = {}) {
         await submit(sessionId)
       } catch (e) {
         // 会话被彻底清理（删了会话目录）→ 映射已失效：删映射、建新会话、重试一次
+        if (disposed) return
         if (!isSessionGone(e) || typeof dsh.forgetSession !== 'function') throw e
         log.warn(`会话 ${sessionId} 已不存在（可能被彻底清理），删映射重建后重试 (${ev.chatKey})`)
         removePendingTurn(sessionId, turnCtx)
@@ -1081,20 +1064,20 @@ export async function apply(ctx, bundleConfig = {}) {
         sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
         await submit(sessionId)
       }
+      if (disposed) return
       greetedSessions.add(sessionId)
       dsh.syncSessionTitles?.().catch(() => {})
       log.debug(`turn 已提交 ${ev.chatKey} → ${sessionId}`)
     } catch (e) {
-      // prompt 没提交成功：这一轮不会发生，清掉 pending + 锚（还没到 turn/start）
+      // prompt 没提交成功：这一轮不会发生，清掉 pending（还没到 turn/start）
       if (!turnCtx._turnStarted) {
         removePendingTurn(sessionId, turnCtx)
-        if (turnCtx._hasAnchor) state.consumeTurnAnchor(ev.chatKey, ev.messageId)
       }
       log.error(`提交 agent 失败 (${ev.chatKey}): ${e.message}`)
       // 兜底也必须走 deliver（强制脱敏 + 留档）—— 根治旧实现错误裸发漏脱敏的 bug！
       // 主动接话轮是"自己找话"，出错时**静默**（群里没人在等它，别突然冒一句「出错了」）。
       if (ev._scratch?.silentFailure) log.warn(`[主动接话] 本轮失败（已静默）: ${e.message}`)
-      else await deliver(ev.chatKey, `⚠️ 出错了: ${e.message}`, { turnCtx }).catch(() => {})
+      else if (!disposed) await deliver(ev.chatKey, '⚠️ 暂时无法处理这条消息，请稍后再试。', { turnCtx }).catch(() => {})
     }
     // ⚠️ 不能在 finally 里 pop 锚/清上下文：prompt admission 时模型还没跑，
     //    真正的清理在 turn/end 回调（finishRunningTurn）。
@@ -1102,6 +1085,7 @@ export async function apply(ctx, bundleConfig = {}) {
 
   // ── 主动接话：没入站也能起一轮候选（走正规管线语义，出站不 @ 不引用由 decorate 钩子硬挡） ──
   const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs, quoteTo }) => {
+    if (disposed) return
     const isContinuation = reason === 'continuation'
     const ev = createEvent({
       chatKey, isGroup: true, groupId,
@@ -1157,10 +1141,16 @@ export async function apply(ctx, bundleConfig = {}) {
   kernel.seedProactiveBaseline = seedProactiveBaseline
 
   onebot.onEvent(async (raw) => {
+    if (disposed) return
     const t0 = Date.now()
     let ev
     try {
       ev = normalizeEvent(raw, onebot.selfId, kernel.adminQq)
+      if (ev) {
+        const st = state.get(ev.chatKey)
+        if (!ev._scratch?.notice) st.arrivalSequence = Number(st.arrivalSequence || 0) + 1
+        ev._scratch.arrivalSequence = Number(st.arrivalSequence || 0)
+      }
     } catch (e) {
       log.warn(`事件归一失败: ${e.message}`)
       return
@@ -1173,7 +1163,6 @@ export async function apply(ctx, bundleConfig = {}) {
     const isNoticeEvent = Boolean(ev._scratch?.notice)
     if (!isNoticeEvent) {
       pacing.noteInbound(ev)
-      state.countArrival(ev.chatKey, ev.messageId)
       const active = kernel.activeTurns.get(ev.chatKey)
       if (active && ev.messageId !== active.triggerMsgId) active.arrivedDuringTurn += 1
       // 已 admission、还没 turn/start 的回合也要计数（它们还没被提升到 activeTurns）
@@ -1186,7 +1175,11 @@ export async function apply(ctx, bundleConfig = {}) {
 
     try {
       // 静默合批：同群几百毫秒内的多条唤醒并成一轮（主动接话轮不进来）
-      await pipeline.run(ev, (wokenEv) => pacing.submit(wokenEv, (e) => state.serialize(e.chatKey, () => runTurn(e))))
+      await pipeline.run(ev, (wokenEv) => {
+        if (disposed) return
+        return pacing.submit(wokenEv, (e) => state.serialize(e.chatKey, () => runTurn(e)))
+      })
+      if (disposed) return
       // 没唤醒的群消息 → 交给主动接话：到点了就按语境挑时机（有 wake 的不进来，避免被叫时同时抢话）
       if (!ev.wake && !ev.stopped) pacing.consider(ev)
     } catch (e) {
@@ -1509,6 +1502,7 @@ export async function apply(ctx, bundleConfig = {}) {
 
   // fiber 卸载时按逆序回收（单例保护的铁律：每条退出路径都要复位）。
   ctx.effect(() => () => {
+    disposed = true
     for (const fn of pluginDisposers.splice(0).reverse()) {
       try { fn() } catch (e) { log.warn(`插件卸载回调异常: ${e.message}`) }
     }

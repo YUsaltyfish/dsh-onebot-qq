@@ -18,6 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { isInsidePath } from '../../platform/paths.js'
 import { cqImage } from '../../platform/cq-file.js'
+import { readLocalBytes, fetchBytes } from '../../kernel/media-bytes.js'
 
 /** target 只认这两种形态（sendImageTo 的校验口径） */
 const TARGET_RE = /^(group|private):(\d{1,12})$/
@@ -54,24 +55,16 @@ function destName(name) {
  *   · 只有 fileId 时回协议端溯源（url 会过期，fileId 才是把手）；
  *   · 都拿不到 → 抛错（如实把失败写进 hint，比静默吞掉强：模型能看出文件没到）。
  */
-async function fetchFileBytes(bot, f) {
+async function fetchFileBytes(bot, f, maxBytes) {
   const src = String(f?.url || f?.path || '')
-  if (src && fs.existsSync(src)) return fs.readFileSync(src)
-  if (/^https?:\/\//.test(src)) {
-    const res = await fetch(src, { signal: AbortSignal.timeout(FILE_TIMEOUT_MS) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return Buffer.from(await res.arrayBuffer())
-  }
+  if (src && fs.existsSync(src)) return readLocalBytes(src, { maxBytes })
+  if (/^https?:\/\//.test(src)) return fetchBytes(src, { maxBytes, timeoutMs: FILE_TIMEOUT_MS })
   // 溯源协议端本地缓存；适配器把这个能力叫 getFile（只读视图已暴露）
   if (f?.fileId && typeof bot.onebot?.getFile === 'function') {
     const info = await bot.onebot.getFile(f.fileId)
     const local = info?.file
-    if (local && fs.existsSync(local) && fs.statSync(local).isFile()) return fs.readFileSync(local)
-    if (info?.url && /^https?:\/\//.test(info.url)) {
-      const res = await fetch(info.url, { signal: AbortSignal.timeout(FILE_TIMEOUT_MS) })
-      if (!res.ok) throw new Error(`溯源直链 HTTP ${res.status}`)
-      return Buffer.from(await res.arrayBuffer())
-    }
+    if (local && fs.existsSync(local) && fs.statSync(local).isFile()) return readLocalBytes(local, { maxBytes })
+    if (info?.url && /^https?:\/\//.test(info.url)) return fetchBytes(info.url, { maxBytes, timeoutMs: FILE_TIMEOUT_MS })
   }
   throw new Error(src ? `无法识别的文件地址: ${src.slice(0, 80)}` : '文件段没有可取的地址（缺 url）')
 }
@@ -117,6 +110,7 @@ export default {
     const enabledNow = () => cfgNow().enabled !== false
     const fallbackUploadDir = () => path.join(String(bot.core?.dataDir || '.'), 'qq_uploads')
     const uploadDirNow = () => String(cfgNow().uploadDir || '').trim() || fallbackUploadDir()
+    bot.shared.uploadDir = uploadDirNow
     /** 单文件上限（字节；0 = 不限） */
     const maxFileBytes = () => {
       const mb = Number(cfgNow().maxFileMB)
@@ -193,12 +187,7 @@ export default {
           continue
         }
         try {
-          const buf = await fetchFileBytes(bot, f)
-          if (limitBytes && buf.length > limitBytes) {
-            ev.hint.push(`[文件: ${label} 超过上限 ${maxMB}MB，未接收]`)
-            log.info(`跳过超大入站文件 ${label}（下载后 ${buf.length} 字节 > ${limitBytes}）`)
-            continue
-          }
+          const buf = await fetchFileBytes(bot, f, limitBytes)
           const dest = path.join(dir, destName(label))
           fs.writeFileSync(dest, buf)
           // hint 会原样拼进 prompt：让模型知道"用户发了这个文件、在服务器哪儿"

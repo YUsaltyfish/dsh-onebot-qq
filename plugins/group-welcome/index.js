@@ -18,7 +18,7 @@
  *   · 占位符白名单替换：{name} {qq} {group}；未知占位符原样保留（AstrBot 版一遇未知变量整条模板报废）。
  *   · 跨轮状态一律放 ChatState._scratch（冷却 / 上次句 / 模型模式间隔 / 待兜底记录），不另开全局状态 Map。
  *   · 配置每次现读 bot.cfg（控制台热改立即生效）。单位口径 = 控制台的"人话单位"：
- *     delayMs / cooldownMs / modelFallbackMs / modelMinGapMs 存**秒**，imageChance 存**百分数**（0-100）。
+ *     delayMs / modelFallbackMs / modelMinGapMs 存**秒**，cooldownMs 存**分钟**，imageChance 存**百分数**（0-100）。
  *     旧配置的 ms / 分数由 config-store 的 import-legacy 迁移层换算成同一口径。
  *
  * 平台边界：图片池目录相对 dataDir（内核解析成绝对路径）；附图走 `platform/cq-file.js` 的 `cqImage()`。
@@ -104,6 +104,31 @@ export default {
 
   setup(bot) {
     const log = bot.log
+    let disposed = false
+    const timers = new Set()
+    const pendingRecords = new Set()
+    function cancelTimer(timer) {
+      clearTimeout(timer)
+      timers.delete(timer)
+    }
+    function schedule(fn, ms) {
+      const timer = setTimeout(() => {
+        timers.delete(timer)
+        if (!disposed) fn()
+      }, ms)
+      timers.add(timer)
+      timer.unref?.()
+      return timer
+    }
+    bot.onDispose(() => {
+      disposed = true
+      for (const timer of timers) clearTimeout(timer)
+      timers.clear()
+      for (const pending of pendingRecords) {
+        if (pending.scratch['welcome:pending'] === pending) delete pending.scratch['welcome:pending']
+      }
+      pendingRecords.clear()
+    })
     /** 配置每次现读：控制台热改是就地改 bot.cfg，这里不能在 setup 顶部算死 */
     const cfgNow = () => bot.cfg || {}
     /** "秒"→毫秒；配置缺省/非法时用 d */
@@ -225,6 +250,7 @@ export default {
      * @returns {Promise<boolean>} true = 文字发出去了（附图失败不算失败）
      */
     async function sendFixedWelcome({ chatKey, gid, qq, name, groupName, scratch, reason }) {
+      if (disposed) return false
       const cfg = cfgNow()
       const text = pickLine(scratch, { name: name || String(qq), qq, group: groupName || gid })
       const ats = cfg.atNewcomer !== false ? [Number(qq)] : []
@@ -237,7 +263,7 @@ export default {
         log.warn(`[入群欢迎] 固定欢迎发送失败 ${chatKey}: ${e.message}`)
       }
       // 图片单独一条：图失败只丢图，不连累文字和 @（AstrBot 版同条消息图一挂全丢）
-      if (sent) {
+      if (sent && !disposed) {
         const pct = Math.max(0, Math.min(100, Number(cfg.imageChance) || 0))
         if (pct > 0) {
           const files = imageFiles()
@@ -256,26 +282,26 @@ export default {
     }
 
     // ── 模型模式：出站观测 + 兜底定时器 ───────────────────────────────────
-    /** 出站钩子：欢迎轮只要有任何一条出站，就算模型"发了"，撤掉兜底 */
-    bot.onOutbound((out) => {
-      if (!out || out.turnCtx?.wakeKind !== 'welcome') return
-      const scratch = scratchOf(out.target)
-      const pending = scratch?.['welcome:pending']
-      if (!pending) return
-      if (pending.timer) clearTimeout(pending.timer)
-      pending.delivered = true
-      delete scratch['welcome:pending']
+    /** 只有本欢迎轮的发送成功事实才能撤销它自己的兜底。 */
+    const offAfterSend = bot.onAfterSend((out) => {
+      if (disposed || out?.turnCtx?.wakeKind !== 'welcome') return
+      const pending = [...pendingRecords].find(p => p.token === out.turnCtx.welcomeToken)
+      if (!pending || pending.chatKey !== out.target) return
+      cancelTimer(pending.timer)
+      pendingRecords.delete(pending)
+      if (pending.scratch['welcome:pending'] === pending) delete pending.scratch['welcome:pending']
       log.info(`[入群欢迎] 模型模式已出站 ${out.target}（${out.mode || 'text'}）`)
     })
+    bot.onDispose(() => offAfterSend?.())
 
     function scheduleModelFallback({ chatKey, gid, qq, name, groupName, scratch }) {
-      if (!scratch) return
+      if (!scratch || disposed) return
       const waitMs = msOfSec(cfgNow().modelFallbackMs, 45000)
-      const pending = { at: Date.now(), qq, name, delivered: false, timer: null }
-      pending.timer = setTimeout(async () => {
-        const cur = scratch['welcome:pending']
-        if (cur !== pending) return // 已被出站钩子清掉 / 被新事件覆盖
-        delete scratch['welcome:pending']
+      const pending = { chatKey, scratch, token: {}, timer: null }
+      pendingRecords.add(pending)
+      pending.timer = schedule(async () => {
+        pendingRecords.delete(pending)
+        if (scratch['welcome:pending'] === pending) delete scratch['welcome:pending']
         if (cfgNow().enabled === false || cfgNow().modelFallback === false) {
           log.warn(`[入群欢迎] 模型模式 ${waitMs}ms 内没有欢迎出站，兜底已关（${chatKey}）`)
           return
@@ -287,13 +313,13 @@ export default {
           log.warn(`[入群欢迎] 兜底发送失败 ${chatKey}: ${e.message}`)
         }
       }, waitMs)
-      pending.timer.unref?.()
       scratch['welcome:pending'] = pending
+      return pending
     }
 
     // ── 入群通知拦截：固定模式零 token / 模型模式合成 welcome 回合 ─────────
     bot.on('intercept', async (ev) => {
-      if (ev.stopped) return
+      if (disposed || ev.stopped) return
       const notice = ev._scratch?.notice
       if (!notice || notice.type !== 'group_increase') return
 
@@ -315,7 +341,7 @@ export default {
 
       const scratch = scratchOf(ev.chatKey)
       // 冷却：同群同人；先占位，固定模式发送失败会清掉（别让失败也吃冷却）
-      if (inCooldown(scratch, qq, msOfSec(cfg.cooldownMs, 600000))) {
+      if (inCooldown(scratch, qq, msOfSec(Number(cfg.cooldownMs ?? 10) * 60, 600000))) {
         log.debug(`[入群欢迎] 冷却中，跳过 ${ev.chatKey} ← ${qq}`)
         return
       }
@@ -329,7 +355,9 @@ export default {
       } catch (e) {
         log.debug(`[入群欢迎] 取昵称失败 ${gid}/${qq}: ${e.message}`)
       }
+      if (disposed) return
       const groupName = await groupNameOf(gid)
+      if (disposed) return
 
       // ── 模式分流：模型模式下同群过密 → 本群降级固定句池（防批量入群烧 token） ──
       const gapMs = msOfSec(cfg.modelMinGapMs, 60000)
@@ -344,15 +372,14 @@ export default {
         ev.stopReason = 'group-welcome:fixed'
         const delayMs = msOfSec(cfg.delayMs, 3000)
         const fire = async () => {
-          if (cfgNow().enabled === false) return
+          if (disposed || cfgNow().enabled === false) return
           const ok = await sendFixedWelcome({ chatKey: ev.chatKey, gid, qq, name, groupName, scratch })
           if (!ok) clearCooldown(scratch, qq) // 失败不占冷却
         }
         if (delayMs > 0) {
-          const t = setTimeout(() => {
+          schedule(() => {
             fire().catch((e) => log.warn(`[入群欢迎] 延迟发送失败: ${e.message}`))
           }, delayMs)
-          t.unref?.()
         } else {
           await fire()
         }
@@ -369,7 +396,9 @@ export default {
       ev.hint.push(`[欢迎风格:${render(style, { name, qq, group: groupName || gid })}]`)
       log.info(`[入群欢迎] 触发模型欢迎 ${ev.chatKey} ← ${name}(${qq})`)
       if (cfg.modelFallback !== false) {
-        scheduleModelFallback({ chatKey: ev.chatKey, gid, qq, name, groupName, scratch })
+        const pending = scheduleModelFallback({ chatKey: ev.chatKey, gid, qq, name, groupName, scratch })
+        ev._scratch.turnExtras ||= {}
+        ev._scratch.turnExtras.welcomeToken = pending?.token
       }
     }, { order: 55 })
   },

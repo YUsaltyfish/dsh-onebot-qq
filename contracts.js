@@ -98,8 +98,10 @@ export function createTurnContext(ev) {
     turnId: `${ev.chatKey}#${Date.now().toString(36)}`,
     chatKey: ev.chatKey,
     triggerMsgId: ev.messageId,
+    isMaster: ev.sender?.isMaster === true && ev._scratch?.mergedIsMaster !== false,
     wakeKind: ev.wake?.kind ?? 'private',
-    arrivedDuringTurn: 0,     // 本轮开始后同群又来了几条（>0 才自动挂引用）
+    arrivalSequence: Number(ev?._scratch?.arrivalSequence || 0), // 触发消息入站序号，覆盖管线/准入等待期间
+    arrivedDuringTurn: 0,     // 兼容统计：本轮开始后同群又来了几条
     stickersSent: 0,          // 本轮已发几张表情包（上限 1）
     imagegenUsed: 0,          // 本轮已生图几次
     startedAt: Date.now(),
@@ -145,8 +147,9 @@ export function createTurnContext(ev) {
  * | `bot.log` | `{ info, warn, error, debug }` |
  * | `bot.contractVersion` | 契约版本 |
  * | `bot.on(stage, fn, opts?)` | 挂入站阶段；`fn(ev)`；`opts.order` 覆盖插件 order |
- * | `bot.onOutbound(fn)` | 挂出站 decorate；`fn(out)`；可改 `out.mode / out.replyTo / out.text` |
- * | `bot.registerCommand(name, def)` | `{ permission:'any'\|'master', description, handler(ev, args) }` |
+ * | `bot.onOutbound(fn)` | 挂出站 decorate；`fn(out)`；可改 `out.mode / out.replyTo / out.text`；不是送达确认 |
+ * | `bot.onAfterSend(fn)` | 成功出站后通知 `fn(rec)`；失败不触发，返回取消订阅函数 |
+ * | `bot.registerCommand(name, def)` | `{ permission:'any'\|'master', description, handler(ev, args) }`；内核统一校验权限，未知值拒绝 |
  * | `bot.registerTool(name, toolDef)` | `toolDef` = `{ description, parameters, execute(args) }`（返回普通值即可） |
  * | `bot.deliver(target, text, opts?)` | **唯一出站口**；`opts={ replyTo, ats, turnCtx }` |
  * | `bot.sendMedia(target, cqBody, caption)` | 发图/媒体（内部走 deliver 的脱敏 + 留档） |

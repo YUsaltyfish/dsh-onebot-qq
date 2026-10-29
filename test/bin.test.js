@@ -136,6 +136,23 @@ test('doctor：缺必填项 → 退出码 1；填好后 → 退出码 0（--no-n
   assert.match(noDelivery.stdout, /人设投递/)
 })
 
+test('CLI短选项与长选项一致', () => {
+  assert.equal(runCli(['-h']).stdout, runCli(['--help']).stdout)
+  assert.equal(runCli(['-h']).status, 0)
+  assert.equal(runCli(['-V']).stdout, runCli(['--version']).stdout)
+  assert.equal(runCli(['-V']).status, 0)
+})
+
+test('init后修改人设底池仍能切换，不被预复制模板当成用户冲突', () => {
+  const dataDir = path.join(tmpDir('base-lines'), 'data')
+  assert.equal(runCli(['init', '--data-dir', dataDir]).status, 0)
+  fs.writeFileSync(path.join(dataDir, 'personas', '_default.lines.txt'), '## poke\n新的底池\n')
+  fs.writeFileSync(path.join(dataDir, 'personas', '另一套.md'), '# 另一套\n')
+  const switched = runCli(['persona', 'use', '另一套', '--data-dir', dataDir])
+  assert.equal(switched.status, 0, switched.stderr)
+  assert.match(fs.readFileSync(path.join(dataDir, 'workspace', 'lines.default.txt'), 'utf8'), /新的底池/)
+})
+
 test('persona：list 列出默认人设；use 投递文件并同步 config.json', () => {
   const base = tmpDir('persona')
   const dataDir = path.join(base, 'data')
@@ -154,9 +171,10 @@ test('persona：list 列出默认人设；use 投递文件并同步 config.json'
   assert.equal(use.status, 0, use.stderr)
   assert.match(use.stdout, /已切换人设/)
   const ws = path.join(dataDir, 'workspace')
-  for (const name of ['AGENTS.local.md', 'lines.txt', 'wake.txt']) {
+  for (const name of ['AGENTS.local.md', 'lines.txt']) {
     assert.ok(fs.existsSync(path.join(ws, name)), `应投递 ${name}`)
   }
+  assert.equal(fs.existsSync(path.join(ws, 'wake.txt')), false, '新套没有唤醒词时撤销旧投递')
   assert.ok(fs.existsSync(path.join(ws, '.persona.json')), '应写人设指针')
   assert.equal(readConfig(dataDir).pluginConfig['persona-voice'].activePersona, '测试人设', '应同步 activePersona')
 

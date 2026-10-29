@@ -464,7 +464,8 @@ export function createPacing({ log = console, state, clock = null }) {
   function stop() {
     if (timer) clearInterval(timer)
     timer = null
-    for (const key of [...pending.keys()]) flush(key)
+    for (const slot of pending.values()) if (slot.timer) clearTimeout(slot.timer)
+    pending.clear()
   }
 
   // ── 静默合批（与旧版同一套语义，别动） ──────────────────────
@@ -509,6 +510,9 @@ export function createPacing({ log = console, state, clock = null }) {
     const last = evs[evs.length - 1]
     if (!last) return
     if (evs.length > 1) {
+      // 混合成员合批不能借最后一条主人的身份获得生图冷却豁免。
+      last._scratch.mergedIsMaster = evs.every((e) => e.sender?.isMaster === true)
+      if (last.turnCtx) last.turnCtx.isMaster = last._scratch.mergedIsMaster
       const head = evs.slice(0, -1)
         .map((e) => `[${e.sender?.card || e.sender?.name || e.sender?.qq || '?'}]: ${e.text || ''}`)
         .join('\n')

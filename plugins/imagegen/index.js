@@ -375,7 +375,7 @@ export default {
       hint: '保存后只回显占位符；环境变量 QQ_IMAGEGEN_API_KEY 优先于这个输入框。',
     },
     enabled: { type: 'bool', default: true, group: '生图', label: '生图', hint: '开：群里叫它画图时调用生图模型出图并发出来；关：完全不出图。' },
-    cooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 60, group: '生图', label: '全局冷却', hint: '两次生图之间至少隔多久（所有群共用），防止连刷烧额度。' },
+    cooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 60, group: '生图', label: '全局冷却', hint: '普通用户两次生图之间至少隔多久（所有群共用）；主人发起的生图免冷却，但仍不能同时生成多张。' },
     ackCooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 30, group: '生图', label: '「在画了」冷却', hint: '同一会话几秒内只说一次「在画了」，避免每张图都刷这句。' },
     timeoutMs: { type: 'int', unit: '秒', scale: 1000, default: 240, group: '生图', label: '生图超时', hint: '单次生图最多等多久；超时就放弃并回一句失败说明。' },
     extraBody: {
@@ -410,6 +410,7 @@ export default {
 
     // 全局冷却：跨群 / 跨私聊 / 网页本地共用一个池子（旧 imageGenAt 的 'global' 键）
     let lastGenAt = 0
+    let generating = false
     // 「在画了」按 target 冷却：同一会话 ackCooldownMs 内只应一声（旧 imageAckAt）
     const ackAt = new Map()
 
@@ -482,8 +483,8 @@ export default {
     const IMG_SCOPES = {
       refs: { label: '角色参考图', dir: () => refDirNow() },
       avatars: { label: '头像缓存', dir: () => avatarDirNow() },
-      uploads: { label: 'QQ 发来的文件', dir: () => path.join(dataDirNow(), 'qq_uploads') },
-      workspace: { label: 'QQ 工作区', dir: () => path.join(dataDirNow(), 'workspace') },
+      uploads: { label: 'QQ 发来的文件', dir: () => bot.shared?.uploadDir?.() || path.join(dataDirNow(), 'qq_uploads') },
+      workspace: { label: 'QQ 工作区', dir: () => bot.core?.dsh?.qqWorkspacePath || path.join(dataDirNow(), 'workspace') },
     }
     const DEFAULT_SCOPES = ['refs', 'workspace', 'uploads', 'avatars']
 
@@ -643,9 +644,11 @@ export default {
         const extras = extrasNow()
 
         // ① 全局冷却：被挡的**不生成、不排队、不代答**，只把「被挡 + 还剩多久 + 一句参考话」交回模型
-        if (inCooldown()) {
+        const turn = bot.currentTurn?.()
+        const masterBypass = turn?.isMaster === true
+        if (generating || (!masterBypass && inCooldown())) {
           const left = Math.max(0, cdMs() - (Date.now() - lastGenAt))
-          log.info(`[生图] 冷却中(还剩 ${Math.ceil(left / 1000)}s): 本次不生成不入队, 交模型自己回 (${genTarget || '无 target'})`)
+          log.info(`[生图] ${generating ? '生成中' : `冷却中(还剩 ${Math.ceil(left / 1000)}s)`}: 本次不生成不入队, 交模型自己回 (${genTarget || '无 target'})`)
           return {
             ok: true,
             blocked: true,
@@ -653,14 +656,15 @@ export default {
             cooldownMs: cdMs(),
             retryAfterMs: left,
             suggestedText: pick('imagegenBusy', 'imageBusy') || FALLBACK_BUSY,
-            note: `画图冷却中（还剩约 ${Math.ceil(left / 1000)} 秒）：本次**没生成、没入队**，本插件**没有**替你回话。`
+            note: (generating ? '上一张图仍在生成：' : `画图冷却中（还剩约 ${Math.ceil(left / 1000)} 秒）：`) + '本次**没生成、没入队**，本插件**没有**替你回话。'
               + '请**自己**用 mcp__qq__send_message 回一句（口吻参考 suggestedText，一两句、别解释机制），然后结束本轮；'
               + '**不要**再调 generate_image，也不要重试。',
           }
         }
         // ② 冷却从**触发那一刻**起算、含失败 —— 防上游抖动时反复打、反复花钱
         lastGenAt = Date.now()
-        const turn = bot.currentTurn?.()
+        generating = true
+        try {
         if (turn) turn.imagegenUsed += 1
         if (canReply) await maybeAck(genTarget)
 
@@ -709,6 +713,9 @@ export default {
         const r = await bot.sendMedia(genTarget, cqImage(file), args.text ? String(args.text) : '')
         log.info(`[生图] 已发送 ${genTarget}`)
         return { ...out, target: genTarget, message_id: r?.messageId ?? r?.id ?? null }
+        } finally {
+          generating = false
+        }
       },
     })
 

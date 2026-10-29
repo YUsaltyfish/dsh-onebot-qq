@@ -52,6 +52,42 @@ async function bootImagegen(t, { imagegen = {}, credentials = null } = {}) {
   return h
 }
 
+test('生图主人免冷却：可信轮次身份、普通用户共享、忙时不并发', async (t) => {
+  const h = await bootImagegen(t, { credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'test-image' } } })
+  let release
+  let delayed = false
+  const calls = installFetchMock(t, async () => {
+    if (delayed) await new Promise((resolve) => { release = resolve })
+    return jsonResponse({ data: [{ b64_json: PNG_B64 }] })
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const exec = async (qq, id, extra = {}) => {
+    await emitRaw(h.kernel, groupAtEvent({ text: '画图', messageId: id, userId: qq }))
+    const sid = h.ctx._prompts.at(-1).sessionId
+    h.ctx.emit('session/event', { id: sid }, { type: 'turn/start' })
+    return tool.execute({ prompt: '测试图', ...extra }, { agent: { session: { id: sid } } })
+  }
+  const end = () => h.ctx.emit('session/event', { id: h.ctx._prompts.at(-1).sessionId }, { type: 'turn/end' })
+  assert.equal((await exec(10002, 801)).blocked, undefined)
+  end()
+  assert.equal((await exec(10003, 802, { isMaster: true })).blocked, true, '模型自报身份无效')
+  end()
+  assert.equal((await exec(ADMIN_QQ, 803)).blocked, undefined, '主人跳过普通用户冷却')
+  end()
+  assert.equal((await exec(ADMIN_QQ, 804)).blocked, undefined, '主人连续请求免冷却')
+  end()
+  assert.equal((await exec(10002, 805)).blocked, true, '主人请求仍更新共享冷却')
+  end()
+  delayed = true
+  const running = exec(ADMIN_QQ, 806)
+  await waitFor(() => release, { label: '生成挂起' })
+  const sid = h.ctx._prompts.at(-1).sessionId
+  assert.equal((await tool.execute({ prompt: '并发图' }, { agent: { session: { id: sid } } })).blocked, true)
+  release()
+  await running
+  assert.equal(calls.length, 4)
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // link-parser：纯函数（无网络）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -512,6 +548,23 @@ test('list_images：默认 all 覆盖 workbooks/workspace/uploads/avatars 里存
   const byName = Object.fromEntries(r.items.map((x) => [x.name, x.where]))
   assert.equal(byName['a.jpg'], 'refs')
   assert.equal(byName['b.png'], 'workspace')
+})
+
+test('list_images：采用实际工作区及文件插件目录，热改后不查旧目录', async (t) => {
+  const h = await bootKernel({ config: { dsh: { qqWorkspacePath: 'custom-workspace' }, pluginConfig: { 'file-transfer': { uploadDir: 'custom-uploads' } } } })
+  t.after(() => h.dispose())
+  for (const dir of ['workspace', 'qq_uploads', 'custom-workspace', 'custom-uploads', 'next-uploads']) {
+    fs.mkdirSync(path.join(h.dataDir, dir), { recursive: true })
+    fs.writeFileSync(path.join(h.dataDir, dir, `${dir}.png`), PNG)
+  }
+  const tool = h.ctx._registeredTools.get('mcp__qq__list_images')
+  const workspace = await tool.execute({ where: 'workspace' })
+  assert.deepEqual(workspace.items.map((item) => item.name), ['custom-workspace.png'])
+  const uploads = await tool.execute({ where: 'uploads' })
+  assert.deepEqual(uploads.items.map((item) => item.name), ['custom-uploads.png'])
+  h.kernel.plugins.find((entry) => entry.id === 'file-transfer').cfg.uploadDir = path.join(h.dataDir, 'next-uploads')
+  const next = await tool.execute({ where: 'uploads' })
+  assert.deepEqual(next.items.map((item) => item.name), ['next-uploads.png'])
 })
 
 test('imagegen 参考图：名字选错 → 报错里回图库清单（判断交给模型，不做代码匹配）', async (t) => {

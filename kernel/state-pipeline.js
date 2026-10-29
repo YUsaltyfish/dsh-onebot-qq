@@ -25,6 +25,7 @@ export function currentTurn() {
 const emptyChatState = () => ({
   lastSendAt: 0,      // 自发接话的"静默期"判据
   lastInboundAt: 0,
+  arrivalSequence: 0, // 本线消息入站序号，回合记录基线，不受异步准入耗时影响
   followUpUntil: 0,   // "@ 之后同一人补发的正文"接续窗口截止时间
   followUpCache: null, // 接续窗口里挂起的引用/图片
   lastContextId: null, // 群上文水位（只补新消息，不整份重发）
@@ -247,6 +248,13 @@ async function sendLongAsForward({ onebot, log, target, text, longForward, reply
  */
 export function createDeliver({ onebot, log = console, adminQq = null, longForward = {}, replyMaxLength = 3000, onAfterSend = null, outboundHooks = [] }) {
   const hooks = outboundHooks
+  const sentHooks = []
+  async function afterSend(rec) {
+    for (const fn of [onAfterSend, ...sentHooks]) {
+      if (typeof fn !== 'function') continue
+      try { await fn(rec) } catch (e) { log.warn(`[出站] 成功回调失败(忽略): ${e.message}`) }
+    }
+  }
 
   async function deliver(target, text, opts = {}) {
     const m = /^(group|private):(\d{1,12})$/.exec(String(target ?? ''))
@@ -317,9 +325,7 @@ export function createDeliver({ onebot, log = console, adminQq = null, longForwa
     // 每条成功出站都留一行 —— 外部脚本/控制台靠它统计出站量，别改静默
     log.info(`[出站] 发送 ${to} (id=${messageId ?? '?'}, ${out.text.length} 字, ${mode}${safe.hits.length ? ', 脱敏 ' + safe.hits.join('/') : ''})`)
     // 留档 + markSent：留档失败绝不反报"发送失败"（话已经发出去了）
-    if (onAfterSend) {
-      try { await onAfterSend(rec) } catch (e) { log.warn(`[出站] 留档失败(忽略): ${e.message}`) }
-    }
+    await afterSend(rec)
     return rec
   }
 
@@ -327,6 +333,12 @@ export function createDeliver({ onebot, log = console, adminQq = null, longForwa
   deliver.onDecorate = (fn) => {
     hooks.push(fn)
     return () => { const i = hooks.indexOf(fn); if (i >= 0) hooks.splice(i, 1) }
+  }
+
+  /** 成功送达后的只读通知；失败不触发，回调异常不改变发送结果。 */
+  deliver.onAfterSend = (fn) => {
+    sentHooks.push(fn)
+    return () => { const i = sentHooks.indexOf(fn); if (i >= 0) sentHooks.splice(i, 1) }
   }
 
   /**
@@ -348,9 +360,7 @@ export function createDeliver({ onebot, log = console, adminQq = null, longForwa
     const messageId = await onebot.sendMedia(to, wire)
     // 媒体消息也带上本轮上下文（主动接话统计"已接"、留档排查都要它）；没有上下文时保持 null
     const rec = { target: to, text: cap, ats: [], replyTo: null, mode: 'media', messageId, hits: safe.hits, wire, turnCtx: turnStore.getStore() ?? null }
-    if (onAfterSend) {
-      try { await onAfterSend(rec) } catch (e) { log.warn(`[出站] 留档失败(忽略): ${e.message}`) }
-    }
+    await afterSend(rec)
     return rec
   }
 

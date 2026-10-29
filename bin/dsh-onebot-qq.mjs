@@ -32,7 +32,7 @@ import {
   canSymlink,
   listPersonas,
   activePersona,
-  switchPersona,
+  beginPersonaSwitch,
 } from '../platform/persona-ref.js'
 import { DEFAULT_PERSONA_NAME, ensureDefaultPersona as seedDefaultPersona } from '../platform/persona-seed.js'
 
@@ -70,7 +70,7 @@ function parseArgs(argv) {
   const flags = new Map()
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
+    const arg = ({ '-h': '--help', '-V': '--version' })[argv[i]] || argv[i]
     if (!arg.startsWith('--')) {
       positional.push(arg)
       continue
@@ -162,7 +162,7 @@ function copyTemplates(dataDir, { log }) {
       copyFileIfMissing(src, path.join(dstDir, name))
     }
   }
-  copyDirFiles(path.join(EXAMPLES, 'qq-lines'), path.join(dataDir, 'workspace'))
+  copyDirFiles(path.join(EXAMPLES, 'qq-lines'), path.join(dataDir, 'workspace'), (name) => ['AGENTS.local.md', 'lines.txt', 'lines.default.txt', 'wake.txt'].includes(name))
   copyDirFiles(path.join(EXAMPLES, 'personas'), path.join(dataDir, 'personas'))
   if (copies.length) log(`已复制示例模板 ${copies.length} 个（不覆盖已有文件）`)
   return copies
@@ -535,24 +535,25 @@ function cmdPersona(flags, positional) {
       console.error('用法：dsh-onebot-qq persona use <名字> [--data-dir <dir>]')
       return 1
     }
-    let result
+    let transaction
     try {
-      result = switchPersona({ workspaceDir, personaDir, name, mode: 'auto' })
+      transaction = beginPersonaSwitch({ workspaceDir, personaDir, name, mode: 'auto' })
+      if (raw) {
+        raw.pluginConfig = raw.pluginConfig && typeof raw.pluginConfig === 'object' ? raw.pluginConfig : {}
+        raw.pluginConfig['persona-voice'] = { ...(raw.pluginConfig['persona-voice'] || {}), activePersona: transaction.result.name }
+        saveConfig(configPath, raw, { backup: true })
+      }
+      transaction.commit()
     } catch (e) {
+      try { transaction?.rollback() } catch (rollbackError) { console.error(`❌ ${rollbackError.message}`) }
       console.error(`❌ ${e.message}`)
       return 1
     }
+    const result = transaction.result
     console.log(`✅ 已切换人设：${result.name}（${result.mode === 'symlink' ? '软链模式' : '复制模式（无 symlink 权限时的降级）'}）`)
     if (result.missing.length) console.log(`⚠️  缺少文件（对应能力保持默认）：${result.missing.join(', ')}`)
-    // 同步 config.json 的 activePersona，否则配置优先级会盖过刚投递的文件
-    if (raw) {
-      raw.pluginConfig = raw.pluginConfig && typeof raw.pluginConfig === 'object' ? raw.pluginConfig : {}
-      raw.pluginConfig['persona-voice'] = { ...(raw.pluginConfig['persona-voice'] || {}), activePersona: result.name }
-      saveConfig(configPath, raw, { backup: true })
-      console.log(`✅ 已同步 ${path.basename(configPath)} 的 pluginConfig.persona-voice.activePersona`)
-    } else {
-      console.log('ℹ️  config.json 不存在：仅投递文件 + 写 .persona.json 指针（init 后建议再跑一次）')
-    }
+    if (raw) console.log(`✅ 已同步 ${path.basename(configPath)} 的 pluginConfig.persona-voice.activePersona`)
+    else console.log('ℹ️  config.json 不存在：仅投递文件 + 写 .persona.json 指针（init 后建议再跑一次）')
     console.log('提示：DSH 会把更新的指令文件当作 "Updated instructions" 在下一轮加载；Linux 软链模式下改人设只换链接。')
     return 0
   }

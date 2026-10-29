@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 import { loadConfig, resolveRuntimePaths, validateConfig } from '../kernel/config-store.js'
 import { atomicWriteFileSync } from '../platform/atomic.js'
 import { ensureDir, isInsidePath, resolveDataPath } from '../platform/paths.js'
-import { activePersona, listPersonas, personaSources, switchPersona } from '../platform/persona-ref.js'
+import { activePersona, listPersonas, personaSources, beginPersonaSwitch } from '../platform/persona-ref.js'
 import { createConfigStore } from './store.js'
 import { runDiagnostics } from './diagnostics.js'
 import {
@@ -45,7 +45,6 @@ const PKG_VERSION = (() => {
 })()
 
 const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
-const clone = (v) => (structuredClone(v))
 const toStr = (v) => (v == null ? '' : String(v)).trim()
 
 /** 数组 / 逗号分隔串 → 去空去重字符串数组（群号、唤醒词共用）。 */
@@ -732,17 +731,17 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   async function set(payload = {}) {
     const key = toStr(payload.key)
     if (!key) throw new Error('set 需要 key')
-    const raw = store.read()
-    const next = clone(raw)
-    const written = writeValue(kernel, key, payload.value, next)
-    if (written.unchanged) {
-      return { ok: true, key, value: readValue(kernel, key, raw), message: '未修改（秘密字段写回占位符 = 保持原值）' }
-    }
     const control = findControl(kernel, key)
     const isSecret = control?.secret === true
     // 秘密字段（token / API Key）：日志、RPC 返回、控制台消息里都不得出现明文
-    const what = isSecret ? `${key} = <已更新>` : `${key} = ${JSON.stringify(written.value)}`
-    const saved = await store.save(next, { what, allowPending: true })
+    let written
+    const saved = await store.update((next) => {
+      written = writeValue(kernel, key, payload.value, next)
+      return { unchanged: written.unchanged === true }
+    }, { what: `${key} = <已更新>`, allowPending: true })
+    if (written.unchanged) {
+      return { ok: true, key, value: readValue(kernel, key, saved.raw), message: '未修改（秘密字段写回占位符 = 保持原值）' }
+    }
     const pendingNote = saved.pending ? '（待配置模式：已保存，其余配置已热应用；填完主人 QQ 后自动连接）' : ''
     if (isSecret) {
       return {
@@ -761,20 +760,20 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const known = pluginDefs(kernel).some((p) => p.id === id)
     if (!known) throw new Error(`未知子插件：${id}`)
     const on = payload.on === true
-    const raw = store.read()
-    const next = clone(raw)
     const hasEnabledField = Boolean(findControl(kernel, `${id}.enabled`))
-    if (hasEnabledField) {
-      // 常规路径：软开关，插件保持加载、每轮现读 cfg → 立即生效
-      writeValue(kernel, `${id}.enabled`, on, next)
-    } else if (!on) {
-      // 没有 enabled 字段的插件只能走插件级开关：plugins[id] = false 表示下次加载不加载
-      setPath(next, ['plugins', id], false)
-    }
-    // 配置里被内核级禁用过（plugins.<id> = false）的插件：启用时顺手解除，否则 UI 显示"开"但根本没加载
-    const hardOff = Boolean(next.plugins && next.plugins[id] === false)
-    if (on && hardOff) delete next.plugins[id]
-    const saved = await store.save(next, { what: `子插件 ${id} → ${on ? '启用' : '停用'}`, allowPending: true })
+    let hardOff
+    const saved = await store.update((next) => {
+      if (hasEnabledField) {
+        // 常规路径：软开关，插件保持加载、每轮现读 cfg → 立即生效
+        writeValue(kernel, `${id}.enabled`, on, next)
+      } else if (!on) {
+        // 没有 enabled 字段的插件只能走插件级开关：plugins[id] = false 表示下次加载不加载
+        setPath(next, ['plugins', id], false)
+      }
+      // 配置里被内核级禁用过（plugins.<id> = false）的插件：启用时顺手解除，否则 UI 显示"开"但根本没加载
+      hardOff = Boolean(next.plugins && next.plugins[id] === false)
+      if (on && hardOff) delete next.plugins[id]
+    }, { what: `子插件 ${id} → ${on ? '启用' : '停用'}`, allowPending: true })
     const pendingNote = saved.pending ? '（待配置模式：已保存，其余配置已热应用；填完主人 QQ 后自动连接）' : ''
     const reloadNote = on && hardOff ? '；已解除 plugins.<id>=false（重启 DSH 后真正加载）' : ''
     if (!on && !hasEnabledField) {
@@ -794,10 +793,17 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     if (!GROUP_OPS.includes(op)) throw new Error(`未知操作：${op}（可用：${GROUP_OPS.join(' / ')}）`)
     const isGlobalKw = kind === 'keywords' && String(payload.group_id) === '*'
     const gid = isGlobalKw ? '*' : String(positiveInt(payload.group_id, 'group_id'))
-    const raw = store.read()
-    const next = clone(raw)
+    // 人设词改的是独立文件，不写 config。
+    if (isGlobalKw && toStr(payload.source) === 'persona') {
+      if (op !== 'remove') throw new Error('人设唤醒词只支持删除；要加词请加到 config（不传 source）')
+      const word = toStr(payload.value)
+      if (!word) throw new Error('唤醒词不能为空')
+      removePersonaWakeWord(word)
+      const detail = `已从人设文件删除唤醒词「${word}」`
+      return { ok: true, kind, op, group_id: '*', source: 'persona', detail, message: detail }
+    }
     let detail = ''
-
+    const saved = await store.update((next) => {
     if (kind === 'ignore' || kind === 'spont' || kind === 'welcome') {
       // 群号数组：屏蔽 / 每群主动接话 / 每群入群欢迎
       const dotted = GROUP_PATHS[kind]
@@ -860,17 +866,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
     }
 
-    // 人设自带的唤醒词：删除改人设文件（wake.txt），否则控制台点了 × 也删不掉（config 里本来就没有）
-    if (isGlobalKw && toStr(payload.source) === 'persona') {
-      if (op !== 'remove') throw new Error('人设唤醒词只支持删除；要加词请加到 config（不传 source）')
-      const word = toStr(payload.value)
-      if (!word) throw new Error('唤醒词不能为空')
-      removePersonaWakeWord(word)
-      const detail = `已从人设文件删除唤醒词「${word}」`
-      return { ok: true, kind, op, group_id: '*', source: 'persona', detail, message: detail }
-    }
-
-    const saved = await store.save(next, { what: `${kind} ${op} ${gid}${payload.value ? ` ${payload.value}` : ''}`, allowPending: true })
+    }, { what: `${kind} ${op} ${gid}${payload.value ? ` ${payload.value}` : ''}`, allowPending: true })
     const pendingNote = saved.pending ? '（待配置模式：已保存，其余配置已热应用；填完主人 QQ 后自动连接）' : ''
     return {
       ok: true, kind, op, group_id: isGlobalKw ? '*' : Number(gid),
@@ -1084,9 +1080,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
           if (!isInsidePath(dataDirOf(), target)) throw new Error('记忆目录必须位于数据目录内（不允许 ../ 逃逸）')
         }
       }
-      const next = clone(raw)
-      const written = writeValue(kernel, key, payload.value, next)
-      const saved = await store.save(next, { what: `群记忆配置 ${key} = ${JSON.stringify(written.value)}`, allowPending: true })
+      let written
+      const saved = await store.update((next) => {
+        written = writeValue(kernel, key, payload.value, next)
+      }, { what: `群记忆配置 ${key} = <已更新>`, allowPending: true })
       const pendingNote = saved.pending ? '（待配置模式：已保存，其余配置已热应用；填完主人 QQ 后自动连接）' : '（已热重载）'
       return { ok: true, op, key, value: written.value, backup: saved.backup, pending: Boolean(saved.pending), message: `${entry.label} ✓${pendingNote}` }
     }
@@ -1139,25 +1136,22 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       if (result == null) throw new Error('本机人设切换能力（ops.personaSwitch）调用失败，详见日志')
       if (isPlainObject(result) && result.ok === false) throw new Error(String(result.error || result.message || '本机人设切换失败'))
       switched = isPlainObject(result) ? result : {}
-    } else {
-      switched = switchPersona({
-        workspaceDir: before.workspaceDir || '',
-        personaDir: before.dir || '',
-        name,
-        mode: 'auto',
-      })
     }
 
-    // 配置里钉死了 activePersona 的话要同步改，否则面板会一直显示旧人设
-    let backup = ''
-    const raw = store.read()
-    const pinned = toStr(getPath(raw, ['pluginConfig', 'persona-voice', 'activePersona']))
-    if (pinned && pinned !== name) {
-      const next = clone(raw)
+    // 配置里钉死了 activePersona 的话要同步改；本地投递与保存共用路径事务。
+    const saved = await store.update((next) => {
+      const pinned = toStr(getPath(next, ['pluginConfig', 'persona-voice', 'activePersona']))
+      if (!pinned || pinned === name) return { unchanged: true }
       setPath(next, ['pluginConfig', 'persona-voice', 'activePersona'], name)
-      const saved = await store.save(next, { what: `切人设 → ${name}`, allowPending: true })
-      backup = saved.backup
-    }
+    }, {
+      what: `切人设 → ${name}`, allowPending: true,
+      effect: switched ? null : () => {
+        const transaction = beginPersonaSwitch({ workspaceDir: before.workspaceDir || '', personaDir: before.dir || '', name, mode: 'auto' })
+        switched = transaction.result
+        return transaction
+      },
+    })
+    const backup = saved.backup
 
     const after = personaList()
     const fallbackMessage = `已切到「${name}」：人设 + 句池一起换 —— 下一条消息生效（不用重置、不丢上下文）`
@@ -1191,11 +1185,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const preset = toStr(payload.preset)
       const p = REPLY_PRESETS[preset]
       if (!p) throw new Error(`未知档位：${payload.preset}（可用：quiet / semi / active）`)
-      const raw = store.read()
-      const next = clone(raw)
-      setPath(next, ['pacing', 'reply', 'enabled'], true)
-      for (const [k, v] of Object.entries(p)) setPath(next, ['pacing', 'reply', k], v)
-      const saved = await store.save(next, { what: `主动接话档位 → ${preset}`, allowPending: true })
+      const saved = await store.update((next) => {
+        setPath(next, ['pacing', 'reply', 'enabled'], true)
+        for (const [k, v] of Object.entries(p)) setPath(next, ['pacing', 'reply', k], v)
+      }, { what: `主动接话档位 → ${preset}`, allowPending: true })
       return {
         ok: true, id, preset, value: p, backup: saved.backup,
         message: `✅ 已切到「${REPLY_PRESET_NAMES[preset]}」档：每小时最多 ${p.hourlyMax} 次`

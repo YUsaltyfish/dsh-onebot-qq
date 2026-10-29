@@ -7,7 +7,9 @@
 #   这时**不要**再用文件开头的 insert（会重复插入同一 id），要改配置请用文件末尾的「覆盖」写法。
 #
 # 用法 B｜手动挂载（没有把本包当 bundle 安装、而是自己往 profile patch 里写）：
-#   把下面的 insert 块复制进你的 profile patch（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`）。
+#   把下面的 insert 块复制进你的 profile patch（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`），
+#   同时合并包根 cordis.patch.yml 的 preset-qq-chat 行（完整 preset 定义，不只机器人行）。
+#   缺 preset / 裁剪服务时不能假定工具已隔离；用新 QQ 会话核对实际工具面。
 #
 # 所有值均为占位；真实配置放实例 config.json（控制台热改的就是它），不要写进这里。
 # ─────────────────────────────────────────────────────────────────────────────

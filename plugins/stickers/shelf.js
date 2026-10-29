@@ -72,7 +72,7 @@ export function readIndex(dir) {
  * 建一个库（每个插件实例一个）。
  * @param {object} opts
  * @param {string} opts.dir            库目录（index.json 与图片都在这里）
- * @param {number} [opts.maxItems]     库上限（张）；满了跳过新图，不淘汰旧的
+ * @param {number|(()=>number)} [opts.maxItems] 库上限（张）；可动态读取，满了跳过新图，不淘汰旧的
  * @param {number} [opts.maxBytes]     单张上限（字节）
  * @param {number} [opts.minBytes]     单张下限（字节，挡掉 icon 那种几十字节的垃圾）
  * @param {(msg:string)=>void} [opts.log]
@@ -80,7 +80,7 @@ export function readIndex(dir) {
 export function createShelf(opts = {}) {
   const dir = String(opts.dir || '').trim()
   if (!dir) throw new Error('createShelf: 需要 dir')
-  const maxItems = Math.max(1, Number(opts.maxItems) || 200)
+  const maxItemsOf = () => Math.max(1, Number(typeof opts.maxItems === 'function' ? opts.maxItems() : opts.maxItems) || 200)
   const maxBytes = Math.max(1, Number(opts.maxBytes) || 2 * 1024 * 1024)
   const minBytes = Math.max(0, Number(opts.minBytes) || 0)
   const log = typeof opts.log === 'function' ? opts.log : () => {}
@@ -163,6 +163,7 @@ export function createShelf(opts = {}) {
         out.seen += 1 // 同一张，不重复存、也不写盘
         continue
       }
+      const maxItems = maxItemsOf()
       if (cache.items.length >= maxItems) {
         log(`库已满(${maxItems})，跳过新贴图`)
         break

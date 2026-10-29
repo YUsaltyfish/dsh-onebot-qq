@@ -9,7 +9,7 @@
  *   2. `/help` 清单从**已注册命令表**动态生成，不手写死字符串 —— 加命令只改一处注册。
  *   3. `/history` 不是纯回复：把群历史写进 `ev.historyBlock` 后**放行**（不 stop），交给模型回答。
  *
- * 契约关系：`bot.registerCommand` 只负责注册；宿主在 intercept 阶段按前缀查 `kernel.commands` 调 handler。
+ * 契约关系：`bot.registerCommand` 负责注册；宿主在 intercept 阶段统一检查 permission 后调 handler。
  * 会话查询/删映射/枚举全部"探测驱动的可选方法"，探测不到就降级（驱动实际都提供了）。
  * `/quota` 依赖可选的配额能力（`bot.core.usage.report()` 或 `bot.quotaReport()`），没有就明确降级。
  */
@@ -74,13 +74,6 @@ export default {
       await bot.deliver(ev.chatKey, text) // ⚠️ 唯一出站口；引用/拆条/脱敏由内核出站链路定夺
       ev.stopped = true
       ev.stopReason = `commands:${name}`
-    }
-
-    /** 仅主人命令的统一前置；返回 true = 已拒绝并回执 */
-    async function denyUnlessMaster(ev, name) {
-      if (ev.sender?.isMaster === true) return false
-      await reply(ev, '🙅 这个命令只有主人能用', name)
-      return true
     }
 
     function define(name, { permission, description, run }) {
@@ -179,7 +172,6 @@ export default {
       permission: 'master',
       description: '查看会话状态',
       async run(ev) {
-        if (await denyUnlessMaster(ev, 'status')) return
         const sid = sessionOf(ev.chatKey)
         await reply(ev, [
           '📊 状态',
@@ -195,7 +187,6 @@ export default {
       permission: 'master',
       description: '清空本聊天上下文（重新开始）',
       async run(ev) {
-        if (await denyUnlessMaster(ev, 'reset')) return
         // 旧实现只删映射不归档 → 旧会话变"游离"永远留在侧栏（线上报过的问题）。
         // 现在与「控制台 → 重置本群对话」一致；归档失败只 warn 并降级（照样重置这一轮）。
         const oldSid = sessionOf(ev.chatKey)
@@ -222,7 +213,6 @@ export default {
       permission: 'master',
       description: '清空**所有** QQ 线（群+私聊）的对话；要带 confirm',
       async run(ev, args) {
-        if (await denyUnlessMaster(ev, 'resetall')) return
         // 打字成本很低、误触代价很大：不带 confirm 只回提示，不动任何会话
         if (!/confirm|yes|确认|确定|是/i.test(tailText(ev, args, 'resetall'))) {
           await reply(ev, [
@@ -263,7 +253,6 @@ export default {
       permission: 'master',
       description: '中止当前正在进行的回复',
       async run(ev) {
-        if (await denyUnlessMaster(ev, 'cancel')) return
         const sid = sessionOf(ev.chatKey)
         if (!sid) {
           await reply(ev, '当前没有进行中的回复', 'cancel')
@@ -279,7 +268,6 @@ export default {
       permission: 'master',
       description: '查模型线路额度（5小时/每周/每月；仅主人）',
       async run(ev) {
-        if (await denyUnlessMaster(ev, 'quota')) return
         await reply(ev, await quotaReport(), 'quota')
       },
     })
@@ -289,7 +277,6 @@ export default {
       permission: 'master',
       description: '拉本群最近 N 条记录进模型回答（仅主人；默认 50，上限 500）',
       async run(ev, args) {
-        if (await denyUnlessMaster(ev, 'history')) return
         if (!ev.isGroup) {
           await reply(ev, '这个命令要在群里发（拉的就是那个群最近的记录）', 'history')
           return

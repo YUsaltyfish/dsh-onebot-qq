@@ -596,7 +596,7 @@ test('CMD-7b /history 上限 500：请求条数被夹到 500，默认仍是 50',
 test('send_message 的 sticker 参数：插件没装/没开 → 如实说被忽略；装了 → 走 shared 钩子发出', async (t) => {
   const h = await boot(t)
   const send = h.ctx._registeredTools.get('mcp__qq__send_message')
-  const turn = { chatKey: `group:${GROUP_ID}` }
+  h.kernel.dsh.sessions.set(`group:${GROUP_ID}`, 'sid-x')
   const r1 = await send.execute({ target: `group:${GROUP_ID}`, text: '正文一句', sticker: '无语' }, { agent: { session: { id: 'sid-x' } } })
   assert.equal(r1.ok, true)
   // 默认 boot 里 stickers 插件在但库是空的：sticker 会说没挑到（不是静默吞掉参数）
@@ -611,7 +611,6 @@ test('send_message 的 sticker 参数：插件没装/没开 → 如实说被忽�
   const r2 = await send.execute({ target: `group:${GROUP_ID}`, text: '再来一句', sticker: '#1' }, { agent: { session: { id: 'sid-x' } } })
   assert.deepEqual(r2.sticker, { ok: true, pick: { id: 1 } }, '装了就走 shared 钩子')
   assert.deepEqual(sent, [{ target: `group:${GROUP_ID}`, query: '#1' }])
-  void turn
 })
 
 test('WAKE-NOTICE 无身份 notice（点赞 profile_like / bot_offline）：不建会话、不进模型、不留出站', async (t) => {
