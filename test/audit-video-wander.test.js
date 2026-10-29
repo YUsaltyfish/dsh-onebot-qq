@@ -25,7 +25,9 @@ function setup(over = {}) {
     thoughtMaxChars: 300,
     candidatesLimit: 30,
     maxPickTries: 3,
-    reportGraceSec: 20,
+    // 测试把「说完话后宽限」压到 1 秒：默认 20 秒会让「模型没交感想」那几条各等 20 秒，
+    // 整包在 CI（job 上限 6 分钟）上会被 cancel 掉
+    reportGraceSec: 1,
     excludeDays: 14,
     frames: 8,
     maxSide: 1024,
