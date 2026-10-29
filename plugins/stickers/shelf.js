@@ -245,14 +245,23 @@ export function createShelf(opts = {}) {
     return take(it)
   }
 
-  /** 清单（给模型看）：久没露脸的排前面，一行一张「#编号 标签/标签」。 */
+  /**
+   * 清单（给模型看）：从**整个库**随机抽几张，一行一张「#编号 标签/标签」。
+   * 不做任何排序（新旧 / 久未发都不要）—— 排序会让某一批图长期排到 30 行之外：
+   * 2026-10-28 新收的 54 张「赫萝」形象图，模型在前 30 行里一次都没见过，
+   * 于是在 QQ 里断言"库里没有角色标签"。整个文件夹随机抽，哪一批都有机会露脸。
+   */
   function catalog(limit = 30) {
     const usable = usableItems()
     if (!usable.length) return ''
-    return usable
-      .slice()
-      .sort((a, b) => (Number(a.lastUsed) || 0) - (Number(b.lastUsed) || 0))
-      .slice(0, Math.max(1, Number(limit) || 50))
+    const lim = Math.max(1, Number(limit) || 50)
+    const pool = usable.slice()
+    for (let i = pool.length - 1; i > 0; i--) { // 洗牌（Fisher–Yates）
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[pool[i], pool[j]] = [pool[j], pool[i]]
+    }
+    return pool
+      .slice(0, lim)
       .map((i) => {
         const tags = (Array.isArray(i.tags) ? i.tags : []).slice(0, 3).join('/')
         return '#' + i.id + (tags ? ' ' + tags : '')

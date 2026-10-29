@@ -49,6 +49,16 @@
 - **代码注释统一为「协议端」**：`kernel/`、`plugins/`、`admin/`、`client.js`、`bin/` 等 20 个文件约 60 行注释（NapCat 的行为特性 → 协议端通用描述）；差异事实保留但改成实现无关写法（如「Anchor 参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`」）。
 - **保持不动的契约**（与 2026-10-27 变更 9 一致）：配置键 `napcat.*`、动作 id `napcat-check`/`napcat-reconnect`、模块与文件 `kernel/napcat-adapter.js`、`NapCatAdapter`、`toNapCatFileRef`/`fromNapCatFileRef`、`test/fake-napcat.mjs`、日志前缀 `[onebot-qq:napcat]` 与验收日志字符串（如 `NapCat WS 已连接`）—— 全部保留，避免打坏既有配置与运维 grep。
 
+### 修复（表情库清单：改为全库随机抽样）
+
+- **`sticker_catalog` 清单只列库的前 30 行，导致模型断言「库里没有角色标签」**：清单原来按 `lastUsed` 升序排（久未露脸的在前）。
+  2026-10-28 新收的 54 张形象图 `lastUsed` 都是 0，与同样从没发过的老图并列，稳定排序让老图（id 小）占满前 30 行 ——
+  模型只看得到清单，于是在 QQ 里答「标签全是情绪和梗，没有一张标着角色名」。
+- 现在**不做任何排序**：每次从整个库 Fisher–Yates 洗牌后取前 `limit` 张。哪一批都有机会露脸，也不用维护排序规则。
+  返回格式不变（一行一张 `#编号 标签/标签/标签`，仍只显示前 3 个标签），`limit` 语义不变（默认 30，上限 = 全库张数）。
+- ⚠️ 行为特性（不是 bug）：清单**每次内容不同**；需要点名某张时用 `#编号`。
+- 新增 `test/stickers-shelf.test.js`（40 张图、每次抽 30、抽 20 次 → 断言单次清单内不重复且 40 张全都出现过）；全量 274/274。
+
 ### 修复（链接解析：视频拆条）
 
 - **视频类链接在 SnowLuma 等严格协议端下发不出**：协议端要求「video 必须是消息里唯一的 segment」（`message element "video" must be the only segment in a message`；同一条里放两个视频同样被拒：`video may appear only once`）。`link-parser` 原来把「说明文字 + `[CQ:video]`」拼成一条 —— NapCat 时代兄弟元素被 QQ 静默吞掉、看起来正常，换成 SnowLuma 后整条发送失败（ERROR 日志，媒体一条都发不出）。
