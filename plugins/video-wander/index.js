@@ -397,7 +397,9 @@ export default {
 
         for (const [name, urlOf] of plan) {
           if (blocked.has(name)) continue
-          if (!firstGap) await new Promise((r) => { const t = setTimeout(r, API_GAP_MS); t.unref?.() })
+          // ⚠️ 这个 setTimeout 不能 unref：它在 await 里，一 unref 事件循环就可能变空，
+          //    这个 Promise 永远不 resolve，测试会被 Node 判成 "event loop resolved" 而 cancel。
+          if (!firstGap) await new Promise((r) => setTimeout(r, API_GAP_MS))
           firstGap = false
           const got = await fetchJson(urlOf())
           if (!got.ok) {
