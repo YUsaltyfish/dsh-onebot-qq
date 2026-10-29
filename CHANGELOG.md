@@ -2,127 +2,87 @@
 
 所有值得用户知道的变更记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
-## 未发布 — 2026-10-23
+## 未发布 — 截至 2026-10-29
 
-群记忆正确性与控制台修复（不新增功能、不改对外配置键）：
+以下是当前实现的合并摘要；替代本轮迭代中互相冲突的中间说明。
+
+### 变更：OneBot 通用契约
+
+- 配置、控制台、CLI、文档与日志统一使用 OneBot v11 通用名称，支持 NapCat、SnowLuma 等协议端。连接配置为 `onebot.wsUrl / wsToken / httpUrl / httpToken / mediaSendTimeoutMs / mediaSendRetries`。
+- **旧配置兼容可读**：`loadConfig()` 通过 `applyOneBotLegacyKey()` 归一旧 `napcat.*`；`onebot.*` 优先，旧字段只补缺，控制台保存使用新键。兼容读取不等于保留旧动作或旧模块入口。
+- 控制台动作是 `onebot-check` / `onebot-reconnect`，**旧 `napcat-check` / `napcat-reconnect` 不再注册**。
+- 当前模块与标识符为 `kernel/onebot-adapter.js`、`OneBotAdapter`、`bot.onebot`、`toOneBotFileRef` / `fromOneBotFileRef`；测试协议端为 `test/fake-onebot.mjs`。日志前缀为 `[onebot-qq:onebot]`，连接成功串为 `OneBot WS 已连接`。外部部署、监控与巡检脚本需同步使用新路径、新键及新日志串。
+- 协议兼容修复：引用与 wire 解析支持负 `message_id`（仅 `0` 表示不引用）；群历史请求同时传 `message_id: 0` 与 `message_seq: 0`；在线探针优先读取 `get_status` 的 `online` / `good`，心跳接收健康度进入 `health().qqReceiveGood`。协议端未提供相关字段时保持降级行为。
+- 链接解析的视频发送按严格协议端契约拆条：每个视频单独一条、图片合并一条、说明文字最后单独一条；纯图片仍可与说明同条。媒体全部失败时不单发说明，降级为普通消息处理。
+
+### 修复：10 月 29 日 P1 / P2 审计问题
+
+- **生命周期与权限隔离**：卸载后丢弃待合批消息，异步建会话或管线恢复后不再提交新任务；扩展命令统一校验权限，未知权限值关闭。QQ 工具按当前插件拥有的会话判断归属，显式 `target` 不授予会话身份；后台群记忆任务只允许 `memory_append`，普通会话不得借用该能力，卸载前的旧工具闭包也不得复活。
+- **后台任务收尾**：准入失败、超时、取消及卸载统一清理等待；取消确认不当作任务结束，未结束任务保持隔离身份，直到实际结束再归档，避免晚到事件、重复归档及未处理的 Promise 拒绝。
+- **配置与人设事务**：同一配置文件的读改写、异步应用与失败回滚串行执行，排队更新读取最新或已回滚的基准，避免并发保存互相覆盖。切人设将文件投递、指针及配置保存联动提交；失败恢复原文件，保留恢复所需备份，保护用户改动与非托管文件；软链不可用时可回落 copy。
+- **欢迎与好友门禁**：卸载清理欢迎延时和模型兜底计时器，晚到成员查询不再发消息；欢迎冷却按分钟计算，只有同目标、同轮次的成功发送才取消对应兜底。好友门禁严格模式在冷启动或失效缓存时保持关闭，刷新单飞、失败后可恢复，卸载后忽略晚到结果。
+- **媒体与表情库**：本地文件和 HTTP 下载均按实际读取字节执行上限，处理读取中增长、虚假或缺失 `Content-Length`、超时及流取消；文件插件的直接、本地和 `getFile` 路径使用同一限额口径。表情目录热切换时在途与排队任务仍归原库，大小上限可动态更新。
+- **群记忆水位与去重**：同秒到达、乱序消息、归档轮转中的重复记录及无 ID 记录按群和方向正确处理；失败输出不提交去重状态，重启后可继续，清理不把未见消息误当已消化。归档到积累链路保留说话人昵称与群名片优先级。
+
+### 修复：群记忆与控制台
+
+- 写侧合并与备份使用未截断原文，不再把读侧 `maxBytes` 截断结果当基准；清理旧正文中的截断提示。模型调用期间新到消息不被误推水位；采样跳过数以 `sampledOut` 进入日志与结果；解析零条或工具漏提交的群不推水位，下轮可重试。
+- 新增 `accumulateMaxGroupsPerRound`（默认 12）与轮转游标，避免尾部群长期得不到处理。重复 QQ 画像归一、连写条目拍平、临时轮次内容剔除；按条数和字节预算裁剪，优先保留群成员信息。
+- 积累器和控制台手工备份共用 `.revisions` 保留策略。控制台保存上限跟随 `maxBytes`，支持 `ifMtime` 并发校验，文件权限为 0600；目录限定在数据目录内，非法群号键不再使列表崩溃，保存后状态同步。
+- 定时任务接入 `bot.onDispose()`，避免重载重复启动。控制台秘密字段在响应、日志和状态中遮蔽；准入失败与撤回失败只向 QQ 返回可读说明，内部协议报错留在日志。
+- 无身份点赞等 notice 不再创建 `private:undefined` 会话或空模型回合；有效戳一戳与入群通知保留各自处理路径。`/history` 默认仍为 50，上限放宽至 500。
+
+### 变更：表情、回话与生图
+
+- 表情库使用自研 `plugins/stickers/shelf.js`，不再分发第三方 vendor，也不再维护删除黑名单或旧版打标流程。索引以标签为检索依据，清单显示编号和标签；控制台按真实存在的图片计数并提示失效索引。
+- 「收表情（会写索引）」默认关闭：关闭时库只读，仍可挑图发送，使用轮换在进程内记录，不写索引。挑图剥离群聊脚手架，忽略泛化元标签、优先具体标签，减少同图连发。
+- `sticker_catalog` 从全库洗牌后按 `limit` 抽样，而非固定排序只取前列；默认 30，上限为全库数量，单次不重复、每次内容可不同；点名图片可用 `#编号`。`send_message` 支持随正文带 `sticker`，未实际发出时工具返回可有限提示。
+- 模型经 `send_message` 发送的短正文可按自然句拆为 2～4 条（`pluginConfig['persona-voice'].splitReplyMaxParts`，默认 3），不拦腰切句；命令回执、答应声、媒体码及长文不走该拆条逻辑。
+- 新增按需 `list_images`：可查角色参考图、实际 QQ 工作区、上传目录与头像缓存，返回路径、文件名、字节数和可识别尺寸（默认 30，最多 100）。删除每轮正文中的参考图库提示；`generate_image.image` 可用清单路径或文件名，名字找不到时引导先查清单，白名单约束保持。
+- 生图支持 `pluginConfig.imagegen.extraBody` JSON：文生图并入 JSON、图生图追加 multipart 字段、`openai-chat` 并入请求顶层；非法 JSON 在上游请求及占用冷却前报错。
+- **主人生图仅免时间冷却**：身份来自可信当前轮次 `isMaster`，不采信模型参数或消息中的自报身份；混合发送者合批不继承主人豁免。所有人仍共用单任务忙碌锁，上一张未结束时主人也不并发；主人实际发起生成仍更新共享冷却时间。
+- **忙碌或冷却拦截不代答**：工具返回 `blocked: true`、`replied: false`、`retryAfterMs` 和句池 `imageBusy` 的 `suggestedText`，交由模型调用发送工具回话后结束本轮；本次不生成、不排队、不重试。真实生成时才发 `imageAck`；上游生成失败时可向有效目标代发 `imageFail`，并要求模型不补话、不重试。
 
 ### 删除
 
-- 删除视频内容识别及视频链接抽帧两个子插件、对应配置入口与专用测试；保留链接解析及媒体发送能力。
+- 删除 `video-read`（视频内容识别）与 `video-link-read`（视频链接抽帧）两个子插件及对应配置入口、专用测试。**普通视频等媒体收发与 `link-parser` 链接解析保留**；删除识别不代表删除视频发送或链接媒体解析。
 
-### 修复
+### 验证记录
 
-- **兼容 SnowLuma 等其它 OneBot v11 协议端**：引用回复允许**负 `message_id`**（SnowLuma 的 id 是有符号 int32 哈希、经常为负；原来 `<=0` 当「不挂引用」会让引用静默失效 —— 现在只有 `0` 才表示不挂），`parseWire` 的引用解析同步认负号；`get_group_msg_history` 同时发 `message_id: 0` 与 `message_seq: 0`（SnowLuma 认 `message_id`、NapCat 认 `message_seq`，两边都忽略未知键）；在线探针优先看 `get_status`（`online=false` 判掉线、`good=false` 判「接收链路停滞」——SnowLuma hook 卡住时发得出收不进，光靠 `get_stranger_info` 会误判在线），心跳里的 `status.good` 记进 `health().qqReceiveGood`；拿不到 `get_status`/字段时行为与原来一致（纯 NapCat 不受影响）。
-- **写侧改用未截断原文**：积累器合并/备份不再拿读侧 24KB 截断文本当基准；超过 `maxBytes` 的尾部不再每轮丢失，旧版误写进正文的「…已截断」提示会在下次合并时清掉。
-- **水位口径**：`digestedAt` 改为「本轮实际喂给模型的最新消息 ts」，不再用 `Date.now()`（模型调用期间新到的消息不再被误标已消化）。
-- **采样可见**：每群超出 `accumulateMsgPerGroup` / `accumulateMaxChars` 的条数计入 `sampledOut`（日志 + 结果行），不再静默丢弃。
-- **digest 解析 0 条不推水位**：模型把要点写成段落/表格时记 failed、下轮重试，不再当「无新增」跳过。
-- **单轮群数上限可配 + 轮转**：新增 `accumulateMaxGroupsPerRound`（默认 12），配合游标轮转，大号段群不再永久饿死。
-- **合并质量**：同 QQ 重复画像归一、`；**昵称(QQ)**` run-on 拍平、`这轮/本轮` 临时内容丢弃、每节按条数 + 字节预算裁剪（优先保「群里的人」），文件稳定在读取上限内。
-- **`.revisions` 统一保留**：积累器与控制台 `-manual` 备份共用命名/`accumulateRetainRevisions`；死群多余版本每轮收掉。
-- **控制台保存**：保存上限跟随 `maxBytes`；带 `ifMtime` 的乐观并发校验（防止旧编辑器覆盖新积累）；写盘 0600；`dir` 限制在数据目录内；唤醒词里的非群号数字键不再让「群记忆」页整页崩掉；保存后状态自动跟随。
-- **生命周期**：定时器接入 `bot.onDispose()`（新增 bot 能力，向后兼容），插件重载不再叠出第二个 60s 定时器。
-- **文档/注释**：配置参考补 `accumulateMaxGroupsPerRound`、采样/水位口径；开发指南补 `bot.onDispose`；修正「后台会话禁止调用任何工具」等过时注释。
-- **撤回失败不再回显 NapCat 原始报错**：适配器把 `NTEvent / EventRet / decode failed` 原文只写日志、对外返回人话；`gate-wake` 的撤回失败回执也只发人话。修复 2026-10-23 15:37 把整段内部报错发进群的问题。
-- **`/history` 上限 200 → 500**：`plugins/commands/index.js` 的 `HISTORY_MAX` 放宽（默认仍 50）；500 条约 23KB / 7.6K token，拉取仍在适配器 8s 超时内。
-- **修复点赞通知制造空对话**：NapCat 的点赞通知（`profile_like`）没有 `user_id`/`group_id`，归一后 chatKey 变成 `private:undefined`，又被「私聊永远算被叫」放行 → 出现两个空模型回合、并建出 `private:undefined` 的 DSH 会话。现在：无身份 notice 直接丢弃（format）、notice 一律不进模型（gate-wake）、非法 chatKey 在 runTurn 第二道防线丢弃。
-- **表情库改为自研存储，删除第三方 vendor**：不再随包携带 `vendor/dsh-sticker-shelf.mjs`（MIT，JackZo400/dsh-sticker-library，2026-10-12 引入）。按实际用到的能力重写为 `plugins/stickers/shelf.js`（索引读写/哈希去重/大小闸/挑图/清单/统计，约 280 行），并删掉用不上的打标（`tagPending`/看图回调/BLOCK 安全线）、删除黑名单、adult/lowq/renumber 等。`package.json.files` 去掉 `vendor`，`docs/开发指南.md` 目录表同步。
-- **删除表情包「删除黑名单」（`blocked-hashes.txt`）**：本机不需要"删掉的表情别再收回来"这套账本 —— 删一张 = 删文件 + 删索引条目。`vendor/dsh-sticker-shelf.mjs` 里 `loadBlocked/addBlocked/isBlockedHash` 及其调用（harvest ×2、remove ×1）一并移除（记为该文件的「本地补丁 2」，升级覆盖后需重打）。
-- **表情索引瘦身：只记标签**：去掉 `desc`（画面描述）/`use`（什么场合发）/`summary`/`fromNick`/`fromUid`/`seenCount`/`lastSeen`，每条只留 `id/hash/file/tags/tagged/blocked/tagVer/uses/lastUsed/ts`（index.json 97KB → 39KB）；关键词挑图只按标签匹配；`sticker_catalog` 清单变成「编号 · 标签」；控制台数量改为「只算磁盘上真实存在的图」，并单独提示「N 条索引指向已删文件」。
-- **修复表情包总是发同一张**：`matchContextTag` 会用整段上下文（含内核注入的 `[群聊上文]` 脚手架）匹配标签 → 命中库里唯一带「群聊」标签的那张（`#107`「正在严肃对群友哈气」），提示词因此 58/64 次点名「群聊」、模型照抄 44 次。现在：① 匹配前剥掉脚手架行；② 元标签（群聊/表情包/二次元…）不参与点名；③ 同名标签取最长的（更具体）；④ 只读模式加进程内"最近发过"轮换，同一个词不会连发同一张；⑤ 提示句式轮换并允许模型自己换词。
-- **表情包新增「收表情（会写索引）」开关，默认关**：关着时库只读（不采集/不打标/不清理/不记使用，`index.json` 一个字节都不写），机器人仍能挑现有图发；控制台「表情包」页顶部显示库数量/标签数，并说明当前是只读还是可写。默认关是为了防「运行中改索引被内存副本覆盖」（2026-10-20 标签丢失的根因）。
-- **拆条支持 2~N 条**：`pacing.reply.style.splitMaxParts`（默认 3，控制台「主动接话 → 高级」），按自然句末拆、绝不拦腰砍句；只对模型经 `send_message` 写的正文生效，命令回执/答应声不拆；>120 字的长文仍走长文卡片。
-- **表情包实际发出率**：`send_message` 新增 `sticker` 参数（发正文时顺手带一张，省一步工具调用）；提示词改成「顺手带一张 + 给出现成参数」；若本轮掷骰命中但还没发，`send_message` 的返回里会再轻推一次（最多 2 次）。
-- **新增 `list_images` 工具 + 去掉每轮参考图提示**：`[参考图库:…]` 每轮拼进用户消息正文（约 100~350 token、看着烦）已删；改成按需工具 `list_images`，可列 `refs`（角色参考图）/`workspace`（QQ 工作区）/`uploads`（QQ 发来的文件）/`avatars`（头像缓存）/`all` 下的图片，返回绝对路径、文件名、字节数、尺寸（默认 30 张、最多 100）。`generate_image` 的 `image` 支持清单里的路径或文件名；名字找不到时报错并指引先调 `list_images`。白名单未放宽（仍只允许白名单目录内的真实图片）。
-- **生图新增「额外请求字段（JSON）」**：`pluginConfig.imagegen.extraBody`（多行文本，默认空），控制台「生图」页可改。不同平台字段不同，由用户自己补：文生图并进 JSON 请求体、图生图逐项追加为 multipart 字段、`openai-chat` 协议并进 `/chat/completions` 顶层。典型用法：sensenova／商汤默认给图加水印，填 `{"watermark": false}` 关掉。留空 = 与旧版行为完全一致；非法 JSON 直接报错、不发请求。
-
-### 变更（控制台文案）
-
-- **控制台里「NapCat」改名为「OneBot」**：页签「NapCat 连接」→「**OneBot 连接**」，按钮「测试 NapCat 连接」/「重新连接 NapCat」→「**测试 OneBot 连接**」/「**重新连接 OneBot**」，状态徽标「NapCat 在线/异常」→「OneBot 在线/异常」，诊断报告项与相关提示文案同步（协议端同时支持 NapCat 与 SnowLuma，界面不再只写其中一家）。**机器侧名字一律未改**：控制台动作 id 仍是 `napcat-check` / `napcat-reconnect`，配置键仍是 `napcat.*`，日志关键字仍是 `NapCat WS 已连接`（对外契约「只加不改」）。新增用例锁住新页签名与按钮名（`test/audit-console-groups.test.js`）。
-
-### 变更（文档与文案口径：NapCat → OneBot 通用）
-
-- **文档不再以 NapCat 为讲解对象，统一按 OneBot v11 通用表述**：`docs/` 8 份 + 仓库 `README.md` + `examples/windows/README.md`。
-  `## 二、准备协议端（OneBot v11：NapCat 或 SnowLuma）` → `（OneBot v11）`；`### 2.1 NapCat` → **`### 2.1 安装并启动协议端（通用步骤）`**（启动协议端并登录 QQ → 开正向 WS（常见默认 3001）/ HTTP API（常见默认 3000）→ 记 token 填 `napcat.wsToken`/`httpToken` → curl 验证）；
-  `## 三、安装并配置 NapCat（QQ 协议端）` → `## 三、安装并配置 OneBot 协议端`；对照表表头 `NapCat | SnowLuma` → `多数实现 | SnowLuma`；
-  删除 NapCat 专属细节（NapCatQQ 安装器、WebUI `:6099`、`config\onebot11_<QQ号>.json`、`LD_PRELOAD`）；SnowLuma 小节保留并标注「本机在用的实现」；
-  文档内 NapCat 命中 159 → 67（剩余全部是配置键 `napcat.*`、代码标识符与日志样例，必须与代码一致）。
-- **界面与 CLI 文案同步泛化**：控制台 OneBot 连接页三步说明（不再写「NapCat 会自己拉起 QQ」）、`HTTP Token` 提示（「多数实现可留空；强制鉴权的实现（如 SnowLuma）必填」）、掉线/未连接提示里的 `:6099` 改为「端口见各实现文档（本机在用的 SnowLuma 默认 :5099）」、
-  诊断项建议文案、`doctor --no-net` 帮助（「跳过 OneBot 协议端端口探测」）、自检项 `OneBot WS 端口`/`OneBot HTTP 端口`、新手向导提示（「测试 OneBot 连接」）；
-  用户可见回执里「NapCat 没回数据 / 临时故障」→「协议端」；进模型的 `[群历史: … 来自 NapCat get_group_msg_history]` → `来自 OneBot get_group_msg_history`；`loginError` 的 `NapCat WS 断开` → `协议端 WS 断开`；`locale/*.json` 与 `package.json` 的 description 去掉 NapCat。
-- **代码注释统一为「协议端」**：`kernel/`、`plugins/`、`admin/`、`client.js`、`bin/` 等 20 个文件约 60 行注释（NapCat 的行为特性 → 协议端通用描述）；差异事实保留但改成实现无关写法（如「Anchor 参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`」）。
-- **保持不动的契约**（与 2026-10-27 变更 9 一致）：配置键 `napcat.*`、动作 id `napcat-check`/`napcat-reconnect`、模块与文件 `kernel/napcat-adapter.js`、`NapCatAdapter`、`toNapCatFileRef`/`fromNapCatFileRef`、`test/fake-napcat.mjs`、日志前缀 `[onebot-qq:napcat]` 与验收日志字符串（如 `NapCat WS 已连接`）—— 全部保留，避免打坏既有配置与运维 grep。
-
-### 修复（表情库清单：改为全库随机抽样）
-
-- **`sticker_catalog` 清单只列库的前 30 行，导致模型断言「库里没有角色标签」**：清单原来按 `lastUsed` 升序排（久未露脸的在前）。
-  2026-10-28 新收的 54 张形象图 `lastUsed` 都是 0，与同样从没发过的老图并列，稳定排序让老图（id 小）占满前 30 行 ——
-  模型只看得到清单，于是在 QQ 里答「标签全是情绪和梗，没有一张标着角色名」。
-- 现在**不做任何排序**：每次从整个库 Fisher–Yates 洗牌后取前 `limit` 张。哪一批都有机会露脸，也不用维护排序规则。
-  返回格式不变（一行一张 `#编号 标签/标签/标签`，仍只显示前 3 个标签），`limit` 语义不变（默认 30，上限 = 全库张数）。
-- ⚠️ 行为特性（不是 bug）：清单**每次内容不同**；需要点名某张时用 `#编号`。
-- 新增 `test/stickers-shelf.test.js`（40 张图、每次抽 30、抽 20 次 → 断言单次清单内不重复且 40 张全都出现过）；全量 274/274。
-
-### 修复（链接解析：视频拆条）
-
-- **视频类链接在 SnowLuma 等严格协议端下发不出**：协议端要求「video 必须是消息里唯一的 segment」（`message element "video" must be the only segment in a message`；同一条里放两个视频同样被拒：`video may appear only once`）。`link-parser` 原来把「说明文字 + `[CQ:video]`」拼成一条 —— NapCat 时代兄弟元素被 QQ 静默吞掉、看起来正常，换成 SnowLuma 后整条发送失败（ERROR 日志，媒体一条都发不出）。
-  现在有视频时改为：**每个视频各自一条、图片并一条、说明文字最后单独一条**；纯图片仍是「说明 + 图片同条」（图片没有该限制）。媒体全部失败时按原逻辑走「本条按普通消息处理」降级，并且**不单独发说明**（避免只留一句标题）。新增 4 条用例（单视频拆条 / 多视频逐条 / 纯图片不拆 / 全失败降级），全量 271/271。
-
-### 变更（配置键与标识符改名：napcat → onebot）⚠️ 破坏性
-
-- **配置键 `napcat.*` → `onebot.*`**：`wsUrl` / `wsToken` / `httpUrl` / `httpToken` / `mediaSendTimeoutMs` / `mediaSendRetries` 全部迁到 `onebot` 段。
-  **旧键继续能读**：`loadConfig()` 会做一次归一（`applyOneBotLegacyKey`）—— 新键优先、旧键只补缺字段，所以老 `config.json` 一个字不改也能直接跑；控制台保存后写成新键。
-- **动作 id**：`napcat-check` → `onebot-check`，`napcat-reconnect` → `onebot-reconnect`（旧 id 不再注册）。
-- **模块与函数改名**：`kernel/napcat-adapter.js` → **`kernel/onebot-adapter.js`**，类 `NapCatAdapter` → `OneBotAdapter`，
-  `toNapCatFileRef` / `fromNapCatFileRef` → `toOneBotFileRef` / `fromOneBotFileRef`，内部 `checkNapcat` → `checkOneBot`；
-  测试用假协议端 `test/fake-napcat.mjs` → `test/fake-onebot.mjs`。
-- **日志前缀与验收串**：`[onebot-qq:napcat]` → `[onebot-qq:onebot]`，`NapCat WS 已连接` → `OneBot WS 已连接` 等。
-  ⚠️ **外部脚本要跟着改**：部署机上若有用脚本读旧键或 grep 旧日志串，需要同步调整（取 `onebot.httpToken`、旧键兜底；校验 `kernel/onebot-adapter.js`）；
-  自建的监控/巡检若 grep 过 `NapCat WS 已连接`，改成 `OneBot WS 已连接`。
-- 文档、示例配置、`locale`、诊断项、CLI 输出同步为 `onebot.*`。仓库内旧实现名仅剩两处：兼容旧键的字面量（`applyOneBotLegacyKey` 内）与一条防回归守卫测试。
-- 测试 269/269（新增「旧键兼容」2 条：只写旧键能读、两键并存时新键优先）。
-
-### 文档
-
-
-- **SnowLuma 升为一等公民**：`docs/安装与卸载.md` 的「准备协议端」拆成 **NapCat / SnowLuma 两小节**（含 Linux 无头部署、ptrace 注入前提、token 必填、关掉自带 `#sl`、`get_file` 能力差异）；`docs/排错.md` 新增「接了 SnowLuma 之后」整节（注入失败 / `good=false` 收不进 / 二维码过期 / `#sl` 抢话等 9 条）；`docs/配置参考.md` 写明 `napcat.*` 键名沿用、SnowLuma 两个 token 必填；`docs/开发指南.md` 新增「协议端差异」对照表（负 `message_id` / 群历史锚点 / `get_status` 健康字段 / `get_file` 覆盖面）；`README.md`、`docs/README.md` 与 `Windows安装.md`、`使用说明书.md`、`运维接口.md` 的措辞改为「协议端」，并说明控制台页签/配置键名沿用 NapCat 是历史原因。
-
-### 测试
-
-- 新增 `test/audit-group-memory-fixes.test.js`（6 条）与 4 条控制台用例；全量 `node --test` 209/209。
+- 截至 2026-10-29 的既有源码验收：**Linux 356/356；Windows 350 通过、6 项平台相关跳过**，语法、隐私与打包检查通过。此处合并既有验收记录，不将文档整理计作新增测试，也不保留中间阶段的旧测试总数。
 
 ## 0.1.1 — 2026-10-21
 
-新增可选子插件（来自社区 PR #1），并修掉 review 发现的问题。
+新增可选子插件（来自社区 PR #1），并修复 review 发现的问题。以下保留发布时的功能说明；现行契约以未发布摘要和当前配置参考为准。
 
 ### 新增
 
-- `anti-repeat`：同一个人同一句话刷屏冷却（超过次数甩一句 + 整线冷却，零 token）。
-- `private-friend-gate`：私聊只回好友（好友列表缓存；拉取失败时 fail-open，不误伤）。
+- `anti-repeat`：同一个人同一句话刷屏冷却（超过次数回一句并进入整线冷却，零 token）。
+- `private-friend-gate`：私聊好友门禁，缓存好友列表；当前支持严格模式，失败处理见未发布摘要及配置参考，不应一概理解为失败放行。
 - 控制台对应开关（「唤醒」页防刷屏、「其他」页私聊门禁）。
 
-### 修复（review）
+### 修复
 
-- `bot.napcat` 契约补充 `friendList / msgById / getFile`；README / 说明书 / 架构文档同步。
+- 协议端能力补充 `friendList / msgById / getFile`，文档同步；当前访问入口为 `bot.onebot`。
 
 ## 0.1.0 — 2026-10-20
 
-首个公开发布版本：把内部迭代收敛成一个**可安装、开箱即用**的 DSH 插件。
+首个公开发布版本：将内部迭代收敛为可安装的 DSH 插件。以下是发布功能概览，不作为当前页签或插件数量的固定契约。
 
 ### 新增
 
-- **DSH 原生插件包**：`dsh.bundle.patch` 随包声明，一行挂载；in-process 运行，无需独立进程 / systemd。
-- **微内核 + 9 个子插件**：`gate-wake` / `commands` / `file-transfer` / `persona-voice` / `group-welcome` / `imagegen` / `link-parser` / `stickers` / `group-memory`，目录自动发现、按 order 排序、坏一个不拖垮整体。
+- **DSH 原生插件包**：随包声明 `dsh.bundle.patch`，in-process 运行，无需为机器人另起独立进程。
+- **微内核与子插件**：门禁唤醒、命令、文件接收、人设句池、入群欢迎、生图、链接解析、表情和群记忆按目录发现、按 order 排序，单个子插件异常隔离。
 - **五阶段入站管线**：`pre-gate` → `passive-tap` → `intercept` → `wake` → `before-turn`。
-- **唯一出站口**：文本走 `deliver()`、媒体走 `sendMedia()`；自动抽 `[AT:]`、六项脱敏、插件装饰、发送 + 留档。
-- **QQ 控制台**：16 个页签，配置热改（原子写 + 备份 + 失败回滚）；**子插件 ↔ 页面 1:1**（生图凭据归 `imagegen`、人设句池归「句池」、门禁与唤醒归「唤醒」），低频配置统一在「其他」页。
-- **开箱人设**：内置「蓝色大肥鱼」人设 + `_模板.md`，首次启动自动投递；唤醒词与人设词合并生效。
-- **QQ 侧能力**：收/发图片、生图与图生图（`openai-images` / `openai-chat` 两种协议）、群头像、表情包自动收集与发表情、入群欢迎、链接解析（可选侧车）、群记忆注入。
-- **跨平台**：Linux / Windows / macOS；Windows 路径、临时目录、CQ 文件引用、原子写、软链不可用时的人设 copy 降级都在 `platform/` 收口。
+- **统一出站口**：文本走 `deliver()`、媒体走 `sendMedia()`，统一处理 `[AT:]`、脱敏、插件装饰、发送与留档。
+- **QQ 控制台**：配置热改，原子写、备份与失败回滚；生图凭据、人设句池、门禁唤醒等按功能分组。
+- **开箱人设**：内置「蓝色大肥鱼」及人设模板，首次启动自动投递，人设唤醒词与配置词合并生效。
+- **QQ 侧能力**：收发图片、接收文件、生图与图生图（`openai-images` / `openai-chat`）、群头像、可选表情采集与发送、入群欢迎、链接解析（可选侧车）、群记忆注入。
+- **跨平台适配**：Linux / Windows / macOS；路径、临时目录、CQ 文件引用、原子写与人设 copy 降级统一由平台层处理；各平台验证情况以验收记录为准。
 - **CLI**：`node bin/dsh-onebot-qq.mjs init | doctor | import-legacy | persona`。
-- **测试与守卫**：`node --test`（含假 NapCat 端到端）、打包清单守卫、私有信息扫描。
+- **测试与守卫**：`node --test`（含假 OneBot 协议端端到端测试）、打包清单守卫和私有信息扫描。
 
 ### 说明
 
-- 数据目录默认 `$DSH_HOME/dsh-onebot-qq`；从旧名 `dsh-qq-bot` 升级时**自动沿用旧目录**，无需迁移。
-- 配置里不携带任何真实 QQ 号 / 群号 / 密钥 / 服务器路径；所有示例均为占位值。
+- 数据目录默认 `$DSH_HOME/dsh-onebot-qq`；从旧名 `dsh-qq-bot` 升级时自动沿用旧目录，无需迁移。
+- 随包示例不携带真实 QQ 号、群号、密钥或服务器路径。

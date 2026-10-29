@@ -1,5 +1,5 @@
 # 快捷句池 · 蓝色大肥鱼
-# 不叫模型时直接发（戳一戳回话 / 答应一声 / 生图提示），改完立刻生效。
+# 戳一戳、答应声和生图开始/失败提示由插件发送；imageBusy 仅作为建议措辞返回模型，由模型自行回复。
 # 节名：poke / callAck / imageAck / imageBusy / imageFail
 
 ## poke
