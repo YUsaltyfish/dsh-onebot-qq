@@ -408,6 +408,7 @@ export async function apply(ctx, bundleConfig = {}) {
     turnBySession: new Map(), // sessionId → TurnContext（同上；工具执行时按 DSH 会话认线）
     pendingTurns: new Map(), // sessionId → TurnContext[]（prompt 已 admission、等 turn/start 的队列）
     maintSessionIds: new Set(), // 后台任务会话（群记忆积累等）：工具入口只放行 MAINT_ALLOWED_TOOLS（memory_append）
+    deskSessionIds: new Set(), // 空间工作区会话（qzone）：工具入口只放行 DESK_ALLOWED_TOOLS（post/skip/status）
     dataDir,
     configPath,
     archive,
@@ -664,6 +665,12 @@ export async function apply(ctx, bundleConfig = {}) {
     compat: runtime.compat,
     keywordTable: kernel.shared.keywordsTable || {},
     tmp,
+    /** 空间工作区会话登记（qzone 插件用）：登记后工具入口只放行空间三件套 */
+    desk: {
+      mark: (sessionId) => { const s = String(sessionId || ''); if (s) kernel.deskSessionIds.add(s) },
+      unmark: (sessionId) => { kernel.deskSessionIds.delete(String(sessionId || '')) },
+      has: (sessionId) => kernel.deskSessionIds.has(String(sessionId || '')),
+    },
   })
   const pluginDisposers = [] // 插件注册的卸载回调（定时器/监听器等），fiber 卸载时逆序执行
   const botProto = {
@@ -698,6 +705,7 @@ export async function apply(ctx, bundleConfig = {}) {
         // QQ 空间说说：不是聊天消息，不经过 deliver（脱敏/留档只针对聊天出站），
         // 但它仍属于受控动作 —— 由内核封装、失败降级，插件拿不到裸 send。
         sendQzoneMsg: (...a) => onebot.sendQzoneMsg(...a),
+        callApi: (...a) => onebot.callApi(...a),
         health: () => onebot.health(),
       }
     },
@@ -895,6 +903,8 @@ export async function apply(ctx, bundleConfig = {}) {
   // 后台任务（群记忆积累）允许调用的工具白名单：只有「提交结果」型的 memory_append。
   // 这样后台会话能结构化提交数据，但调不到 send_message / 生图 / bash 等（防误发、防乱动系统）。
   const MAINT_ALLOWED_TOOLS = new Set(['memory_append'])
+  // 空间工作区会话：只放行「空间三件套」，碰不到聊天/发图/命令（qzone 插件登记 deskSessionIds）
+  const DESK_ALLOWED_TOOLS = new Set(['post_qzone', 'skip_qzone', 'qzone_status'])
   const prefix = String(runtime.toolPrefix || 'mcp__qq__')
   ctx.inject(['tools'], (child) => {
     const tools = child.tools
@@ -913,7 +923,13 @@ export async function apply(ctx, bundleConfig = {}) {
             // 工具守卫（两道）：
             // ① 后台任务会话（群记忆积累等）只允许 memory_append（提交群记忆要点），其它工具一律拒；
             // ② memory_append 反过来只允许后台任务会话调，普通 QQ 会话调不到（不让它顺手改记忆）。
-            const isMaint = kernel.maintSessionIds.has(String(exec?.agent?.session?.id || ''))
+            const sid = String(exec?.agent?.session?.id || '')
+            const isMaint = kernel.maintSessionIds.has(sid)
+            // 空间工作区：只放行三个空间工具，连 send_message 都调不到
+            const isDesk = kernel.deskSessionIds.has(sid)
+            if (isDesk && !DESK_ALLOWED_TOOLS.has(toolName)) {
+              throw new Error('空间工作区只允许调用 post_qzone / skip_qzone / qzone_status（这里不发聊天消息）')
+            }
             if (isMaint && !MAINT_ALLOWED_TOOLS.has(toolName)) {
               throw new Error(`后台任务只允许调用 ${[...MAINT_ALLOWED_TOOLS].join('/')}（提交群记忆要点），不要调用其它工具`)
             }

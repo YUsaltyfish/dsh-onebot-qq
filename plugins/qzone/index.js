@@ -1,92 +1,130 @@
 /**
  * qzone — QQ 空间日记（order 62）
  *
- * 给机器人一个自己的 QQ 空间当日记本：每天最多一条，由它自己决定写不写。
+ * 一句话：**一个机器人、一块空间、一天一条**；素材是「一整天所有会话的经历」，不是一个群的一小段。
  *
- * 三条设计红线（改之前先读）：
- *   ① **"不写"绝不能进空间**。`skip_qzone` 和 `post_qzone` 是两个工具，
- *      skip 只记本地状态、一个字都不会发；post 里还有一道正文防呆（见下）。
- *      合并成一个工具 + 传空值的话，模型很容易把"今天不写"当正文发出去 —— 那是公开的。
- *   ② **配图不碰固定图库**。只接受本地文件路径，并拒绝 `qq-stickers/` 下的文件
- *      （那是主人的固定表情库，混进群图会污染）。生成图存自己的目录。
- *   ③ **配额状态进 ChatState**。不用文件、不开全局 Map：`/reset` 能干净清理，
- *      群间也不会串线（状态挂在 `_scratch`，按 chatKey 隔离）。
+ * 为什么整个重写（2026-10-28）：旧实现把提醒挂在 `before-turn` 的 `ev.wake` 上，而且配额是
+ * 「每个群一份」。实战里暴露三件事：
+ *   ① 22 点后没人 @ 它 → `ev.wake` 为空 → 提醒钩子直接 return，**一晚上根本没人提醒它**；
+ *      它那会儿的发言全是 pacing 的「主动接话」，那条路径跑不到提醒；
+ *   ② 配额按群算，两个群各能发一条，可空间只有一个；
+ *   ③ 它只读得到本群记忆 —— 「读不到一整天」不是 bug，是旧设计。
  *
- * 提醒时机：到点后第一条被唤醒的消息挂一条 `ev.hint`（不改静态系统提示，保 KV cache）。
- * 提醒不是强制 —— 模型可以写，也可以 skip，也可以完全不理会。
+ * 现在的结构：
+ *   · **状态全局**（`qzone-state.json` 的 `days['YYYY-MM-DD']`），一天一条，跨重启保留；
+ *   · **定时兜底**：到点（默认 22:30）还没写，就在「空间工作区」会话里推一次当日回顾；
+ *   · **素材跨群**：material.js 把当天所有留档 + 各群记忆摘要合成一篇 Markdown，落地可查；
+ *   · **一个常驻会话**「空间工作区」：只放行 post/skip/status 三个工具，看得见、聊得着、有历史；
+ *   · **能看自己的空间**：feed.js 用机器人自己的 cookie 读最近 N 天说说，避免天天一个调子。
+ *
+ * 三条红线（改之前先读）：
+ *  ① **「不写」绝不能进空间**：skip 与 post 是两个工具，skip 一个字都不发；post 里还有正文防呆。
+ *  ② **写盘只有一处**：withState()；读取侧永远不写。
+ *  ③ **工作区会话只读空间、不碰聊天**：工具入口只放行三个空间工具（内核按 deskSessionIds 拦）。
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { isInsidePath } from '../../platform/paths.js'
+import { buildDailyMaterial, localDateOf } from './material.js'
+import { readOwnFeed } from './feed.js'
 
-/** 本地日期 YYYY-MM-DD（跨平台：不用 toISOString，那是 UTC） */
-function localDate() {
-  const d = new Date()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${mm}-${dd}`
+const STATE_FILE = 'qzone-state.json'
+const DESK_CHAT_KEY = 'desk:qzone'
+const DESK_TITLE = '空间工作区'
+const FEED_TTL_MS = 6 * 3600 * 1000
+
+/** 控制台计数用的运行时快照（schema 渲染早于 setup，拿不到 bot） */
+const RUNTIME = { dataDir: '', limit: 1, workspaceDir: '', nudge: '', ready: false }
+
+const statePath = (dataDir) => path.join(String(dataDir || '.'), STATE_FILE)
+
+function emptyState() {
+  return { version: 2, days: {}, desk: {}, feed: null }
 }
 
-/**
- * 额度落盘（跨重启保留）。
- *
- * 为什么不用 `bot.state._scratch`：那是内存态，进程重启就清空 —— 早上发过、下午重启，
- * 额度又变回 0/M，能发第二条。日记本要「每天一条」就必须跨重启记住。
- * 路径取 `bot.core.dataDir`（内核权威值，插件不自己拼 DSH_HOME）。
- */
-function statePath(dataDir) {
-  return path.join(String(dataDir || '.'), 'qzone-state.json')
-}
-
-const readState = (dataDir) => {
+function readState(dataDir) {
   try {
-    return JSON.parse(fs.readFileSync(statePath(dataDir), 'utf8')) || {}
+    const raw = JSON.parse(fs.readFileSync(statePath(dataDir), 'utf8'))
+    if (!raw || typeof raw !== 'object') return emptyState()
+    const st = emptyState()
+    if (raw.days && typeof raw.days === 'object') st.days = raw.days
+    if (raw.desk && typeof raw.desk === 'object') st.desk = raw.desk
+    if (raw.feed && typeof raw.feed === 'object') st.feed = raw.feed
+    return st
   } catch {
-    return {}
+    return emptyState()
   }
 }
 
-const writeState = (dataDir, value) => {
+/** 原子写：先写 .tmp 再 rename，避免进程被杀时留下半个 JSON */
+function writeState(dataDir, value) {
+  const file = statePath(dataDir)
   try {
-    fs.mkdirSync(path.dirname(statePath(dataDir)), { recursive: true })
-    fs.writeFileSync(statePath(dataDir), JSON.stringify(value, null, 2))
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const tmp = file + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2))
+    fs.renameSync(tmp, file)
     return true
   } catch {
     return false
   }
 }
 
-/** 今日汇总（控制台计数用）：所有会话今天发了几条、跳过几次 */
-function todaySummary(dataDir) {
-  const all = readState(dataDir)
-  const d = localDate()
-  let posted = 0
-  let skipped = 0
-  let chats = 0
-  for (const v of Object.values(all)) {
-    if (!v || v.date !== d) continue
-    chats += 1
-    posted += Number(v.posted) || 0
-    if (v.skipped) skipped += 1
+function dayOf(all, date) {
+  const d = String(date || localDateOf(Date.now()))
+  const cur = all.days[d]
+  if (cur && typeof cur === 'object') {
+    cur.date = d
+    if (!Number.isFinite(Number(cur.posted))) cur.posted = 0
+    if (!Number.isFinite(Number(cur.attempts))) cur.attempts = 0
+    if (typeof cur.skipped !== 'boolean') cur.skipped = false
+    if (typeof cur.text !== 'string') cur.text = ''
+    return cur
   }
-  return { date: d, posted, skipped, chats }
+  const fresh = {
+    date: d, posted: 0, chars: 0, images: 0, at: 0, text: '', source: '',
+    skipped: false, skipReason: '', decidedAt: 0, nudgedAt: 0, attempts: 0, retryAt: 0,
+    sessionId: '', material: null,
+  }
+  all.days[d] = fresh
+  return fresh
 }
 
-/**
- * 控制台顶部的计数行。
- *
- * 为什么读模块级 `RUNTIME`：内核渲染 schema 时只是把 `configSchema.info.text` 取出来
- * （`String(entry.text || '')`），我们的 setup 还没跑过 —— 拿不到 `bot`。
- * 所以在 setup 里把 dataDir/limit 记到 RUNTIME，getter 现算。
- */
-const RUNTIME = { dataDir: '', limit: 1, ready: false }
+/** 只留最近 keepDays 天（按日期键排序，最旧的先丢） */
+function prune(all, keepDays) {
+  const keep = Math.max(7, Number(keepDays) || 90)
+  const dates = Object.keys(all.days).sort()
+  if (dates.length <= keep) return
+  for (const d of dates.slice(0, dates.length - keep)) delete all.days[d]
+}
 
+const decided = (day) => Number(day.posted) > 0 || day.skipped === true
+
+/** 控制台顶部计数行（每次读 schema 现算，刷新即最新） */
 function consoleSummary() {
   if (!RUNTIME.ready) return '📔 今日已发 —/—（等插件首次装配）'
-  const s = todaySummary(RUNTIME.dataDir)
-  const tail = s.skipped > 0 ? '（今天已写过 skip）' : ''
-  const where = s.chats > 1 ? `，涉及 ${s.chats} 个会话` : ''
-  return `📔 今日已发 ${s.posted}/${RUNTIME.limit}${tail}${where}`
+  const all = readState(RUNTIME.dataDir)
+  const day = all.days[localDateOf(Date.now())]
+  if (!day || !decided(day)) {
+    return '📔 今日还没写' + (RUNTIME.nudge ? '（' + RUNTIME.nudge + ' 会提醒它一次）' : '')
+  }
+  if (Number(day.posted) > 0) return '📔 今日已发 ' + day.posted + '/' + RUNTIME.limit + '（' + day.chars + ' 字）'
+  return '📔 今日决定不写：' + (day.skipReason || '(未说原因)')
+}
+
+/** 最近几天的时间线（控制台 info 块） */
+function recentLines(n) {
+  if (!RUNTIME.ready) return ''
+  const all = readState(RUNTIME.dataDir)
+  const dates = Object.keys(all.days).sort().slice(-(Number(n) || 7)).reverse()
+  if (!dates.length) return '（还没有任何记录）'
+  const out = []
+  for (const d of dates) {
+    const x = all.days[d]
+    if (Number(x.posted) > 0) out.push('· ' + d + ' 写了：' + (String(x.text || '').slice(0, 40) || '(无摘要)'))
+    else if (x.skipped) out.push('· ' + d + ' 没写：' + (x.skipReason || '(未说原因)'))
+    else out.push('· ' + d + ' 没决定（' + (x.nudgedAt ? '提醒过' : '未提醒') + '）')
+  }
+  return out.join('\n')
 }
 
 export default {
@@ -97,30 +135,35 @@ export default {
   configSchema: {
     info: {
       type: 'info', group: '空间日记',
-      // text 用 getter：每次读 schema 时现算，控制台刷新就能看到最新额度
       get text() {
         return consoleSummary() + '\n\n'
-          + '给机器人一个自己的 QQ 空间当日记本。\n'
-          + '· 每天最多 1 条，由它自己决定写不写；不写不算欠账，第二天不补也不解释。\n'
-          + '· 到点后会提醒它考虑一次（提醒 ≠ 强制，它可以不理会）。\n'
-          + '· 配图只接受本地文件路径，不会往固定表情包图库里写东西。\n'
-          + '· 需要协议端支持 `send_qzone_msg` 扩展；不支持的实现会自动降级为「发不出去」并如实告知。'
+          + '最近几天（新→旧）\n' + recentLines(7) + '\n\n'
+          + '给它一块自己的 QQ 空间当日记本：一天一条，写不写由它自己定。\n'
+          + '· 素材是**当天所有会话**的经历（含私聊），不是某一个群。\n'
+          + '· 到点还没写，就在「空间工作区」会话里推一次当日回顾（提醒 ≠ 强制）。\n'
+          + '· 那个会话只放行 post_qzone / skip_qzone / qzone_status，碰不到聊天。\n'
+          + '· 配图只接受本地绝对路径（表情包库、群友发来的图、生成图都可引用，只读不改）。'
       },
     },
     enabled: {
       type: 'bool', default: true, group: '空间日记',
       label: '启用空间日记',
-      hint: '关掉后它不会收到写日记的提醒，也不能调发说说工具。',
+      hint: '关掉后不会有定时回顾，也不能调发说说工具。',
+    },
+    nudgeHour: {
+      type: 'int', default: 22, min: 0, max: 23, step: 1, group: '空间日记',
+      label: '每天几点兜底提醒',
+      hint: '24 小时制。到点还没写也没跳过，就推一次当日回顾。填 0 = 不兜底（全靠它自己想起来）。',
+    },
+    nudgeMinute: {
+      type: 'int', default: 30, min: 0, max: 59, step: 1, group: '空间日记',
+      label: '兜底提醒的分钟',
+      hint: '配合上一项，默认 22:30。',
     },
     dailyLimit: {
       type: 'int', default: 1, min: 1, max: 5, step: 1, group: '空间日记',
-      label: '每个会话每天最多发几条',
-      hint: '默认 1。调大会让「今天只有一次机会」的选择压力变小，容易写成流水账 —— 建议保持 1。',
-    },
-    remindAfterHour: {
-      type: 'int', default: 22, min: 0, max: 23, step: 1, group: '空间日记',
-      label: '每天几点后提醒它考虑',
-      hint: '24 小时制。到点后若本会话今天还没写过也没跳过，会在下一条被唤醒的消息里提醒一次；填 0 = 不提醒。',
+      label: '每天最多发几条（全账号）',
+      hint: '按整个空间算，不分群。建议保持 1 —— 只有一次机会才写得认真。',
     },
     maxChars: {
       type: 'int', default: 300, min: 20, max: 2000, step: 10, group: '空间日记',
@@ -135,83 +178,123 @@ export default {
     imageDir: {
       type: 'str', default: 'qzone-imgs', group: '空间日记',
       label: '配图目录',
-      hint: '相对数据目录。**与表情包库 qq-stickers 隔离**，生成/转存的空间配图放这里。',
+      hint: '相对数据目录。生成/转存的空间配图放这里。',
+    },
+    allowStickers: {
+      type: 'bool', default: true, group: '空间日记',
+      label: '允许引用表情包库里的图',
+      hint: '只读引用（不发、不写、不改图库）。关掉后只能引用配图目录与其它本地路径。',
+    },
+    materialMaxChars: {
+      type: 'int', default: 60000, min: 5000, max: 200000, step: 5000, group: '空间日记',
+      label: '素材总字数上限',
+      hint: '一天所有会话的正文上限，超了从最早的消息开始丢。越大越全，token 也越多。',
+    },
+    materialMsgsPerChat: {
+      type: 'int', default: 400, min: 20, max: 3000, step: 20, group: '空间日记',
+      label: '每个会话最多取多少条',
+      hint: '从最近的消息往前取；和下面「素材往回看多少天」配合使用（热闹的群靠条数截、冷清的群靠天数兜）。',
+    },
+    materialDays: {
+      type: 'int', default: 2, min: 1, max: 7, step: 1, group: '空间日记',
+      label: '素材往回看多少天',
+      hint: '1 = 只看今天（推荐）；2 = 今天 + 昨天。再往前的事对「今天写什么」没意义，别调太大。',
+    },
+    deskDryRun: {
+      type: 'bool', default: false, group: '空间日记',
+      label: '演练模式（只回顾、不发出去）',
+      hint: '开着时：照常装配素材、照常让它回顾，但 post_qzone 会被拒，空间不会有任何变化。用来看它到底怎么想。',
+    },
+    feedDays: {
+      type: 'int', default: 30, min: 0, max: 180, step: 1, group: '空间日记',
+      label: '读自己空间最近多少天',
+      hint: '写之前先看看前些天写了什么，避免天天一个调子。填 0 = 不读（只靠本地记录）。',
+    },
+    recentDays: {
+      type: 'int', default: 7, min: 1, max: 60, step: 1, group: '空间日记',
+      label: '回顾时带上最近几天写过的说说',
+      hint: '从本地决策记录里取最近 N 天「写过什么/为什么没写」一起放进提示词。',
+    },
+    keepDays: {
+      type: 'int', default: 90, min: 7, max: 365, step: 1, group: '空间日记',
+      label: '本地保留多少天决策记录',
+      hint: '状态文件里每天一条记录（写了什么摘要、为什么没写），过期自动清。',
     },
   },
 
   setup(bot) {
     const cfg = () => bot.cfg || {}
     const dataDir = String(bot.core?.dataDir || '')
-
-    // 让控制台的 getter 能拿到真实路径与上限（schema 渲染早于 setup）
-    RUNTIME.dataDir = dataDir
-    RUNTIME.limit = Math.max(1, Number(cfg().dailyLimit) || 1)
-    RUNTIME.ready = true
-
-    /**
-     * 本会话今天的日记槽（跨重启保留）。
-     * 返回 `{ q, save }`：改完 `q` 要调 `save()` 才落盘。
-     */
-    const todaySlot = (chatKey) => {
-      const all = readState(dataDir)
-      const key = String(chatKey || '')
-      const q = all[key] || { date: '', posted: 0, skipped: false, reminded: false }
-      const d = localDate()
-      if (q.date !== d) {
-        q.date = d
-        q.posted = 0
-        q.skipped = false
-        q.reminded = false
-      }
-      all[key] = q
-      // 只留最近 60 天，避免文件无限长
-      const dates = new Set([])
-      for (const v of Object.values(all)) if (v?.date) dates.add(v.date)
-      if (dates.size > 60) {
-        const keep = new Set([...dates].sort().slice(-60))
-        for (const [k, v] of Object.entries(all)) if (!keep.has(v?.date)) delete all[k]
-      }
-      return { q, save: () => writeState(dataDir, all) }
-    }
-
+    // 素材落在「QQ 工作区」里：GUI 侧栏能直接打开看（相对路径按数据目录解析，和内核一致）
+    const workspaceRaw = String(bot.core?.dsh?.qqWorkspacePath || 'workspace')
+    const workspaceDir = path.isAbsolute(workspaceRaw) ? workspaceRaw : path.join(dataDir, workspaceRaw)
     const limit = () => Math.max(1, Number(cfg().dailyLimit) || 1)
 
-    /** 配图目录（相对 dataDir 已由内核解析，这里再做一次兜底） */
-    const imageDir = () => {
-      const raw = String(cfg().imageDir || 'qzone-imgs').trim() || 'qzone-imgs'
-      const base = String(bot.core?.dataDir || '')
-      return path.isAbsolute(raw) ? raw : path.join(base, raw)
+    function nudgeLabel() {
+      const h = Math.max(0, Number(cfg().nudgeHour) || 0)
+      if (!h) return ''
+      const m = Math.max(0, Math.min(59, Number(cfg().nudgeMinute) || 0))
+      return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0')
     }
 
-    /** 图片校验：存在 + 不得来自固定表情库 */
+    /**
+     * 协议端只读句柄：新内核叫 bot.onebot，2026-10 之前的安装副本叫 bot.napcat。
+     * 两个名字都认，插件才能在老副本上先跑起来（否则发说说会静默变成 undefined）。
+     */
+    const nb = () => bot.onebot || bot.napcat || {}
+
+    RUNTIME.dataDir = dataDir
+    RUNTIME.workspaceDir = workspaceDir
+    RUNTIME.limit = Math.max(1, Number(cfg().dailyLimit) || 1)
+    RUNTIME.nudge = nudgeLabel()
+    RUNTIME.ready = true
+
+    /** 读状态 → 改 → 写回。所有落盘都走这里（唯一写入口） */
+    function withState(mutator) {
+      const all = readState(dataDir)
+      const out = mutator(all)
+      prune(all, cfg().keepDays)
+      const ok = writeState(dataDir, all)
+      if (!ok) bot.log?.warn?.('[空间] 状态落盘失败：重启后可能重复计数')
+      return out
+    }
+
+    const today = () => dayOf(readState(dataDir), localDateOf(Date.now()))
+
+    /** 配图目录（相对 dataDir 由内核解析；这里再兜底一次） */
+    const imageDir = () => {
+      const raw = String(cfg().imageDir || 'qzone-imgs').trim() || 'qzone-imgs'
+      return path.isAbsolute(raw) ? raw : path.join(dataDir, raw)
+    }
+
+    /** 配图校验：必须存在；只读引用，不改图库（表情包库里的图也能发） */
     const checkImage = (p) => {
       const abs = path.resolve(String(p || '').trim())
       if (!abs) return { ok: false, msg: '图片路径为空' }
       let real = abs
-      try { real = fs.realpathSync(abs) } catch { return { ok: false, msg: `图片不存在：${abs}` } }
-      const stickers = path.join(String(bot.core?.dataDir || ''), 'qq-stickers')
-      let stickerReal = stickers
-      try { stickerReal = fs.realpathSync(stickers) } catch { /* 库不存在就不用比 */ }
-      // 包含判定只走 platform（红线 B.2：禁止 startsWith 拼路径）
-      if (isInsidePath(stickerReal, real)) {
-        return { ok: false, msg: '不能直接引用表情包库里的文件（会污染固定图库）；请先复制到配图目录再用' }
+      try { real = fs.realpathSync(abs) } catch { return { ok: false, msg: '图片不存在：' + abs } }
+      if (cfg().allowStickers === false) {
+        const stickerReal = (() => { try { return fs.realpathSync(path.join(dataDir, 'qq-stickers')) } catch { return '' } })()
+        if (stickerReal && (real === stickerReal || real.startsWith(stickerReal + path.sep))) {
+          return { ok: false, msg: '配置里关掉了「引用表情包库」，请换一张图' }
+        }
       }
       return { ok: true, path: real }
     }
 
-    // ── 工具 ①：写日记 ────────────────────────────────────────
+    // ── 工具 ①：写说说 ──────────────────────────────────────
     bot.registerTool('post_qzone', {
-      description: '把一条日记发到自己的 QQ 空间（每个会话一天只有一次机会，发了就用完）。'
-        + '**不想写时不要调这个工具，改调 skip_qzone()** —— 千万别把「今天不写」当正文发出去，那是公开可见的。'
-        + 'images 只能给本地文件绝对路径，不支持从表情包库里挑。',
+      description: '把一条说说发到自己的 QQ 空间。**全账号每天只有一次机会**（不是每个群一次），发了就用完。'
+        + '不想写时千万不要调这个工具，改调 skip_qzone() —— 千万别把「今天不写」当正文发出去，那是公开可见的。'
+        + 'images 只能给本地文件绝对路径（表情包、群友发的图、生成图都行），最多 9 张。',
       parameters: {
         target: {
           type: 'string', required: true,
-          description: '当前会话：group:<群号> 或 private:<QQ号>（见开头 [QQ会话 …]）',
+          description: '当前上下文：在空间工作区里填 desk；在群里填 group:<群号>；私聊填 private:<QQ号>',
         },
         content: {
           type: 'string', required: true,
-          description: '说说正文（日记内容本身；不要写「今天不写」这类话）',
+          description: '说说正文（就是这一条的内容本身；不要写「今天不写」这类话）',
         },
         images: {
           description: '配图：本地文件绝对路径，可传字符串或数组。可选。',
@@ -219,27 +302,22 @@ export default {
         },
       },
       async execute(args = {}) {
-        const chatKey = String(args.target || '')
-        if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
         if (cfg().enabled === false) return { ok: false, reason: '空间日记未启用' }
-
-        const { q, save } = todaySlot(chatKey)
-        if (q.posted >= limit()) {
-          return { ok: false, reason: `今天已经写过 ${q.posted} 条了（上限 ${limit()}），明天再来` }
+        if (cfg().deskDryRun === true) {
+          return { ok: false, reason: '现在是演练模式（控制台「空间日记」里关掉它才能真的发出去）' }
         }
-
+        const day = today()
+        if (day.posted >= limit()) {
+          return { ok: false, reason: '今天已经写过 ' + day.posted + ' 条了（全账号上限 ' + limit() + '），明天再来' }
+        }
         const text = String(args.content ?? '').trim()
         if (!text) return { ok: false, reason: 'content 不能为空' }
-
-        // 防呆：正文看起来是在说「不写」→ 拒绝，别让这句话真的出现在空间里
         if (/^[【\[]?不写[】\]]?[。.]?$/.test(text) || /^今天不写/.test(text)) {
           return { ok: false, reason: '这看起来是「不写」的意思 —— 请改用 skip_qzone()，不要发到空间' }
         }
-
         const maxChars = Math.max(1, Number(cfg().maxChars) || 300)
         const body = text.length > maxChars ? text.slice(0, maxChars) : text
 
-        // 配图
         const rawImg = args.images
         const list = Array.isArray(rawImg) ? rawImg : (rawImg ? [rawImg] : [])
         const maxImg = Math.max(0, Number(cfg().maxImages) || 1)
@@ -251,90 +329,372 @@ export default {
           paths.push(r.path)
         }
 
-        // 走适配器（不裸发：协议端细节与超时都封在 kernel 里）
-        const res = await bot.onebot.sendQzoneMsg({ content: body, images: paths })
+        const adapter = nb()
+        if (typeof adapter.sendQzoneMsg !== 'function') {
+          return { ok: false, reason: '这个安装副本的协议端封装里没有 sendQzoneMsg（内核太旧）' }
+        }
+        const res = await adapter.sendQzoneMsg({ content: body, images: paths })
         if (!res?.ok) return { ok: false, reason: res?.msg || '发说说失败' }
 
-        q.posted += 1
-        if (!save()) {
-          // 落盘失败不影响这次发布（说说已经发出去了），但要能看见
-          bot.log.warn('[空间] 额度落盘失败：重启后可能重复计数')
-        }
-        bot.log.info(`[空间] 发出日记 ${body.length} 字${paths.length ? ` + ${paths.length} 张图` : ''}`
-          + `（今天第 ${q.posted}/${limit()} 条）`)
+        withState((all) => {
+          const d = dayOf(all, localDateOf(Date.now()))
+          d.posted += 1
+          d.chars = body.length
+          d.images = paths.length
+          d.at = Date.now()
+          d.text = body.slice(0, 120)
+          d.source = String(args.target || '')
+          d.decidedAt = Date.now()
+        })
+        bot.log?.info?.('[空间] 发出说说 ' + body.length + ' 字' + (paths.length ? ' + ' + paths.length + ' 张图' : '')
+          + '（今天第 ' + (day.posted + 1) + '/' + limit() + ' 条，来源 ' + String(args.target || '未知') + '）')
         return { ok: true, posted: true, chars: body.length, images: paths.length }
       },
     })
 
     // ── 工具 ②：今天不写（绝不发任何东西）──────────────────────
     bot.registerTool('skip_qzone', {
-      description: '今天不写日记。**这个工具不会往空间发任何内容**，只是记下「我考虑过了，今天没有想写的」。'
-        + '觉得今天没什么值得记的、或者不想写，就用它 —— 这完全是正常选项，不欠账、明天照常。',
+      description: '今天不写说说。**这个工具不会往空间发任何内容**，只记下「我考虑过了，今天没有想写的」。'
+        + '在群/私聊里调用只表示这段对话不用写，不影响晚上的回顾；只有在空间工作区里调才算「今天不写」。',
       parameters: {
-        target: {
-          type: 'string', required: true,
-          description: '当前会话：group:<群号> 或 private:<QQ号>',
-        },
+        target: { type: 'string', required: true, description: 'desk（空间工作区）或 group:<群号> / private:<QQ号>' },
         reason: { type: 'string', description: '为什么不想写（只记日志，不会发到空间）' },
       },
       async execute(args = {}) {
-        const chatKey = String(args.target || '')
-        if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
+        const target = String(args.target || '')
+        if (!target) return { ok: false, reason: '缺 target（desk 或当前会话）' }
         const why = String(args.reason ?? '').trim() || '(没说原因)'
-        const { q, save } = todaySlot(chatKey)
-        q.skipped = true
-        save()
-        bot.log.info(`[空间] 今天不写：${why}`)
-        return { ok: true, skipped: true }
+        const inDesk = target === 'desk' || target === DESK_CHAT_KEY
+        if (!inDesk) {
+          bot.log?.info?.('[空间] ' + target + ' 这次不写：' + why)
+          return { ok: true, skipped: true, global: false, note: '只影响这段对话；晚上的空间工作区照常回顾' }
+        }
+        withState((all) => {
+          const d = dayOf(all, localDateOf(Date.now()))
+          d.skipped = true
+          d.skipReason = why
+          d.decidedAt = Date.now()
+        })
+        bot.log?.info?.('[空间] 今天决定不写：' + why)
+        return { ok: true, skipped: true, global: true }
       },
     })
 
     // ── 工具 ③：查状态 ────────────────────────────────────────
     bot.registerTool('qzone_status', {
-      description: '查本会话今天的日记状态（写过没有、还剩几次机会）。一般不用调，提醒里已经写了。',
+      description: '查今天这块空间的状况（写过没有、还剩几次机会、素材覆盖了多少会话）。一般不用调，回顾里已经写了。',
       parameters: {
-        target: {
-          type: 'string', required: true,
-          description: '当前会话：group:<群号> 或 private:<QQ号>',
-        },
+        target: { type: 'string', description: '可留空' },
       },
-      async execute(args = {}) {
-        const chatKey = String(args.target || '')
-        if (!chatKey) return { ok: false, reason: '缺 target（当前会话）' }
-        const { q } = todaySlot(chatKey)
-        const sum = todaySummary(dataDir)
+      async execute() {
+        const all = readState(dataDir)
+        const d = dayOf(all, localDateOf(Date.now()))
         return {
           ok: true,
           enabled: cfg().enabled !== false,
-          date: q.date,
-          used: q.posted,
+          date: d.date,
+          used: d.posted,
           limit: limit(),
-          remaining: Math.max(0, limit() - q.posted),
-          skippedToday: q.skipped,
-          // 所有会话的今日汇总，方便模型/排障判断"今天到底写没写"
-          todayAll: { posted: sum.posted, chats: sum.chats, skipped: sum.skipped },
+          remaining: Math.max(0, limit() - d.posted),
+          skippedToday: d.skipped === true,
+          skipReason: d.skipReason || '',
+          decided: decided(d),
+          nudgedAt: d.nudgedAt || 0,
+          material: d.material || null,
+          feedDays: Number(cfg().feedDays) || 0,
         }
       },
     })
 
-    // ── 到点提醒（挂 hint，不改系统提示）──────────────────────
-    bot.on('before-turn', (ev) => {
+    // ── 空间工作区会话 ───────────────────────────────────────
+    let deskRunning = false
+
+    async function ensureDeskSession() {
+      const dsh = bot.dsh
+      if (typeof dsh?.ensureSession !== 'function') throw new Error('会话控制器不可用，无法开空间工作区')
+      const sessionId = await dsh.ensureSession(DESK_CHAT_KEY, DESK_TITLE)
+      try { bot.core?.desk?.mark?.(sessionId) } catch { /* 老内核没有 desk 槽就退化成普通会话 */ }
+      try { if (typeof dsh.rename === 'function') await dsh.rename(sessionId, DESK_TITLE) } catch { /* 改名失败不影响 */ }
+      return sessionId
+    }
+
+    /** 给会话发一条提示词并等这一轮结束（超时返回 { timeout: true }，不抛） */
+    function promptAndWait(sessionId, text, timeoutMs) {
+      const dsh = bot.dsh
+      return new Promise((resolve, reject) => {
+        let off = null
+        let done = false
+        let timer = null
+        const finish = (v) => {
+          if (done) return
+          done = true
+          if (timer) clearTimeout(timer)
+          try { off?.() } catch { /* ignore */ }
+          resolve(v)
+        }
+        timer = setTimeout(() => finish({ timeout: true }), Math.max(30000, Number(timeoutMs) || 720000))
+        timer.unref?.()
+        try {
+          off = dsh.onTurnEnd(sessionId, () => finish({ timeout: false }))
+        } catch (e) {
+          clearTimeout(timer)
+          return reject(e)
+        }
+        Promise.resolve(dsh.prompt(sessionId, text)).catch((e) => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          try { off?.() } catch { /* ignore */ }
+          reject(e)
+        })
+      })
+    }
+
+    /** 最近 N 天写过的说说（本地记录，秒回） */
+    function recentPosted(all, days) {
+      const out = []
+      const dates = Object.keys(all.days).sort().slice(-Math.max(1, Number(days) || 7))
+      for (const d of dates.slice().reverse()) {
+        const x = all.days[d]
+        if (Number(x.posted) > 0 && x.text) out.push('· ' + d + '：' + x.text)
+        else if (x.skipped) out.push('· ' + d + '：（那天没写）' + (x.skipReason ? ' ' + x.skipReason : ''))
+      }
+      return out.length ? out.join('\n') : '（最近几天都没写过）'
+    }
+
+    /** 读自己空间的说说（6 小时缓存；失败就当没有） */
+    async function feedItems(all) {
+      const days = Math.max(0, Number(cfg().feedDays) || 0)
+      if (!days) return { ok: false, items: [], reason: '配置里关掉了读取' }
+      const cached = all.feed
+      if (cached && Array.isArray(cached.items) && Date.now() - Number(cached.at || 0) < FEED_TTL_MS) {
+        return { ok: Boolean(cached.ok), items: cached.items, reason: cached.reason || '' }
+      }
+      const res = await readOwnFeed({ onebot: nb(), days, log: bot.log })
+      withState((s) => { s.feed = { at: Date.now(), ok: Boolean(res.ok), items: res.items, reason: res.reason || '' } })
+      return res
+    }
+
+    function buildDeskPrompt({ material, feed, all, reason, onlyChatKey = '' }) {
+      const now = new Date()
+      const stamp = localDateOf(now.getTime()) + ' ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0')
+      const parts = []
+      const rangeText = Number(material.stats && material.stats.days) > 1 ? '最近 ' + material.stats.days + ' 天' : '今天'
+      parts.push('【' + rangeText + '的经历】' + (onlyChatKey ? '（只看 ' + onlyChatKey + ' 这一段）' : '') + '（' + stamp + '，' + reason + '）')
+      parts.push(material.text)
+      parts.push('')
+      parts.push('【你最近几天写过的说说】')
+      parts.push(recentPosted(all, Number(cfg().recentDays) || 7))
+      if (feed.ok && feed.items.length) {
+        parts.push('')
+        parts.push('【你空间里最近 ' + (Number(cfg().feedDays) || 0) + ' 天的说说（含更早的）】')
+        for (const it of feed.items.slice(0, 40)) {
+          const t = new Date(it.ts)
+          parts.push('· ' + localDateOf(it.ts) + ' ' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0')
+            + '：' + (it.text || '(无正文)') + (it.pics ? '（' + it.pics + ' 张图）' : ''))
+        }
+      }
+      parts.push('')
+      parts.push('【现在】这块空间今天还没有写（全账号一天只有一条机会）。')
+      if (cfg().deskDryRun === true) {
+        parts.push('【演练模式】这次不发出去：**不要调任何工具**。把你想写的那一条原样写出来，再补一句为什么这么写；如果今天不想写，也直说。')
+      } else {
+        parts.push('想写就调 post_qzone(target="desk", content=..., images=...)：写你**自己**今天真正想记下的一件事，不是群聊流水账。')
+        parts.push('不想写就调 skip_qzone(target="desk", reason=...)：这也是完全正常的选项，不欠账，明天照常。')
+        parts.push('别只回一句话就结束 —— 要么调工具，要么说清为什么今天不写（同样要调 skip）。')
+      }
+      return parts.join('\n')
+    }
+
+    /** 到点兜底：一天最多试 5 次，失败 20 分钟后重试 */
+    async function runDesk(reason, opts = {}) {
+      const onlyChatKey = String(opts.onlyChatKey || '').trim()
+      if (deskRunning) return { skipped: 'running' }
+      deskRunning = true
+      try {
+        const archiveRaw = String(bot.core?.archive?.dir || 'logs/qq_chat')
+        const archiveDir = path.isAbsolute(archiveRaw) ? archiveRaw : path.join(dataDir, archiveRaw)
+        const material = buildDailyMaterial({
+          archiveDir,
+          memoryDir: path.join(dataDir, 'qq-memory'),
+          workspaceDir,
+          date: localDateOf(Date.now()),
+          msgPerChat: Number(cfg().materialMsgsPerChat) || 400,
+          totalChars: Number(cfg().materialMaxChars) || 60000,
+          onlyChatKey,
+          days: Math.max(1, Number(cfg().materialDays) || 1),
+          memoryMaxAgeDays: Math.max(1, Number(cfg().materialDays) || 1),
+        })
+        withState((all) => {
+          const d = dayOf(all, localDateOf(Date.now()))
+          d.nudgedAt = Date.now()
+          d.attempts = (Number(d.attempts) || 0) + 1
+          d.material = material.stats
+        })
+        bot.log?.info?.('[空间] 当日回顾开始：' + material.stats.chats + ' 个会话 / ' + material.stats.messages + ' 条消息'
+          + '（素材 ' + material.stats.chars + ' 字' + (material.file ? '，' + material.file : '') + '）')
+
+        if (!material.stats.messages) {
+          withState((all) => {
+            const d = dayOf(all, localDateOf(Date.now()))
+            d.skipped = true
+            const rangeText = Number(material.stats.days) > 1 ? '最近 ' + material.stats.days + ' 天' : '今天'
+            d.skipReason = onlyChatKey ? ('这一段' + rangeText + '没有人说话（' + onlyChatKey + '）') : (rangeText + '没有任何人说话')
+            d.decidedAt = Date.now()
+          })
+          bot.log?.info?.('[空间] 今天没人说话，不打扰它了')
+          return { skipped: 'empty' }
+        }
+
+        const all = readState(dataDir)
+        const feed = await feedItems(all)
+        const sessionId = await ensureDeskSession()
+        withState((s) => { dayOf(s, localDateOf(Date.now())).sessionId = sessionId })
+        const prompt = buildDeskPrompt({ material, feed, all, reason, onlyChatKey })
+        const r = await promptAndWait(sessionId, prompt, 12 * 60000)
+        // 假警报防护：模型偶发「先说一句、下一步才调工具」，turn/end 到落库之间有几百毫秒到十几秒，
+        // 直接判「没做决定」会在日志里留下误导性 WARN。给 20 秒缓冲再判一次。
+        if (!decided(today())) await new Promise((resolve) => { const t = setTimeout(resolve, 20000); t.unref?.() })
+        if (cfg().deskDryRun === true) {
+          withState((s) => { dayOf(s, localDateOf(Date.now())).retryAt = Date.now() + 12 * 3600 * 1000 })
+          bot.log?.info?.('[空间] 演练结束（没有发出去）；去看「' + DESK_TITLE + '」会话里它怎么写的')
+          return { ok: true, dryRun: true }
+        }
+        const after = today()
+        if (decided(after)) {
+          bot.log?.info?.('[空间] 当日回顾结束：' + (Number(after.posted) > 0
+            ? '写了 ' + after.chars + ' 字'
+            : '决定不写（' + (after.skipReason || '未说原因') + '）'))
+          return { ok: true, decided: true }
+        }
+        withState((s) => { dayOf(s, localDateOf(Date.now())).retryAt = Date.now() + 20 * 60000 })
+        bot.log?.warn?.('[空间] 回顾结束但它没做决定（' + (r.timeout ? '超时' : '只回了话没调工具') + '），20 分钟后再问')
+        return { ok: false, reason: 'undecided' }
+      } catch (e) {
+        withState((s) => { dayOf(s, localDateOf(Date.now())).retryAt = Date.now() + 20 * 60000 })
+        bot.log?.warn?.('[空间] 当日回顾失败：' + (e?.message || e))
+        return { ok: false, reason: String(e?.message || e) }
+      } finally {
+        deskRunning = false
+      }
+    }
+
+    // ── 定时器：到点兜底（不依赖有人说话，这是旧版最大的坑） ────
+    const currentMinutes = () => { const n = new Date(); return n.getHours() * 60 + n.getMinutes() }
+    const nudgeMinutes = () => {
+      const h = Math.max(0, Math.min(23, Number(cfg().nudgeHour) || 0))
+      if (!h) return 0
+      const m = Math.max(0, Math.min(59, Number(cfg().nudgeMinute) || 0))
+      return h * 60 + m
+    }
+
+    async function tick() {
       if (cfg().enabled === false) return
-      if (!ev.wake) return // before-turn 对未唤醒消息也会跑
-      const startHour = Number(cfg().remindAfterHour) || 0
-      if (startHour <= 0) return
-      if (new Date().getHours() < startHour) return
+      const start = nudgeMinutes()
+      if (!start || currentMinutes() < start) return
+      const d = today()
+      if (decided(d)) return
+      if (cfg().deskDryRun === true && Number(d.attempts) > 0) return // 演练只跑一次，别刷屏
+      if (Number(d.attempts) >= 5) return
+      if (Number(d.retryAt) > Date.now()) return
+      if (deskRunning) return
+      await runDesk('到点回顾')
+    }
 
-      const { q, save } = todaySlot(ev.chatKey)
-      if (q.reminded || q.posted > 0 || q.skipped) return
+    const timer = setInterval(() => { tick().catch(() => {}) }, 60 * 1000)
+    timer.unref?.()
+    bot.onDispose?.(() => clearInterval(timer))
+    const boot = setTimeout(() => { tick().catch(() => {}) }, 90 * 1000)
+    boot.unref?.()
+    bot.onDispose?.(() => clearTimeout(boot))
+    // 老内核没有 bot.onDispose（2026-10 之前的副本）：用进程级槽兜底，
+    // 否则控制台每改一次配置热重载插件，就多叠一个 60s 定时器。
+    const slot = Symbol.for('dsh.onebot.qzone.timers')
+    const prev = globalThis[slot]
+    if (prev) { try { clearInterval(prev.timer); clearTimeout(prev.boot) } catch { /* ignore */ } }
+    globalThis[slot] = { timer, boot }
 
-      q.reminded = true
-      save()
-      if (!Array.isArray(ev.hint)) return
-      ev.hint.push('[日记:今天还没写空间。想写就调 post_qzone(target, content, images?)，'
-        + '每个会话一天只有这一条机会；不想写就调 skip_qzone(target, reason) '
-        + '—— 绝对不要把「不写」当正文发出去]')
-      bot.log.info('[空间] 今晚还没写日记，已提醒（不是强制）')
-    })
+    // ── 主人手动触发（/qzone 或 /空间）─────────────────────────
+    const cmdReply = async (ev, text, name) => {
+      ev.stopped = true
+      ev.stopReason = 'qzone:' + name
+      try { await bot.deliver(ev.chatKey, text, { replyTo: ev.messageId }) } catch { /* 回复失败不影响状态 */ }
+    }
+    for (const name of ['qzone', '空间']) {
+      bot.registerCommand(name, {
+        description: '立刻让它回顾今天并决定写不写空间（仅主人）；/空间 群聊 = 只按本群的事写',
+        async handler(ev, args = []) {
+          if (ev.sender?.isMaster !== true) return cmdReply(ev, '🙅 这个命令只有主人能用', 'qzone')
+          const mode = String((args || [])[0] || '').trim()
+          const scoped = mode === '群聊' || mode === '群' || mode === '本群'
+          if (mode && !scoped) {
+            return cmdReply(ev, '📔 用法：/空间（按一整天的经历写）或 /空间 群聊（只按本群的事写）', 'qzone')
+          }
+          if (scoped && !String(ev.chatKey || '').startsWith('group:')) {
+            return cmdReply(ev, '📔 「群聊」要在一个群里发，才知道读哪个群的记忆', 'qzone')
+          }
+          const d = today()
+          if (decided(d)) {
+            return cmdReply(ev, d.posted > 0
+              ? '📔 今天已经写过了（' + d.chars + ' 字）'
+              : '📔 今天已经决定不写了：' + (d.skipReason || '未说原因'), 'qzone')
+          }
+          await cmdReply(ev, scoped
+            ? '📔 好，我按这个群今天的事来写写看。'
+            : '📔 好，我把今天一整天过一遍再决定。', 'qzone')
+          runDesk(scoped ? '主人叫的（本群）' : '主人叫的', scoped ? { onlyChatKey: ev.chatKey } : {}).catch(() => {})
+        },
+      })
+    }
+
+    /** 控制台按钮：重置今天的额度（只动本地状态，不碰空间里已有的说说） */
+    bot.shared.qzoneResetToday = (opts = {}) => {
+      const all = readState(dataDir)
+      const d = dayOf(all, localDateOf(Date.now()))
+      if (opts && opts.preview) {
+        return {
+          ok: true,
+          previewLines: [
+            '日期：' + d.date,
+            '今天已发：' + Number(d.posted || 0) + ' 条' + (d.text ? '（' + d.text.slice(0, 40) + '）' : ''),
+            '今天是否已跳过：' + (d.skipped ? '是（' + (d.skipReason || '未说原因') + '）' : '否'),
+            '重置后：今天的额度归零，它还可以再写一条；空间里已经发出去的说说不会被删。',
+          ],
+          message: '预演完成，确认后才会真的重置',
+        }
+      }
+      withState((s) => {
+        const x = dayOf(s, localDateOf(Date.now()))
+        x.posted = 0
+        x.chars = 0
+        x.images = 0
+        x.at = 0
+        x.text = ''
+        x.source = ''
+        x.skipped = false
+        x.skipReason = ''
+        x.decidedAt = 0
+        x.nudgedAt = 0
+        x.attempts = 0
+        x.retryAt = 0
+      })
+      bot.log?.info?.('[空间] 主人重置了今天的额度')
+      return { ok: true, message: '今日额度已重置（今天还能再写一条）' }
+    }
+
+    // 控制台/排障可手动触发一次回顾
+    bot.shared.qzoneRunNow = (note) => {
+      runDesk(String(note || '控制台手动触发')).catch(() => {})
+      return { ok: true, message: '已经让它开始回顾了，去看「' + DESK_TITLE + '」会话' }
+    }
+
+    bot.shared.qzoneDesk = {
+      runNow: (note) => runDesk(String(note || '手动触发')),
+      status: () => {
+        const all = readState(dataDir)
+        const d = dayOf(all, localDateOf(Date.now()))
+        return { date: d.date, posted: d.posted, decided: decided(d), material: d.material, nudgedAt: d.nudgedAt, attempts: d.attempts }
+      },
+    }
   },
 }

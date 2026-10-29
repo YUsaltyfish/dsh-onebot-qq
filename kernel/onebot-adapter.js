@@ -1,4 +1,4 @@
-﻿/**
+/**
  * kernel/onebot-adapter.js — 唯一碰外部的地方（OneBot v11 正向 WS + HTTP API）。
  *
  * 纪律：
@@ -453,6 +453,24 @@ export class OneBotAdapter {
     } catch (e) {
       this.log.debug(`取群成员资料失败 (${groupId}/${qq}): ${e.message}`)
       return null
+    }
+  }
+
+  /**
+   * 通用只读接口调用：给插件取协议端信息用（如 qzone 读自己说说要先 get_cookies）。
+   * 只暴露 `_post` 这一层，不暴露裸发消息 —— 出站仍只能走 deliver / sendMedia / sendQzoneMsg。
+   * 失败不抛：返回 `{ ok:false, msg }`，调用方自行降级。
+   */
+  async callApi(action, params = {}, timeoutMs = 8000) {
+    const name = String(action || '').trim()
+    if (!name) return { ok: false, msg: 'action 为空' }
+    try {
+      const { data } = await this._post(name, params || {}, timeoutMs)
+      if (data?.status === 'ok') return { ok: true, data: data.data ?? null }
+      const raw = String(data?.wording || data?.message || data?.retcode || '')
+      return { ok: false, msg: raw || '协议端返回失败' }
+    } catch (e) {
+      return { ok: false, msg: String(e?.message || e) }
     }
   }
 

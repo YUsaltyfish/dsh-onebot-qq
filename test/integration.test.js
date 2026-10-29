@@ -49,7 +49,7 @@ after(async () => {
   }
 })
 
-test('1. 全量装配：9 子插件 + 9 原生工具 + 7 命令 + 单例（重复 apply 返回同一 kernel）', async (t) => {
+test('1. 全量装配：子插件 / 原生工具 / 命令全部注册 + 单例（重复 apply 返回同一 kernel）', async (t) => {
   const h = await bootKernel({ config: { pacing: { merge: { enabled: false } } } })
   t.after(() => h.dispose())
   // 不写死数量：新增子插件不该让测试红
@@ -66,7 +66,8 @@ test('1. 全量装配：9 子插件 + 9 原生工具 + 7 命令 + 单例（重�
     assert.ok(h.kernel.toolDefs.has(name), `应注册原生工具 ${name}`)
   }
   assert.ok(h.kernel.toolDefs.size >= 9, `原生工具至少 9 个，实际 ${[...h.kernel.toolDefs.keys()].join(',')}`)
-  assert.equal(h.kernel.commands.size, 7, `命令 7 个，实际 ${[...h.kernel.commands.keys()].join(',')}`)
+  // 命令数量不写死（/qzone、/空间 是空间日记加的），只查关键命令都在
+  assert.ok(h.kernel.commands.size >= 7, `命令至少 7 个，实际 ${[...h.kernel.commands.keys()].join(',')}`)
   for (const cmd of ['help', 'status', 'reset', 'resetall', 'cancel', 'history', 'quota']) {
     assert.ok(h.kernel.commands.has(cmd), `应注册 /${cmd}`)
   }

@@ -21,7 +21,7 @@ const PRIVATE_KEY = `private:${ADMIN_QQ}`
 
 /** 起内核 + 给 sendQzoneMsg 打桩；返回调用记录 */
 async function boot() {
-  const env = await bootKernel({ config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const env = await bootKernel({ config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, nudgeHour: 0 } } } })
   const calls = []
   env.kernel.onebot.sendQzoneMsg = async (params) => {
     calls.push(params)
@@ -94,12 +94,13 @@ test('配额：同一会话当天第二条被拒', async () => {
   }
 })
 
-test('配额按会话隔离：群写过不影响私聊', async () => {
-  const { tool, dispose } = await boot()
+test('配额是全账号的：一个群写过，私聊也发不出（空间只有一个）', async () => {
+  const { tool, calls, dispose } = await boot()
   try {
     assert.equal((await tool('post_qzone').execute({ target: GROUP_KEY, content: '群里的' })).ok, true)
-    // 私聊是另一条线，额度独立
-    assert.equal((await tool('post_qzone').execute({ target: PRIVATE_KEY, content: '私聊的' })).ok, true)
+    const second = await tool('post_qzone').execute({ target: PRIVATE_KEY, content: '私聊的' })
+    assert.equal(second.ok, false, '全账号一天一条，换条线也不行')
+    assert.equal(calls.length, 1)
   } finally {
     dispose()
   }
@@ -120,19 +121,34 @@ test('qzone_status 反映当天使用情况', async () => {
   }
 })
 
-test('skip 之后状态里能看到 skippedToday', async () => {
+test('skip：工作区里调用才算「今天不写」', async () => {
   const { tool, dispose } = await boot()
   try {
-    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '不想写' })
-    const s = await tool('qzone_status').execute({ target: GROUP_KEY })
+    await tool('skip_qzone').execute({ target: 'desk', reason: '不想写' })
+    const s = await tool('qzone_status').execute({ target: 'desk' })
     assert.equal(s.skippedToday, true)
+    assert.equal(s.skipReason, '不想写')
+    assert.equal(s.decided, true)
     assert.equal(s.used, 0)
   } finally {
     dispose()
   }
 })
 
-test('配图：拒绝引用表情包库里的文件（防污染固定图库）', async () => {
+test('skip：群里调用只影响这段对话，不挡晚上的回顾', async () => {
+  const { tool, dispose } = await boot()
+  try {
+    const r = await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '群里这会儿不想写' })
+    assert.equal(r.global, false)
+    const s = await tool('qzone_status').execute({ target: GROUP_KEY })
+    assert.equal(s.skippedToday, false, '群里的 skip 不该把整天判死')
+    assert.equal(s.decided, false)
+  } finally {
+    dispose()
+  }
+})
+
+test('配图：默认允许引用表情包库（只读，不改库）', async () => {
   const { tool, calls, dataDir, dispose } = await boot()
   try {
     const stickerDir = path.join(dataDir, 'qq-stickers')
@@ -143,11 +159,32 @@ test('配图：拒绝引用表情包库里的文件（防污染固定图库）',
     const r = await tool('post_qzone').execute({
       target: GROUP_KEY, content: '带图的一条', images: [sticker],
     })
-    assert.equal(r.ok, false)
-    assert.match(r.reason, /污染/)
-    assert.equal(calls.length, 0)
+    assert.equal(r.ok, true, '表情包库是只读引用，不该被拦')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].images[0], fs.realpathSync(sticker))
   } finally {
     dispose()
+  }
+})
+
+test('配图：allowStickers=false 时拒绝表情包库', async () => {
+  const env = await bootKernel({
+    config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, nudgeHour: 0, allowStickers: false } } },
+  })
+  const calls = []
+  env.kernel.onebot.sendQzoneMsg = async (p) => { calls.push(p); return { ok: true } }
+  const tool = (n) => env.ctx._registeredTools.get(`mcp__qq__${n}`)
+  try {
+    const stickerDir = path.join(env.dataDir, 'qq-stickers')
+    fs.mkdirSync(stickerDir, { recursive: true })
+    const sticker = path.join(stickerDir, '2-abc.png')
+    fs.writeFileSync(sticker, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const r = await tool('post_qzone').execute({ target: GROUP_KEY, content: '带图的一条', images: [sticker] })
+    assert.equal(r.ok, false)
+    assert.match(r.reason, /表情包/)
+    assert.equal(calls.length, 0)
+  } finally {
+    env.dispose()
   }
 })
 
@@ -213,7 +250,7 @@ test('超长正文被截断而不是报错', async () => {
 
 // ── 额度持久化（跨重启）─────────────────────────────────────
 
-test('额度落盘：写过之后 qzone-state.json 存在且记录了条数', async () => {
+test('额度落盘：写过之后 qzone-state.json 按天记录', async () => {
   const { tool, dataDir, dispose } = await boot()
   try {
     await tool('post_qzone').execute({ target: GROUP_KEY, content: '要落盘的一条' })
@@ -222,9 +259,10 @@ test('额度落盘：写过之后 qzone-state.json 存在且记录了条数', as
     const st = JSON.parse(fs.readFileSync(file, 'utf8'))
     const d = new Date()
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    assert.ok(st[GROUP_KEY], '应有本会话的记录')
-    assert.equal(st[GROUP_KEY].date, key)
-    assert.equal(st[GROUP_KEY].posted, 1)
+    assert.ok(st.days && st.days[key], '应有当天的记录')
+    assert.equal(st.days[key].date, key)
+    assert.equal(st.days[key].posted, 1)
+    assert.equal(st.days[key].source, GROUP_KEY, '记下来源，方便排障')
   } finally {
     dispose()
   }
@@ -240,7 +278,7 @@ test('额度跨重启保留：卸载后用同一 dataDir 重装，配额仍然�
   }
 
   // 模拟重启：同一 dataDir 重新装配
-  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, nudgeHour: 0 } } } })
   const calls2 = []
   env2.kernel.onebot.sendQzoneMsg = async (p) => { calls2.push(p); return { ok: true } }
   const tool2 = (n) => env2.ctx._registeredTools.get(`mcp__qq__${n}`)
@@ -260,12 +298,12 @@ test('skip 也落盘（重启后仍记得今天跳过过）', async () => {
   const first = await boot()
   const { dataDir, tool, dispose } = first
   try {
-    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '没想写的' })
+    await tool('skip_qzone').execute({ target: 'desk', reason: '没想写的' })
   } finally {
     dispose()
   }
 
-  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, remindAfterHour: 0 } } } })
+  const env2 = await bootKernel({ dataDir, config: { pluginConfig: { qzone: { enabled: true, dailyLimit: 1, nudgeHour: 0 } } } })
   const tool2 = (n) => env2.ctx._registeredTools.get(`mcp__qq__${n}`)
   try {
     const s = await tool2('qzone_status').execute({ target: GROUP_KEY })
@@ -278,29 +316,28 @@ test('skip 也落盘（重启后仍记得今天跳过过）', async () => {
 
 // ── 控制台计数 ──────────────────────────────────────────────
 
-test('控制台 info 显示「今日已发 N/M」', async () => {
+test('控制台 info：没写时说明还没写，写过之后显示 N/M', async () => {
   const { tool, dispose } = await boot()
   try {
-    // 0 条时
     let text = getQzoneInfoText()
-    assert.match(text, /今日已发 0\/1/, `零条时应显示 0/1，实际：${text.slice(0, 60)}`)
+    assert.match(text, /今日还没写/, `零条时应说明还没写，实际：${text.slice(0, 60)}`)
 
-    // 写过 1 条后
     await tool('post_qzone').execute({ target: GROUP_KEY, content: '计数测试' })
     text = getQzoneInfoText()
     assert.match(text, /今日已发 1\/1/, `写过之后应显示 1/1，实际：${text.slice(0, 60)}`)
+    assert.match(text, /写了：计数测试/, '时间线里应带正文摘要')
   } finally {
     dispose()
   }
 })
 
-test('控制台 info：跳过之后带上「今天已写过 skip」', async () => {
+test('控制台 info：工作区里跳过之后显示「今天决定不写 + 理由」', async () => {
   const { tool, dispose } = await boot()
   try {
-    await tool('skip_qzone').execute({ target: GROUP_KEY, reason: '今天不写' })
+    await tool('skip_qzone').execute({ target: 'desk', reason: '今天没啥好记的' })
     const text = getQzoneInfoText()
-    assert.match(text, /今日已发 0\/1/)
-    assert.match(text, /已写过 skip/, '应提示今天跳过过')
+    assert.match(text, /今日决定不写：今天没啥好记的/)
+    assert.match(text, /没写：今天没啥好记的/, '时间线里也该有理由')
   } finally {
     dispose()
   }
