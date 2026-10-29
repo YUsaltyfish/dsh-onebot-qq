@@ -514,7 +514,10 @@ export default {
           }
           if (t > hardDeadline) return finish({ timeout: true, got: null })
         }, POLL_MS)
-        ticker.unref?.()
+        // ⚠️ 不能 unref：等待期间没有别的事可做，一 unref，Node 就认为事件循环空了，
+        //    会把还在 pending 的 Promise 直接 cancel 掉（CI 的 Linux 上必现：
+        //    "Promise resolution is still pending but the event loop has already resolved"）。
+        //    finish() 会 clearInterval，不会泄漏。
         Promise.resolve()
           .then(() => dsh.prompt(sessionId, text, imageParts))
           .catch((e) => finish({ timeout: false, got: null, error: String(e?.message || e) }))
