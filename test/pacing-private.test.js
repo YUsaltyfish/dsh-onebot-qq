@@ -35,6 +35,8 @@ function setup(opts = {}) {
       groups: {},                       // 群一个都不开，只测私聊
       sensitivity: 0.45,
       silenceEnabled: false,            // 群冷场也关掉，确保只有私聊路径在动
+      quietEnabled: false,              // 静默默认关：本文件只在「静默时段」那几项里显式打开
+                                        // （不然「安静够久会不会开口」这类测试会被静默挡掉，还随时区漂移）
       privateEnabled: privateEnabledOn,
       privateFriendsOnly: true,
       privateColdSilenceMs: 7200000,    // 2 小时
@@ -53,10 +55,25 @@ function setup(opts = {}) {
     },
   })
   p.stop()  // 只要回调，不要真定时器
-  return { p, fired, state, advance: (ms) => { now += ms }, now: () => now }
+  return {
+    p, fired, state,
+    advance: (ms) => { now += ms },
+    /**
+     * 把「现在」直接钉到本地时区的某个时刻。
+     * 静默时段是按 new Date().getHours()（**服务器本地时区**）判的，而测试可能跑在 CI（UTC），
+     * 写死 +08:00 的绝对时间会让 23:30+08:00 变成 UTC 15:30，静默判定直接错位。
+     */
+    setNow: (ts) => { now = ts },
+    now: () => now,
+  }
 }
 
 const flush = () => new Promise((r) => setImmediate(r))
+
+/** 「本地时区 2026-10-29 的 h 点」—— 不写死 +08:00，见 setNow 的注释 */
+function localAt(h, m = 0) {
+  return new Date(2026, 9, 29, h, m, 0, 0).getTime()
+}
 const T0900 = Date.parse('2026-10-29T09:00:00+08:00')
 
 test('私聊主动接话：对方安静够久 → 起一轮（isGroup=false）', async () => {
@@ -157,38 +174,44 @@ test('privateAllowed 可单独查（控制台/调试用）', async () => {
   assert.equal(await p.privateAllowed('abc'), false)
 })
 test('静默时段：到点也不主动开口（回流自 NAS）', async () => {
-  const { p, fired, advance } = setup({
+  const { p, fired, setNow } = setup({
     reply: { quietEnabled: true, quietStart: 0, quietEnd: 7 },
-    seed: { 'private:10001': { lastInboundAt: T0900 } },
+    seed: { 'private:10001': { lastInboundAt: localAt(0, 30) } },
   })
-  // 把时钟拨到凌晨 3 点
-  const t = Date.parse('2026-10-29T03:00:00+08:00')
-  const st = Date.parse('2026-10-29T12:00:00+08:00')
-  advance(t - st)
+  setNow(localAt(3))          // 凌晨 3 点，落在 0~7 静默区间
   p.tickNow()
   await flush()
   assert.equal(fired.length, 0, '静默时段内不该开口')
 })
 
 test('静默时段：跨零点区间（23 → 7）也算静默', async () => {
-  const { p, fired, advance } = setup({
+  const { p, fired, setNow } = setup({
     reply: { quietEnabled: true, quietStart: 23, quietEnd: 7 },
-    seed: { 'private:10001': { lastInboundAt: T0900 } },
+    seed: { 'private:10001': { lastInboundAt: localAt(20) } },
   })
-  const st = Date.parse('2026-10-29T12:00:00+08:00')
-  advance(Date.parse('2026-10-29T23:30:00+08:00') - st)
+  setNow(localAt(23, 30))
+  p.tickNow()
+  await flush()
+  assert.equal(fired.length, 0)
+})
+
+test('静默时段：跨零点的另一端（凌晨 1 点）同样静默', async () => {
+  const { p, fired, setNow } = setup({
+    reply: { quietEnabled: true, quietStart: 23, quietEnd: 7 },
+    seed: { 'private:10001': { lastInboundAt: localAt(22) } },
+  })
+  setNow(localAt(1))
   p.tickNow()
   await flush()
   assert.equal(fired.length, 0)
 })
 
 test('静默时段关闭后：凌晨也会主动开口', async () => {
-  const { p, fired, advance } = setup({
+  const { p, fired, setNow } = setup({
     reply: { quietEnabled: false, quietStart: 0, quietEnd: 7 },
-    seed: { 'private:10001': { lastInboundAt: Date.parse('2026-10-29T00:00:00+08:00') } },
+    seed: { 'private:10001': { lastInboundAt: localAt(0) } },
   })
-  const st = Date.parse('2026-10-29T12:00:00+08:00')
-  advance(Date.parse('2026-10-29T03:00:00+08:00') - st)
+  setNow(localAt(3))
   p.tickNow()
   await flush()
   assert.equal(fired.length, 1)
