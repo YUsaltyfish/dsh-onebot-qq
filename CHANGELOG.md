@@ -2,6 +2,18 @@
 
 所有值得用户知道的变更记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## 未发布 — 2026-10-28
+
+新增 QQ 空间日记子插件（`qzone`，order 62）：
+
+### 新增
+
+- **`qzone` 子插件**：给机器人一个自己的 QQ 空间当日记本，每个会话每天最多一条，由它自己判断写不写；到点（默认 22:00 后）在它下一条被唤醒的消息里提醒一次（挂 `ev.hint`，不改静态系统提示）。新增三个模型工具 `post_qzone` / `skip_qzone` / `qzone_status`。
+  - **「不写」绝不进空间**：`skip_qzone` 独立成一个工具，只记状态不发任何内容；`post_qzone` 对「不写」类正文另有硬性拦截 —— 合并工具 + 传空值的写法会让模型把不写的理由当正文发进公开空间。
+  - **配图不污染表情库**：只接受本地文件路径，并拒绝 `qq-stickers/` 下的文件（包含判定走 `platform/paths.js` 的 `isInsidePath`）。
+  - **额度落盘、跨重启保留**：状态存 `<dataDir>/qzone-state.json`（按会话记录当天条数与是否跳过），重启不会把额度重置回 0 —— 内存态会导致「早上发过、下午重启又能发第二条」。
+  - **控制台显示实时额度**：`configSchema.info.text` 改成 getter，装配时把 dataDir/limit 记到模块级槽，每次读 schema 现算 `📔 今日已发 N/M`（今天所有会话的合计，跳过过会额外标注）。
+- **适配器新增 `sendQzoneMsg()`**：包装协议端 `send_qzone_msg` 扩展（非 OneBot v11 标准）；失败返回 `{ok:false,msg}` 不抛错，不支持的实现自动降级。插件侧经 `bot.onebot.sendQzoneMsg` 调用，仍拿不到裸 send。
 ## 未发布 — 2026-10-23
 
 群记忆正确性与控制台修复（不新增功能、不改对外配置键）：
@@ -49,16 +61,6 @@
 - **代码注释统一为「协议端」**：`kernel/`、`plugins/`、`admin/`、`client.js`、`bin/` 等 20 个文件约 60 行注释（NapCat 的行为特性 → 协议端通用描述）；差异事实保留但改成实现无关写法（如「Anchor 参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`」）。
 - **保持不动的契约**（与 2026-10-27 变更 9 一致）：配置键 `napcat.*`、动作 id `napcat-check`/`napcat-reconnect`、模块与文件 `kernel/napcat-adapter.js`、`NapCatAdapter`、`toNapCatFileRef`/`fromNapCatFileRef`、`test/fake-napcat.mjs`、日志前缀 `[onebot-qq:napcat]` 与验收日志字符串（如 `NapCat WS 已连接`）—— 全部保留，避免打坏既有配置与运维 grep。
 
-### 修复（表情库清单：改为全库随机抽样）
-
-- **`sticker_catalog` 清单只列库的前 30 行，导致模型断言「库里没有角色标签」**：清单原来按 `lastUsed` 升序排（久未露脸的在前）。
-  2026-10-28 新收的 54 张形象图 `lastUsed` 都是 0，与同样从没发过的老图并列，稳定排序让老图（id 小）占满前 30 行 ——
-  模型只看得到清单，于是在 QQ 里答「标签全是情绪和梗，没有一张标着角色名」。
-- 现在**不做任何排序**：每次从整个库 Fisher–Yates 洗牌后取前 `limit` 张。哪一批都有机会露脸，也不用维护排序规则。
-  返回格式不变（一行一张 `#编号 标签/标签/标签`，仍只显示前 3 个标签），`limit` 语义不变（默认 30，上限 = 全库张数）。
-- ⚠️ 行为特性（不是 bug）：清单**每次内容不同**；需要点名某张时用 `#编号`。
-- 新增 `test/stickers-shelf.test.js`（40 张图、每次抽 30、抽 20 次 → 断言单次清单内不重复且 40 张全都出现过）；全量 274/274。
-
 ### 修复（链接解析：视频拆条）
 
 - **视频类链接在 SnowLuma 等严格协议端下发不出**：协议端要求「video 必须是消息里唯一的 segment」（`message element "video" must be the only segment in a message`；同一条里放两个视频同样被拒：`video may appear only once`）。`link-parser` 原来把「说明文字 + `[CQ:video]`」拼成一条 —— NapCat 时代兄弟元素被 QQ 静默吞掉、看起来正常，换成 SnowLuma 后整条发送失败（ERROR 日志，媒体一条都发不出）。
@@ -73,7 +75,7 @@
   `toNapCatFileRef` / `fromNapCatFileRef` → `toOneBotFileRef` / `fromOneBotFileRef`，内部 `checkNapcat` → `checkOneBot`；
   测试用假协议端 `test/fake-napcat.mjs` → `test/fake-onebot.mjs`。
 - **日志前缀与验收串**：`[onebot-qq:napcat]` → `[onebot-qq:onebot]`，`NapCat WS 已连接` → `OneBot WS 已连接` 等。
-  ⚠️ **外部脚本要跟着改**：部署机上若有用脚本读旧键或 grep 旧日志串，需要同步调整（取 `onebot.httpToken`、旧键兜底；校验 `kernel/onebot-adapter.js`）；
+  ⚠️ **外部脚本要跟着改**：部署机上的监控/巡检脚本（取 `onebot.httpToken`，旧键兜底）与同步脚本（校验新文件名）已同步；
   自建的监控/巡检若 grep 过 `NapCat WS 已连接`，改成 `OneBot WS 已连接`。
 - 文档、示例配置、`locale`、诊断项、CLI 输出同步为 `onebot.*`。仓库内旧实现名仅剩两处：兼容旧键的字面量（`applyOneBotLegacyKey` 内）与一条防回归守卫测试。
 - 测试 269/269（新增「旧键兼容」2 条：只写旧键能读、两键并存时新键优先）。

@@ -1187,6 +1187,18 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     if (!id) throw new Error('action 需要 id')
     if (!ACTIONS.some((a) => a.id === id)) throw new Error(`未知动作：${id}`)
 
+    // ── 空间日记（按钮长在「空间日记」配置页）──────────────────
+    if (id === 'qzone-run-now') {
+      const fn = kernel?.shared?.qzoneRunNow
+      if (typeof fn !== 'function') return { ok: false, error: '空间日记插件没启用（或还没装配）' }
+      return fn('控制台手动触发')
+    }
+    if (id === 'qzone-reset-today') {
+      const fn = kernel?.shared?.qzoneResetToday
+      if (typeof fn !== 'function') return { ok: false, error: '空间日记插件没启用（或还没装配）' }
+      return fn({ preview: !payload.confirm })
+    }
+
     if (id === 'reply-preset') {
       const preset = toStr(payload.preset)
       const p = REPLY_PRESETS[preset]

@@ -400,6 +400,35 @@ export class OneBotAdapter {
   }
 
   /**
+   * 发一条 QQ 空间说说（协议端扩展 API `send_qzone_msg`，非 OneBot v11 标准）。
+   *
+   * 返回 `{ ok: true }` / `{ ok: false, msg }`，不抛错 —— 说说失败不该拖垮聊天链路。
+   * 协议端不支持该扩展时，返回 ok:false 并说明原因，调用方自行降级。
+   *
+   * @param {{ content: string, images?: string[] }} params
+   *   content — 说说正文（必填）
+   *   images  — 可选，本地图片绝对路径数组（最多 9 张，协议端限制）
+   */
+  async sendQzoneMsg({ content = '', images = [] } = {}) {
+    const text = String(content || '').trim()
+    if (!text) return { ok: false, msg: '说说内容不能为空' }
+    const params = { content: text }
+    const list = (Array.isArray(images) ? images : [images]).filter(Boolean).map(String)
+    if (list.length) params.images = list.slice(0, 9)
+    try {
+      const { data } = await this._post('send_qzone_msg', params, 30000)
+      if (data.status === 'ok') return { ok: true }
+      const raw = String(data?.wording || data?.message || data?.retcode || '')
+      this.log.warn(`[空间] 发说说失败: ${raw.slice(0, 300) || '（无原文）'}`)
+      return { ok: false, raw, msg: raw || '协议端返回失败' }
+    } catch (e) {
+      const raw = String(e?.message || e)
+      this.log.warn(`[空间] 发说说请求异常: ${raw.slice(0, 300)}`)
+      return { ok: false, raw, msg: e?.name === 'TimeoutError' ? '发说说超时' : raw }
+    }
+  }
+
+  /**
    * 群消息历史（升序；锚点 0 = 从最新开始）。失败返回 []，群上文/提取都只是锦上添花。
    * 锚点参数名各实现不同：多数实现认 `message_seq`，SnowLuma 认 `message_id`（0 = 最新，负值锚点也合法）。
    * 两边都会忽略自己不认识的键，所以两个都发（2026-10-27 SnowLuma 兼容）。
@@ -424,6 +453,24 @@ export class OneBotAdapter {
     } catch (e) {
       this.log.debug(`取群成员资料失败 (${groupId}/${qq}): ${e.message}`)
       return null
+    }
+  }
+
+  /**
+   * 通用只读接口调用：给插件取协议端信息用（如 qzone 读自己说说要先 get_cookies）。
+   * 只暴露 `_post` 这一层，不暴露裸发消息 —— 出站仍只能走 deliver / sendMedia / sendQzoneMsg。
+   * 失败不抛：返回 `{ ok:false, msg }`，调用方自行降级。
+   */
+  async callApi(action, params = {}, timeoutMs = 8000) {
+    const name = String(action || '').trim()
+    if (!name) return { ok: false, msg: 'action 为空' }
+    try {
+      const { data } = await this._post(name, params || {}, timeoutMs)
+      if (data?.status === 'ok') return { ok: true, data: data.data ?? null }
+      const raw = String(data?.wording || data?.message || data?.retcode || '')
+      return { ok: false, msg: raw || '协议端返回失败' }
+    } catch (e) {
+      return { ok: false, msg: String(e?.message || e) }
     }
   }
 

@@ -387,6 +387,17 @@ export const ACTIONS = [
     hint: '检查配置、DSH preset、工具注册、OneBot 连接、人设、目录可写、生图配置，生成脱敏报告并告诉你保存位置；可直接交给 DSH 本体修复。',
   },
 
+  // 空间日记：按钮长在「空间日记」配置页底部（onGroup = 不在「运维」页重复出现）
+  {
+    id: 'qzone-run-now', group: '空间日记', onGroup: true, label: '📔 立刻让它回顾一次',
+    hint: '马上装配今天的素材，在「空间工作区」会话里让它决定写不写。异步执行，点完去看那个会话。',
+  },
+  {
+    id: 'qzone-reset-today', group: '空间日记', onGroup: true, label: '♻️ 重置今日空间额度',
+    hint: '把今天「已发 / 已跳过」清掉，它还能再写一条。只动本地状态，空间里已有的说说不会被删。',
+    confirm: { title: '⚠️ 确认重置今天的空间额度？', okLabel: '确认重置' },
+  },
+
   // 隐藏动作（由控制台特定页面调用，不出现在按钮列表里）
   { id: 'reply-preset', hidden: true, group: '隐藏', label: '主动接话档位', hint: '内部动作：{id:"reply-preset", preset:"quiet|semi|active"}' },
   { id: 'reset-session', hidden: true, group: '隐藏', label: '重置单条会话', hint: '内部动作：{id:"reset-session", chat:"group:<群号>"}' },

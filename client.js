@@ -247,9 +247,36 @@ window.__ModuleLoader__.load({
 		/** 单个功能分组页（消息设置 / 回话 / 生图 / 表情包 / 链接解析…） */
 		function GroupTab(props) {
 			const { group, ...api } = props
+			// 这一组自己的动作按钮（如「空间日记」的立刻回顾 / 重置额度）：长在本页底部，不去「运维」页挤
+			const acts = (props.schema.actions || []).filter((a) => a.onGroup && a.group === group)
 			return h('div', null, [
 				GROUP_NOTES[group] ? h('div', { key: 'note', style: S.msg }, GROUP_NOTES[group]) : null,
 				h(SwitchGroup, Object.assign({}, api, { key: 'sw', group })),
+				acts.length ? h('div', { key: 'acts' }, [
+					h('div', { style: S.group, key: 'gt' }, '操作'),
+					...acts.map((a) => h('div', { style: S.row, key: a.id }, [
+						h('button', {
+							style: S.btn, disabled: api.busy, title: a.hint || '',
+							onClick: () => {
+								const { run, call, setBusy, setMsg, setConfirmBox } = api
+								if (a.confirm) {
+									setBusy(true); setMsg('')
+									call('action', { id: a.id }).then((p) => {
+										if (p && p.ok === false) throw new Error(p.error || p.message || '操作失败')
+										setConfirmBox({
+											title: (a.confirm && a.confirm.title) || `⚠️ 确认执行「${a.label}」？`,
+											lines: (p.previewLines && p.previewLines.length) ? p.previewLines : [p.message || '（预演没有输出）'],
+											okLabel: (a.confirm && a.confirm.okLabel) || '确认执行',
+											onOk: () => run(a.label, () => call('action', { id: a.id, confirm: true })),
+										})
+									}).catch((e) => setMsg(`${a.label} ✗ ${e.message}`)).finally(() => setBusy(false))
+									return
+								}
+								run(a.label, () => call('action', { id: a.id }))
+							},
+						}, a.label),
+					])),
+				]) : null,
 			])
 		}
 
@@ -368,7 +395,7 @@ window.__ModuleLoader__.load({
 				// ═══ 运维动作：危险动作走二级确认 ═══
 				h('div', { key: 'act' }, [
 					h('div', { style: S.group, key: 'gt' }, '运维 / 危险操作'),
-					(schema.actions || []).map((a) => h('div', { style: S.row, key: a.id }, [
+					(schema.actions || []).filter((a) => !a.onGroup).map((a) => h('div', { style: S.row, key: a.id }, [
 						h('button', {
 							style: S.btn, disabled: busy, title: a.hint || '',
 							onClick: () => {
