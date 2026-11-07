@@ -899,13 +899,116 @@ window.__ModuleLoader__.load({
 			])
 		}
 
+		function MonitorRuleCard({ rule, index, count, disabled, update, remove, move }) {
+			const field = (key, label, type) => h('label', { key, style: S.row }, [
+				h('span', { key: 'label', style: S.label }, label),
+				h(type === 'textarea' ? 'textarea' : 'input', { key: 'value', 'aria-label': label,
+					style: Object.assign({}, S.input, { width: type === 'textarea' ? '100%' : 220 }),
+					type: type === 'number' ? 'number' : 'text', min: type === 'number' ? 0 : undefined,
+					value: rule[key] == null ? '' : rule[key], disabled,
+					onChange: (e) => update({ [key]: e.target.value }) }),
+			])
+			return h('div', { style: S.card, key: rule.id }, [
+				h('div', { key: 'head', style: S.row }, [
+					h('span', { key: 'id', style: S.label }, `规则 ${index + 1} · ${rule.id}`),
+					h('label', { key: 'enabled' }, [h('input', { type: 'checkbox', checked: rule.enabled, disabled, 'aria-label': '启用规则', onChange: (e) => update({ enabled: e.target.checked }) }), '启用']),
+					...[[ '上移', -1, index === 0 ], [ '下移', 1, index === count - 1 ]].map(([label, delta, edge]) => h('button', { key: label, style: S.btn, disabled: disabled || edge, onClick: () => move(delta) }, label)),
+					h('button', { key: 'delete', style: S.btn, disabled, onClick: remove }, '删除规则'),
+				]),
+				field('name', '规则名称（可选）'),
+				h('label', { key: 'match', style: S.row }, ['匹配方式', h('select', { value: rule.match, disabled, 'aria-label': '匹配方式', onChange: (e) => update({ match: e.target.value }) }, [h('option', { value: 'contains' }, '包含'), h('option', { value: 'exact' }, '完全匹配')])]),
+				field('text', '监听内容'), field('groups', '生效群号（逗号分隔，空＝不生效）'),
+				field('instruction', '触发后指令', 'textarea'), field('cooldownSeconds', '冷却（秒）', 'number'),
+			])
+		}
+
+		function MessageMonitor(props) {
+			const { call, monitorDraft: draft, setMonitorDraft, busy } = props
+			const { useState, useEffect, useRef } = react
+			const [pending, setPending] = useState(false)
+			const [note, setNote] = useState('')
+			const [groupId, setGroupId] = useState('')
+			const [sample, setSample] = useState('')
+			const lock = useRef(false)
+			const sequence = useRef(0)
+			const disabled = busy || pending
+			const decode = (rules) => (rules || []).map((r) => ({ ...r, groups: (r.groups || []).join(', '), cooldownSeconds: (r.cooldownMs == null ? 30000 : r.cooldownMs) / 1000 }))
+			const perform = async (fn) => {
+				if (busy || lock.current) return
+				lock.current = true; setPending(true); setNote('')
+				try { await fn() } catch (e) { setNote(e.message) }
+				finally { lock.current = false; setPending(false) }
+			}
+			const load = () => perform(async () => {
+				const result = await call('monitor', { op: 'list' })
+				if (!result || result.ok !== true) throw new Error((result && result.error) || '读取规则失败')
+				setMonitorDraft({ rules: decode(result.rules), revision: result.revision, enabled: result.enabled !== false, dirty: false })
+			})
+			useEffect(() => { if (draft.rules === null) load() }, [])
+			const change = (rules) => setMonitorDraft({ ...draft, rules, dirty: true })
+			const save = () => perform(async () => {
+				const rules = draft.rules.map((r) => {
+					const groups = String(r.groups).trim().split(/[,，\s]+/).filter(Boolean)
+					if (groups.some((id) => !/^\d{1,12}$/.test(id) || Number(id) <= 0)) throw new Error('群号需要 1–12 位正整数；留空不生效')
+					const cooldownMs = Number(r.cooldownSeconds) * 1000
+					if (String(r.cooldownSeconds).trim() === '' || !Number.isFinite(cooldownMs) || cooldownMs < 0) throw new Error('冷却秒数必须为非负数字')
+					return { id: r.id, name: r.name || '', enabled: r.enabled, match: r.match, text: r.text,
+						groups: [...new Set(groups.map(Number))], instruction: r.instruction, cooldownMs }
+				})
+				const result = await call('monitor', { op: 'save', rules, expectedRevision: draft.revision })
+				if (!result || result.ok !== true) throw new Error(result && result.conflict ? '配置已被其他操作更新；草稿已保留，请核对后重新读取' : (result && result.error) || '保存失败，草稿已保留')
+				setMonitorDraft({ ...draft, rules: decode(result.rules || rules), revision: result.revision, dirty: false }); setNote('规则已保存')
+			})
+			const testSaved = () => perform(async () => {
+				if (!/^\d{1,12}$/.test(groupId.trim()) || Number(groupId) <= 0) throw new Error('请输入有效测试群号')
+				const result = await call('monitor', { op: 'test', group_id: Number(groupId), text: sample })
+				if (!result || result.ok !== true) throw new Error((result && result.error) || '测试失败')
+				const matches = Array.isArray(result.matches) ? result.matches : []
+				setNote([result.message || (matches.length ? '命中已保存规则' : '没有命中已保存规则'),
+					...matches.map((r) => `命中规则：${r.name || r.id}（${r.id}）\n匹配：${r.match === 'exact' ? '完全匹配' : '包含'}\n监听内容：${r.text || ''}\n附加指令：\n${r.instruction || ''}`),
+				].join('\n\n'))
+			})
+			return h('div', null, [
+				h('div', { key: 'hint', style: S.msg }, '仅监听群消息；空群列表不生效，不代表全群。按顺序仅取首条命中规则。测试只使用已保存规则，不保存草稿、不触发模型或发消息，也不消耗冷却。'),
+				h('label', { key: 'enabled', style: S.row }, ['启用消息监测', h('input', {
+					type: 'checkbox', 'aria-label': '启用消息监测', checked: draft.enabled !== false, disabled: disabled || draft.rules === null,
+					onChange: (e) => { const enabled = e.target.checked; return perform(async () => {
+						const result = await call('set', { key: 'message-monitor.enabled', value: enabled })
+						if (!result || result.ok !== true) throw new Error((result && result.error) || '开关保存失败')
+						setMonitorDraft({ ...draft, enabled }); setNote('总开关已保存，规则草稿不变')
+					}) },
+				})]),
+				h('div', { key: 'toolbar', style: S.row }, [
+					h('button', { disabled, style: S.btn, onClick: () => { if (!draft.dirty || window.confirm('重新读取会丢弃未保存草稿，继续？')) return load() } }, '重新读取规则'),
+					h('button', { disabled: disabled || draft.rules === null, style: S.btn, onClick: () => {
+						if (disabled) return
+						let id
+						do { id = `monitor-${Date.now().toString(36)}-${++sequence.current}` } while (draft.rules.some((r) => r.id === id))
+						change([...draft.rules, { id, name: '', enabled: true, match: 'contains', text: '', groups: '', instruction: '', cooldownSeconds: 30 }])
+					} }, '添加规则'),
+					h('button', { disabled: disabled || !draft.dirty, style: S.btn, onClick: save }, '保存全部规则'),
+					h('span', { style: S.msg }, draft.dirty ? '有未保存草稿（切页保留）' : '已保存'),
+				]),
+				...(draft.rules || []).map((rule, index) => h(MonitorRuleCard, { key: rule.id, rule, index, count: draft.rules.length, disabled,
+					update: (patch) => !disabled && change(draft.rules.map((r, i) => i === index ? { ...r, ...patch } : r)),
+					remove: () => !disabled && change(draft.rules.filter((_, i) => i !== index)),
+					move: (delta) => { if (disabled) return; const rules = draft.rules.slice(); const next = index + delta; if (next < 0 || next >= rules.length) return; [rules[index], rules[next]] = [rules[next], rules[index]]; change(rules) },
+				})),
+				h('div', { key: 'test', style: S.row }, [
+					h('input', { 'aria-label': '测试群号', placeholder: '测试群号', value: groupId, disabled, onChange: (e) => setGroupId(e.target.value) }),
+					h('textarea', { 'aria-label': '测试消息', placeholder: '测试消息（使用已保存规则）', value: sample, disabled, onChange: (e) => setSample(e.target.value) }),
+					h('button', { style: S.btn, disabled, onClick: testSaved }, '测试已保存规则'),
+				]), h('div', { key: 'note', style: S.msg }, note),
+			])
+		}
+
 		// 页内标签页定义：固定页（总览 / 运维 / 群聊 / 子插件 / 群记忆）+ 后端每个 group 一页。
 		// 顺序 = CONTROLS 里 group 首次出现的顺序；「群聊」组不单独成页（跟群卡片一起画在「群聊」页里）；
 		// 「OneBot 连接」= OneBotTab（状态/测试 + 连接配置），「入群欢迎」= WelcomeTab（都不是通用 GroupTab）；
 		// 「其他」固定排最后（权限/门禁/文件/发图/头像 五组并进去的杂项页）。
 		function tabDefs(schema) {
 			const groups = []
-			const FIXED_LABELS = ['总览', '运维', '群聊', '子插件', '群记忆'] // 固定页同名 group 不另开页
+			const FIXED_LABELS = ['总览', '运维', '群聊', '子插件', '群记忆', '消息监测'] // 固定页同名 group 不另开页
 			const personaGroups = new Set((schema && schema.personaGroups) || [])
 			for (const c of (schema && schema.controls) || []) {
 				if (!c.group || personaGroups.has(c.group) || FIXED_LABELS.includes(c.group) || groups.includes(c.group)) continue
@@ -923,6 +1026,7 @@ window.__ModuleLoader__.load({
 				...groups.map((g) => ({ id: 'group:' + g, label: g, group: g })),
 				{ id: 'plugins', label: '子插件' },
 				{ id: 'memory', label: '群记忆' },
+				{ id: 'monitor', label: '消息监测' },
 			]
 		}
 
@@ -937,6 +1041,8 @@ window.__ModuleLoader__.load({
 			const [confirmBox, setConfirmBox] = useState(null)   // 危险操作二次确认弹窗（跨标签页共用）
 			const [reportBox, setReportBox] = useState(null)     // 一键诊断结果弹窗（报告 + 复制按钮）
 			const [tab, setTab] = useState('overview')
+			// 与 schema/status 轮询隔离，切换标签后仍保留未保存规则。
+			const [monitorDraft, setMonitorDraft] = useState({ rules: null, revision: null, dirty: false })
 
 			// DSH 的 connection.rpc 返回的是 RPC 信封 {ok:true,value} / {ok:false,error}，
 			// 这里统一拆到「内核自己的返回值」；下面所有面板逻辑都按内核的 {ok,...} 形状写。
@@ -1025,7 +1131,7 @@ window.__ModuleLoader__.load({
 
 			const TABS = tabDefs(schema)
 			const curTab = TABS.find((t) => t.id === tab) || TABS[0]
-			const api = { ctx, call, refresh, run, busy, setBusy, schema, status, msg, setMsg, setConfirmBox, setReportBox }
+			const api = { ctx, call, refresh, run, busy, setBusy, schema, status, msg, setMsg, setConfirmBox, setReportBox, monitorDraft, setMonitorDraft }
 
 			const body = (!schema || !status)
 				? h('div', { style: S.msg, key: 'loading' }, msg || '读取中…')
@@ -1037,6 +1143,7 @@ window.__ModuleLoader__.load({
 								: curTab.group === '主动接话' ? h(ReplyModeTab, Object.assign({}, api, { key: 'rm' }))
 									: curTab.group ? h(GroupTab, Object.assign({}, api, { key: 'gt', group: curTab.group }))
 										: curTab.id === 'plugins' ? h(TabPlugins, { key: 'pl', ...api })
+											: curTab.id === 'monitor' ? h(MessageMonitor, { key: 'monitor', ...api })
 											: h(GroupMemory, { key: 'm', ctx })
 
 			return h('div', { style: S.card }, [

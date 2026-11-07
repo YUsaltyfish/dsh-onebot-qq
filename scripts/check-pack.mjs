@@ -50,6 +50,8 @@ const REQUIRED = [
   'platform/paths.js',
   'admin/schema.js',
   'ops/maintenance.js',
+  'plugins/message-monitor/index.js',
+  'plugins/message-monitor/matcher.js',
   'locale/en.json',
   'locale/zh.json',
   'icon.svg',

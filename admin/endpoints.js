@@ -1,5 +1,5 @@
 /**
- * admin/endpoints.js — 控制台 **8 端点**实现（响应形状与浏览器半边 client.js 的读取字段对齐）。
+ * admin/endpoints.js — 控制台端点实现（响应形状与浏览器半边 client.js 的读取字段对齐）。
  *
  *   schema  控制表 + 子插件 + 动作按钮 + 当前值
  *   status  健康 / QQ 线 / 群管控 / 人设 / 句池 / 主动接话 / 迎宾 / 子插件 / 服务
@@ -22,6 +22,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
+import { validateRules, matchRule } from '../plugins/message-monitor/matcher.js'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, resolveRuntimePaths, validateConfig } from '../kernel/config-store.js'
 import { atomicWriteFileSync } from '../platform/atomic.js'
@@ -34,8 +36,8 @@ import {
   getPath, pluginDefs, readValue, setPath, writeValue,
 } from './schema.js'
 
-/** 8 个端点名（host 的未知端点报错信息也用它）。 */
-export const ENDPOINTS = ['schema', 'status', 'set', 'module', 'group', 'memory', 'persona', 'action']
+/** 端点名（host 的未知端点报错信息也用它）。 */
+export const ENDPOINTS = ['schema', 'status', 'set', 'module', 'group', 'memory', 'persona', 'action', 'monitor']
 
 /** 包版本兜底（优先 kernel.version；内核没给时读自身 package.json）。 */
 const requirePkg = createRequire(import.meta.url)
@@ -1536,8 +1538,41 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     throw new Error(`动作未接线：${id}`)
   }
 
+  // 规则版本只包含本规则数组，不因其他控制台设置变化造成无关冲突。
+  const monitorRulesOf = (raw) => validateRules(pluginCfg(raw, 'message-monitor').rules ?? [])
+  const monitorRevision = (rules) => createHash('sha256').update(JSON.stringify(rules)).digest('hex')
+  async function monitor(payload = {}) {
+    const op = toStr(payload.op) || 'list'
+    if (op === 'list') {
+      const rules = monitorRulesOf(store.read())
+      return { ok: true, rules, revision: monitorRevision(rules), enabled: pluginCfgRuntime('message-monitor').enabled !== false }
+    }
+    if (op === 'test') {
+      const rules = monitorRulesOf(store.read())
+      const groupId = positiveInt(payload.groupId ?? payload.group_id, '测试群号')
+      const matched = matchRule(rules, { text: String(payload.text ?? ''), groupId, isGroup: true })
+      return { ok: true, matches: matched ? [matched] : [],
+        message: matched ? `命中规则「${matched.name || matched.id}」（仅纯匹配测试，未执行操作）` : '没有命中规则（仅测试已保存的规则）' }
+    }
+    if (op !== 'save') throw new Error(`未知监测操作：${op}`)
+    const rules = validateRules(payload.rules)
+    let conflict = null
+    const saved = await store.update((next) => {
+      const current = monitorRulesOf(next)
+      const revision = monitorRevision(current)
+      if (toStr(payload.expectedRevision) !== revision) {
+        conflict = { ok: false, conflict: true, rules: current, revision,
+          error: '监测规则已被更新或缺少版本，请刷新后合并修改再保存（草稿未覆盖）' }
+        return { unchanged: true }
+      }
+      setPath(next, ['pluginConfig', 'message-monitor', 'rules'], rules)
+    }, { what: '更新消息监测规则', allowPending: true })
+    if (conflict) return conflict
+    return { ok: true, rules, revision: monitorRevision(rules), backup: saved.backup, message: '监测规则已保存并热生效' }
+  }
+
   // ── 分发 ───────────────────────────────────────────────────
-  const HANDLERS = { schema, status, set, module, group, memory, persona, action }
+  const HANDLERS = { schema, status, set, module, group, memory, persona, action, monitor }
 
   /**
    * 分发一个端点调用。**永不 throw**：业务失败 = `{ok:false,error}`（host 把它塞进 value 信封）。
@@ -1570,6 +1605,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     memory,
     persona,
     action,
+    monitor,
     // 给测试/调试用的纯函数
     helpers: { parseGroupMap, parseKeywordMap, listWelcomeImages, SECRET_MASK },
   }

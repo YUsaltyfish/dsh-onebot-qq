@@ -1,5 +1,5 @@
 /**
- * admin/host.js — 控制台 **host 半边**：把 8 端点挂到 DSH 原生 RPC 通道 `/qq-console`。
+ * admin/host.js — 控制台 **host 半边**：把控制台端点挂到 DSH 原生 RPC 通道 `/qq-console`。
  *
  * 通道契约（2026-10-18 踩过的坑，照抄注释别删）：
  *   · 原生 RPC（`ctx.connection.rpc.handle`）与旧的直挂路由**返回形状不同**：

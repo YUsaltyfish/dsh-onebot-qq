@@ -592,7 +592,8 @@ export function buildPromptText(ev, opts = {}) {
   const head = `[QQ线:回话须调工具] ${chatTag} `
   // 唤醒标记：关键词/接续/主动接话各自一句短标记（完整口吻规则在 QQ 线的 CLAUDE.local.md，别在这儿堆）
   const wakeMark = ev.wake?.kind === 'keyword' ? `[关键词:${ev.wake.keyword}] `
-    : ev.wake?.kind === 'followup' ? '[接上条] '
+    : ev.wake?.kind === 'monitor' ? '[消息监测命中:以下是群友的真实消息,按对应规则提示处理] '
+      : ev.wake?.kind === 'followup' ? '[接上条] '
       : ev.wake?.kind === 'proactive' ? (ev.isGroup
         ? '[主动接话候选:没人叫你,群里正聊着;想接就自然接一句,不想接这轮就别调发送工具] '
         : '[私聊主动候选:这是系统发起的联系机会,不是对方发言;不知道对方是否在线,不想说就别调发送工具] ')

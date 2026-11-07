@@ -562,7 +562,7 @@ export function createPacing({ log = console, state, clock = null, random = Math
     if (!key || !ev?.isGroup) return
     if (!proactiveEnabled() || ev.notice || ev._scratch?.notice) return
     const kind = String(ev?.wake?.kind ?? '')
-    if (!['at', 'quote', 'keyword', 'followup'].includes(kind)) return
+    if (!['at', 'quote', 'keyword', 'followup', 'monitor'].includes(kind)) return
     const gid = String(ev.groupId ?? key.replace(/^group:/, ''))
     if (!allowedGroups().has(gid)) return
     const t = timingOf(key)

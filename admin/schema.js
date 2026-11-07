@@ -58,6 +58,7 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6
 const HIDDEN_PLUGIN_FIELDS = {
   'persona-voice': new Set(['splitReplyEnabled', 'splitReplyProbability', 'splitReplyMinLen', 'splitReplyDelayMs', 'splitReplyMaxParts']),
   stickers: new Set(['offerPercent']),
+  'message-monitor': new Set(['rules']), // 规则由专属编辑页管理，不渲染通用输入框
 }
 
 // ============================================================
