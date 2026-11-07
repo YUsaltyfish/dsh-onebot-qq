@@ -115,8 +115,6 @@ export default {
     function clearLineState(chatKey) {
       const st = bot.state?.get?.(chatKey)
       if (!st) return
-      st.followUpUntil = 0
-      st.followUpCache = null
       st.lastContextId = null
       if (st._scratch) delete st._scratch['group-memory:seen']
     }

@@ -593,7 +593,9 @@ export function buildPromptText(ev, opts = {}) {
   // 唤醒标记：关键词/接续/主动接话各自一句短标记（完整口吻规则在 QQ 线的 CLAUDE.local.md，别在这儿堆）
   const wakeMark = ev.wake?.kind === 'keyword' ? `[关键词:${ev.wake.keyword}] `
     : ev.wake?.kind === 'followup' ? '[接上条] '
-      : ev.wake?.kind === 'proactive' ? '[主动接话候选:没人叫你,群里正聊着;想接就自然接一句,不想接这轮就别调发送工具] '
+      : ev.wake?.kind === 'proactive' ? (ev.isGroup
+        ? '[主动接话候选:没人叫你,群里正聊着;想接就自然接一句,不想接这轮就别调发送工具] '
+        : '[私聊主动候选:这是系统发起的联系机会,不是对方发言;不知道对方是否在线,不想说就别调发送工具] ')
         // 连续对话：刚被真人叫过、也回过话；现在只是"要不要补一句"，明确允许这轮什么都不发
         : ev.wake?.kind === 'continuation' ? '[续聊检查:你刚回过话,这是同一段对话的后续;想补一句就发,不想补就什么都别做] '
           : ev.wake?.kind === 'welcome' ? '[入群欢迎轮:这是系统的入群通知,不是群友发言;按下面提示发欢迎语] ' : ''

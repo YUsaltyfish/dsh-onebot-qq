@@ -10,12 +10,13 @@
  *    不在 setup 开头算死。本插件只认实例配置，**没有旧配置文件回落**。
  *
  * 唤醒行为约束（都是线上踩出来的，改之前先看手册 §2 / §4 / §7）：
- *   · 唤醒顺序：**@本机 → 引用本机 → 接续窗口 → 关键词**。@ 优先，因为"@ 了还带正文"是最明确的呼叫。
+ *   · 唤醒顺序：**@本机 → 引用本机 → 关键词**。@ 优先，因为"@ 了还带正文"是最明确的呼叫。
  *   · 判"是不是在叫本机"看**内容**，不看 @ 的是谁（模型侧纪律见 QQ 线指令文件）——
  *     所以这里只做代码能判的：@ 段、被引发送者、唤醒词，不猜语义。
- *   · 纯 @ / 纯呼名 / 只引用但无正文 → **先回一句罐头话（callAck）+ 开接续窗口，不进模型、零 token**
- *     （群线一次调用 ≈1 万 token，不值得为"干嘛呀"花）。但**纯 @ + 带引用**例外：引用本身就是
- *     "我在说这条"，直接按被引内容答，不开窗口。
+ *   · 纯 @ / 纯呼名 / 只引用但无正文 → **先回一句罐头话（callAck）秒回应答，然后照常唤醒**：
+ *     后续正文由内核等待槽（`pacing.merge.waitMs`）并入同一轮，不再有单独的"接续窗口"
+ *     （2026-11-04 改：窗口机制删除，统一由等待槽接住补发的正文）。但**纯 @ + 带引用**例外：
+ *     引用本身就是"我在说这条"，直接按被引内容答，不先应答。
  *   · **纯呼名不参与关键词冷却**：它不拦、也不写冷却时间戳 —— 两处沾一样就会出现
  *     "刚聊完再喊一声 + 补正文 → 整段没人应"。
  *   · 引用反查拿不到发送者 → 当**没叫本机**（宁可漏唤醒，也不越界插话）。
@@ -70,10 +71,6 @@ const configSchema = {
       + '和「群内白名单」的区别：这个限制所有群和私聊，群内白名单只限制某一个群。适合「只给自己和几个朋友用」的场景。',
   },
   groupAtRequired: { type: 'bool', default: true, group: '唤醒', label: '群聊必须被叫才回', hint: '开：群里必须 @ 它或叫到唤醒词才回；关：没人叫也会接话（容易吵，一般保持开）。' },
-  groupFollowUpMs: {
-    type: 'int', default: 20000, unit: '秒', scale: 1000, group: '唤醒', label: '接续窗口',
-    hint: '值按毫秒存（旧配置 40000 = 40 秒）；也认小于 1000 的"秒"值。0 = 关闭接续窗口。',
-  },
   keywordCooldownMs: {
     type: 'int', default: 60000, unit: '秒', scale: 1000, group: '唤醒', label: '关键词冷却',
     hint: '同群命中唤醒词后这段时间内再命中只记日志（防刷屏）；纯呼名不参与冷却。',
@@ -281,30 +278,14 @@ async function ackCall(bot, ev, why) {
 }
 
 /**
- * 开"等同一人补发正文"的窗口（groupFollowUpMs；0 = 关闭）。
- * ⚠️ 挂起时必须把这条消息的**引用/图一起存下来**：常见用法是"引用一张图 + 只 @ 一下"，
- *    补发正文时若丢掉引用，图永远不会被反查/识图（线上踩过）。
+ * 答应一声后照常唤醒（纯 @ / 纯呼名 / 只引用 三种入口共用）。
+ * 2026-11-04 起不再开"接续窗口"：内核等待槽会把等待期内补发的正文并进同一轮；
+ * 5 秒内没人补正文时仍正常开一轮（模型看群上文回答"先发正文再 @"的情况）。
  */
-function openFollowUp(bot, ev, why) {
-  const ms = msOf(effective(bot, 'groupFollowUpMs'))
-  if (ms <= 0) return
-  const st = bot.state?.get?.(ev.chatKey)
-  if (!st) return
-  st.followUpUntil = Date.now() + ms
-  st.followUpCache = {
-    userId: String(ev.sender?.qq ?? ''),
-    replyToId: ev.replyToId ?? null,
-    images: Array.isArray(ev.images) ? ev.images.slice() : [], // 纯呼名时自带的图也别丢
-  }
-  bot.log.debug(`${why}: 等同一人补发内容, 窗口 ${ms}ms${ev.replyToId ? '（带引用, 已挂起）' : ''}`)
-}
-
-/** 答应一声 + 开窗口 + 这条到此为止（不进模型） */
-async function ackAndWait(bot, ev, why) {
+async function ackThenWake(bot, ev, why, wake) {
   await ackCall(bot, ev, why)
-  openFollowUp(bot, ev, why)
-  ev.stopped = true
-  ev.stopReason = `gate-wake:followup(${why})`
+  ev.wake = wake
+  bot.log.debug(`${why}: 已应答, 交给等待槽(${wake.kind})`)
 }
 
 /**
@@ -511,8 +492,8 @@ export default {
       // ① @本机（最明确）
       if (ev.mentionedSelf) {
         if (!hasBody && !ev.replyToId) {
-          // 纯 @(无正文无引用)：先不答，答应一声 + 等同一人补正文
-          return ackAndWait(bot, ev, '纯@(无正文)')
+          // 纯 @(无正文无引用)：先答应一声，再照常唤醒（后续正文由等待槽并进来）
+          return ackThenWake(bot, ev, '纯@(无正文)', { kind: 'at' })
         }
         // 有正文直接答；纯 @ + 带引用也直接答 —— 引用本身就是"我在说这条"，
         // 把被引内容当正文回应（手册 §2.3）
@@ -522,32 +503,18 @@ export default {
 
       // ② 引用本机消息 = 在跟本机说话（哪怕没 @）—— 靠**代码**反查被引发送者，引用别人的不算（不越界）
       if (await isQuotingSelf(bot, ev)) {
-        if (!hasBody) return ackAndWait(bot, ev, '纯引用(无正文)')
+        if (!hasBody) return ackThenWake(bot, ev, '纯引用(无正文)', { kind: 'quote' })
         ev.wake = { kind: 'quote' }
         return
       }
 
-      // ③ 接续窗口：同一人在窗口内补发正文 = "接上条"，**只接一次**（答完就关，不顺延）
-      const st = bot.state?.get?.(ev.chatKey)
-      if (st && st.followUpUntil > Date.now() && String(st.followUpCache?.userId) === String(ev.sender?.qq)) {
-        const cache = st.followUpCache || {}
-        st.followUpUntil = 0
-        st.followUpCache = null
-        // 把"只 @ 那条"里挂起的引用/图并进来（引用图靠它才能被反查/识图）
-        if (cache.replyToId && !ev.replyToId) ev.replyToId = cache.replyToId
-        if (Array.isArray(cache.images) && cache.images.length) ev.images.push(...cache.images)
-        bot.log.debug(`接续上条(同一人补发, 一次性) user=${ev.sender?.qq}`)
-        ev.wake = { kind: 'followup' }
-        return
-      }
-
-      // ④ 关键词（支持人设热读词表；取不到 = 不启用，回落由 persona-voice 负责）
+      // ③ 关键词（支持人设热读词表；取不到 = 不启用，回落由 persona-voice 负责）
       const keyword = matchKeyword(bot, ev)
       if (keyword) {
         // 纯呼名：复用"纯 @"那套（开窗口等补正文），且**在冷却之前**、**不点冷却** ——
         // 否则"刚聊完再喊一声 + 补正文"整段没人应
         if (isNameOnlyCall(ev.text, keyword)) {
-          return ackAndWait(bot, ev, `纯呼名「${keyword}」(不参与冷却)`)
+          return ackThenWake(bot, ev, `纯呼名「${keyword}」(不参与冷却)`, { kind: 'keyword', keyword })
         }
         const scratch = scratchOf(bot, ev.chatKey)
         const cdMs = msOf(effective(bot, 'keywordCooldownMs'))

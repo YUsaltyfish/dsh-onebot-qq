@@ -40,11 +40,11 @@ test('maintenance identity is deny-send / allow-append, ordinary mapped identity
   const sid = 'maintenance-fixture'
   h.kernel.maintSessionIds.add(sid)
   await assert.rejects(tool(h, 'send_message').execute({ target: `group:${GROUP_ID}`, text: 'fixture' }, execOf(sid)), /后台任务只允许/)
-  await tool(h, 'memory_append').execute({ group_id: String(GROUP_ID), points: '- fixture' }, execOf(sid))
+  await tool(h, 'memory_append').execute({ target: `group:${GROUP_ID}`, points: '- fixture' }, execOf(sid))
   assert.equal(sent(), 0)
   assert.equal(appended(), 1)
   const ordinary = await h.kernel.dsh.ensureSession(`group:${GROUP_ID}`)
-  await assert.rejects(tool(h, 'memory_append').execute({ group_id: String(GROUP_ID), points: '- fixture' }, execOf(ordinary)), /只能由后台任务/)
+  await assert.rejects(tool(h, 'memory_append').execute({ target: `group:${GROUP_ID}`, points: '- fixture' }, execOf(ordinary)), /只能由后台任务/)
   assert.equal(appended(), 1)
 })
 

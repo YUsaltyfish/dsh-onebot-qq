@@ -140,8 +140,8 @@ test('WAKE-A @本机+正文 → wake=at，进模型且 prompt 带正文', async 
   assert.ok(prompt.content[0].text.includes('今天天气怎么样'))
 })
 
-test('WAKE-A2/B 纯 @ 无正文 → 罐头话 + 接续窗口；同一人补正文 → [接上条] 进模型', async (t) => {
-  const h = await boot(t)
+test('WAKE-A2/B 纯 @ 无正文 → 罐头话秒回；等待期补的正文并进同一轮', async (t) => {
+  const h = await boot(t, { config: { pacing: { merge: { enabled: true, waitMs: 200 } } } })
   await emitRaw(h.kernel, {
     post_type: 'message',
     message_type: 'group',
@@ -151,14 +151,15 @@ test('WAKE-A2/B 纯 @ 无正文 → 罐头话 + 接续窗口；同一人补正�
     sender: { user_id: MEMBER_QQ, nickname: '群友' },
     message: [{ type: 'at', data: { qq: '999999' } }],
   })
-  assert.equal(h.ctx._prompts.length, 0, '纯 @ 不进模型（零 token）')
   assert.equal(h.sent.length, 1, '立即回一句罐头话')
   assert.ok(h.sent[0].wire.includes('[CQ:reply,id=11]'), '罐头话引用呼叫消息')
+  assert.equal(h.ctx._prompts.length, 0, '等待期内还没进模型')
 
   await emitRaw(h.kernel, memberGroupEvent('今天天气怎么样', { id: 12, qq: MEMBER_QQ }))
-  const prompt = await waitFor(() => h.ctx._prompts[0], { label: '接续窗口内补正文进模型' })
-  assert.ok(prompt.content[0].text.includes('[接上条]'), '接续窗口唤醒带 [接上条]')
-  assert.equal(h.tap.last().wake.kind, 'followup')
+  const prompt = await waitFor(() => h.ctx._prompts[0], { label: '等待期补正文进模型' })
+  assert.ok(prompt.content[0].text.includes('今天天气怎么样'), '补发的正文并进同一轮')
+  const wakeEvent = h.tap.events.find((e) => e.messageId === 11)
+  assert.equal(wakeEvent.wake.kind, 'at', '这一轮的唤醒仍是那条纯 @')
 })
 
 test('WAKE-C 唤醒词+内容一条发完 → keyword 唤醒，不开窗口', async (t) => {

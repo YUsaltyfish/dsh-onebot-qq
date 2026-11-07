@@ -66,7 +66,7 @@ const HIDDEN_PLUGIN_FIELDS = {
  * @typedef {object} ControlDef
  * @property {string} key       面板/白名单键 = raw 配置点路径
  * @property {string} group     控制台页签（首次出现顺序 = 标签页顺序）
- * @property {'bool'|'int'|'float'|'str'|'text'|'enum'|'group'|'info'} type
+ * @property {'bool'|'int'|'float'|'str'|'text'|'enum'|'group'|'qq-list'|'info'} type
  * @property {string} label
  * @property {string} [unit]    面板单位（分钟/秒/%/字/毫秒/次）
  * @property {number} [scale]   面板值 × scale = 存储值（只在读写边界换算）
@@ -147,47 +147,70 @@ export const CORE_CONTROLS = [
       + '0 = 完全不带上文；一般 10~20 够用；要一次性看很多条用 `/history N`，别靠这里顶。',
   },
 
-  // ── 静默合批（连发的几条并成一轮）──────────────────────────
+  // ── 合批等待（私聊合批 / 群聊唤醒各自成轮）──────────────────
   {
-    key: 'pacing.merge.enabled', group: '消息设置', type: 'bool', label: '静默合批（连发的几条并成一轮）', default: true,
-    hint: '同一群里几百毫秒内连着叫它的几条消息并成一轮 —— 省钱、也更像“等别人说完再开口”。',
+    key: 'pacing.merge.enabled', group: '消息设置', type: 'bool', label: '合批等待（等对方说完再答）', default: true,
+    hint: '开：被叫后先等下面这个时间再入站。私聊连发的几条并成一轮（每来一条重新计时）；'
+      + '群聊里唤醒消息各自成轮，等待期内别人的聊天/补发的正文并进当前这轮。关：被叫立即入站。',
   },
   {
-    key: 'pacing.merge.windowMs', group: '消息设置', type: 'int', label: '合批等待（冷清时）', unit: '毫秒',
-    min: 0, max: 10000, step: 100, default: 2000,
-    hint: '上一条离得比较久（不是连发）时，单条只等这么久就发车。',
-  },
-  {
-    key: 'pacing.merge.windowActiveMs', group: '消息设置', type: 'int', label: '合批等待（对话进行中）', unit: '毫秒',
-    min: 0, max: 10000, step: 100, default: 4000,
-    hint: '上一条消息来得近（正在聊）时多等一会儿，把 3~5 秒内的几条收成一轮再答。',
-  },
-  {
-    key: 'pacing.merge.activeGapMs', group: '消息设置', type: 'int', label: '对话判定（距上一条多久算在聊）', unit: '毫秒',
-    min: 1000, max: 120000, step: 500, default: 15000,
-    hint: '上一条离这条 ≤ 本值 → 用「对话进行中」的等待窗口；否则用「冷清时」。',
-  },
-  {
-    key: 'pacing.merge.maxWaitMs', group: '消息设置', type: 'int', label: '合批最长等待', unit: '毫秒',
-    min: 0, max: 15000, step: 100, default: 6000,
-    hint: '刷屏时窗口会被不断重置，这是硬上限，到点必须发车。',
-  },
-  {
-    key: 'pacing.merge.skipIfSlowMs', group: '消息设置', type: 'int', label: '慢群不等阈值', unit: '毫秒',
-    min: 0, max: 600000, step: 1000, default: 30000,
-    hint: '距上一条群消息超过这个间隔 = 不是连发，直接回答、不进合批。',
+    key: 'pacing.merge.waitMs', group: '消息设置', type: 'int', label: '合并等待时间', unit: '秒', scale: 1000,
+    min: 0, max: 10, step: 1, default: 5000,
+    hint: '被叫后等几秒再进模型（按秒填）。私聊：安静这么久才答，期间的新消息并进来；'
+      + '群聊：唤醒消息等这么久，期间非唤醒消息并入当前轮。机器人正在回答时新唤醒直接排队、不等待。',
   },
 
   // ── 主动接话：没人叫也偶尔接一句（高级项默认折叠）─────────────
   // 频率口径只有一种：实际间隔 = max(最小间隔, 60 分钟 ÷ 每小时次数)。
   {
     key: 'pacing.reply.enabled', group: '主动接话', type: 'bool', label: '允许主动接话（没人叫也偶尔接一句）', default: false,
-    hint: '关掉后只在被叫时回话。开 = 到点看群里聊得怎么样，合适就接一句；每个群还要在「群聊」页勾「允许主动接话」，两处都开才生效。',
+    hint: '群聊和私聊共用总开关，关掉后只在被叫时回话。群聊还要在「群聊」页勾「允许主动接话」；私聊只对下面明确填写的 QQ 生效，名单默认空。',
+  },
+  {
+    key: 'pacing.reply.quietHours.enabled', group: '主动接话', section: '免打扰', type: 'bool', label: '启用主动接话免打扰', default: true,
+    hint: '免打扰时段暂停群聊主动接话、群聊续聊和私聊主动找话；被叫后的正常回复不受影响。默认按上海时间 23:00–08:00 免打扰。',
+  },
+  {
+    key: 'pacing.reply.quietHours.start', group: '主动接话', section: '免打扰', type: 'str', label: '免打扰开始（HH:mm）', default: '23:00',
+    hint: '24 小时制 HH:mm，例如 23:00；按下面的 IANA 时区计算，支持跨午夜。开始与结束相同表示全天免打扰。',
+  },
+  {
+    key: 'pacing.reply.quietHours.end', group: '主动接话', section: '免打扰', type: 'str', label: '免打扰结束（HH:mm）', default: '08:00',
+    hint: '24 小时制 HH:mm，例如 08:00；到结束时间后才恢复考虑主动接话，不保证立即发送。开始与结束相同表示全天免打扰。',
+  },
+  {
+    key: 'pacing.reply.quietHours.timeZone', group: '主动接话', section: '免打扰', type: 'str', label: '免打扰时区（IANA）', default: 'Asia/Shanghai',
+    hint: '填写 IANA 时区名称，例如 Asia/Shanghai、Asia/Tokyo 或 America/New_York；不依赖服务器或浏览器本地时区。',
+  },
+  {
+    key: 'pacing.reply.privateChats', group: '主动接话', type: 'qq-list', label: '允许主动找话的私聊 QQ',
+    default: [],
+    hint: '输入一个 QQ 后点＋或按回车添加，点标签×移除；名单为空就不主动发私聊，不会自动加入主人或所有好友。加删后保存，已有名单保持不变。',
+  },
+  {
+    key: 'pacing.reply.privatePolicy.coldSilenceMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '私聊安静多久再找话', unit: '小时',
+    scale: 3600000, min: 1, max: 168, step: 1, default: 14400000,
+    hint: '私聊安静这么久后才考虑主动找话，默认 4 小时；仍受总开关、私聊名单和最小间隔限制。',
+  },
+  {
+    key: 'pacing.reply.privatePolicy.minGapMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '两次私聊找话至少间隔', unit: '小时',
+    scale: 3600000, min: 1, max: 168, step: 1, default: 14400000,
+    hint: '每个私聊的主动机会之间至少隔这么久，默认 4 小时；还共用「每小时最多主动接话」带来的 60÷次数 间隔下限，该次数设为 0 时群聊、私聊都关闭。',
+  },
+  {
+    key: 'pacing.reply.privatePolicy.unansweredGapMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '对方没回时至少等多久', unit: '小时',
+    scale: 3600000, min: 1, max: 168, step: 1, default: 43200000,
+    hint: '主动发出后对方一直没回，下次至少等这么久（默认 12 小时）；连续没回复会继续拉长间隔，避免催促。',
+  },
+  {
+    key: 'pacing.reply.privatePolicy.maxBackoffMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '没回复时最长退避间隔', unit: '小时',
+    scale: 3600000, min: 1, max: 720, step: 1, default: 86400000,
+    hint: '连续没回复时逐步放慢主动找话，退避间隔最多拉长到本值（默认 24 小时）；对方重新说话后恢复普通节奏。',
   },
   {
     key: 'pacing.reply.hourlyMax', group: '主动接话', type: 'int', label: '每小时最多主动接话', unit: '次',
     min: 0, max: 10, step: 1, default: 6,
-    hint: '硬上限（不是每条消息的概率）。调大后两次间隔会自动按 60÷次数 收紧；0 = 关。',
+    hint: '硬上限（不是每条消息的概率）。群聊、私聊共用 60÷次数 的间隔下限，私聊还受小时级间隔限制；0 = 群聊、私聊主动接话都关闭。',
   },
   {
     key: 'pacing.reply.minGapMs', group: '主动接话', type: 'int', label: '两次机会至少间隔', unit: '分钟',
@@ -195,9 +218,9 @@ export const CORE_CONTROLS = [
     hint: '两次“可以考虑开口”之间至少隔这么久；实际间隔 = max(本值, 60÷每小时次数)。',
   },
   {
-    key: 'pacing.reply.silenceEnabled', group: '主动接话', type: 'bool', label: '群冷场时也主动找话', default: true,
-    hint: '开 = 群里长时间没人说话也会主动起个话头（按「安静多久算冷场」判定）；'
-      + '关 = 不再定时找话，只有群里出现新消息、且语境合适时才可能接一句。',
+    key: 'pacing.reply.silenceEnabled', group: '主动接话', type: 'bool', label: '群聊、私聊冷场时也主动找话', default: true,
+    hint: '群聊、私聊共用冷场开关，各自按冷场时间判定。开 = 长时间没人说话也可主动找话；'
+      + '关 = 私聊主动找话暂停，群聊不再定时找话，但群里出现新消息、且语境合适时仍可能接一句。',
   },
   {
     key: 'pacing.reply.coldSilenceMs', group: '主动接话', type: 'int', label: '群里安静多久算冷场', unit: '分钟',
@@ -335,14 +358,14 @@ export const CORE_CONTROLS = [
 ]
 
 // ============================================================
-// 注册表 ②：动作按钮（需要 ops 的动作未配置时返回“本机未配置”，不是 500）
+// 注册表 ②：内置动作按钮（危险维护动作先预演，再带凭据确认）
 // ============================================================
 
 /** @typedef {{id:string,group:string,label:string,hint?:string,confirm?:{title?:string,okLabel?:string},hidden?:boolean}} ActionDef */
 export const ACTIONS = [
   {
     id: 'selfcheck', group: '运维', label: '跑离线自检',
-    hint: '调用本机 ops 提供的离线自检（不碰 QQ）；未配置运维能力时点了会提示“本机未配置”。',
+    hint: '检查实例配置、工具、人设与目录权限；不调用网络或模型，不写报告、不创建探针文件。',
   },
   {
     id: 'clear-qq-sessions', group: '危险操作', label: '🧹 一键清空 QQ 对话',
@@ -351,13 +374,13 @@ export const ACTIONS = [
   },
   {
     id: 'cleanup-tmp', group: '运维', label: '🧽 清理临时文件',
-    hint: '调用本机 ops 的清理能力（默认先预演，确认后才真删）。',
+    hint: '只清理插件自有临时目录中的过期临时文件；先预演，确认携带本次预演凭据后才删除。',
     confirm: { title: '⚠️ 确认清理临时文件？', okLabel: '确认清理' },
   },
   {
-    id: 'dedup-baks', group: '运维', label: '🧹 备份代际去重',
-    hint: '调用本机 ops 的备份去重能力（默认先预演，确认后才真删）。',
-    confirm: { title: '⚠️ 确认删掉旧备份代？', okLabel: '确认去重' },
+    id: 'dedup-baks', group: '运维', label: '🧹 配置备份去重',
+    hint: '仅去除实例配置的重复备份（按内容比较，保留不同版本）；先预演，确认携带本次预演凭据后才删除。',
+    confirm: { title: '⚠️ 确认删掉重复配置备份？', okLabel: '确认去重' },
   },
 
   // 新手向导 / 连接自检（契约 §3.1）
@@ -583,6 +606,18 @@ export function coercePanel(entry, raw) {
   if (entry.type === 'str' || entry.type === 'text') {
     const s = raw == null ? '' : String(raw)
     if (/[\u0000]/.test(s)) throw new Error(`${key} 不能包含空字符`)
+    // 这里只校验写值格式；时段是否生效由 pacing 的 quietHoursStatus 统一判断。
+    if (/^pacing\.reply\.quietHours\.(start|end)$/.test(key) && !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(s)) {
+      throw new Error(`${key} 需要 HH:mm 格式（00:00–23:59）`)
+    }
+    if (key === 'pacing.reply.quietHours.timeZone') {
+      try {
+        if (!s || /^[+-]/.test(s)) throw new Error('not an IANA zone')
+        new Intl.DateTimeFormat('en', { timeZone: s }).format(0)
+      } catch {
+        throw new Error(`${key} 需要有效的 IANA 时区，例如 Asia/Shanghai`)
+      }
+    }
     return s
   }
   if (entry.type === 'enum') {
@@ -590,6 +625,19 @@ export function coercePanel(entry, raw) {
     const hit = (entry.options || []).some((o) => String(o && o.value !== undefined ? o.value : o) === v)
     if (!hit) throw new Error(`${key} 不在可选项里：${v}`)
     return v
+  }
+  if (entry.type === 'qq-list') {
+    // 私聊名单使用数字 QQ 数组；不沿用 group 的字符串数组或通配符语义。
+    if (!Array.isArray(raw) && typeof raw !== 'string') throw new Error(`${key} 需要 QQ 数组或逗号/空白分隔文本`)
+    const arr = Array.isArray(raw) ? raw : raw.trim().split(/[,，\s]+/).filter(Boolean)
+    const out = []
+    for (const x of arr) {
+      const s = typeof x === 'number' || typeof x === 'string' ? String(x).trim() : ''
+      const n = Number(s)
+      if (!/^\d{1,12}$/.test(s) || !Number.isSafeInteger(n) || n <= 0) throw new Error(`${key} 只能填写 1–12 位正整数 QQ 号`)
+      if (!out.includes(n)) out.push(n)
+    }
+    return out
   }
   if (entry.type === 'group') {
     // 群号列表这类：接受数组或逗号/空白分隔字符串 → 统一成字符串数组（去空、去重）

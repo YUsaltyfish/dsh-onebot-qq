@@ -106,12 +106,12 @@ test('2. 唯一出站口 deliver：先抽 [AT:] 再六项脱敏；主人私聊�
   assert.equal(r4.mode, 'forward-fallback', '卡片失败降级普通分段')
 })
 
-test('3. 入站协调：黑名单拦截不写留档；纯 @ callAck + 接续窗口；/help 零 token', async (t) => {
+test('3. 入站协调：黑名单拦截不写留档；纯 @ 先应答再照常开一轮；/help 零 token', async (t) => {
   const h = await bootKernel({
     config: {
       pacing: { merge: { enabled: false } },
       pluginConfig: {
-        'gate-wake': { adminQq: ADMIN_QQ, groupUserBlocklist: `${GROUP_ID}:${MEMBER_QQ}`, groupFollowUpMs: 5000 },
+        'gate-wake': { adminQq: ADMIN_QQ, groupUserBlocklist: `${GROUP_ID}:${MEMBER_QQ}` },
         'persona-voice': { splitReplyEnabled: false },
       },
     },
@@ -129,6 +129,8 @@ test('3. 入站协调：黑名单拦截不写留档；纯 @ callAck + 接续窗�
   })
   assert.equal(h.ctx._prompts.length, 0, '黑名单用户不触发模型')
 
+  // 纯 @：先回罐头话（零 token 秒回），再照常开一轮（2026-11-04 起「接续窗口」删除，
+  // 改由等待槽接住补发的正文；5 秒没人补正文也照常开一轮，模型看群上文回答"先发正文再 @"）
   await emitRaw(h.kernel, {
     post_type: 'message',
     message_type: 'group',
@@ -139,20 +141,8 @@ test('3. 入站协调：黑名单拦截不写留档；纯 @ callAck + 接续窗�
     message: [{ type: 'at', data: { qq: '999999' } }],
   })
   await waitFor(() => h.sent.length === 1, { label: '纯 @ 罐头话' })
-  assert.equal(h.ctx._prompts.length, 0, '纯 @ 不进模型（零 token）')
   assert.ok(h.sent[0].wire.includes('[CQ:reply,id=11]'), 'callAck 引用呼叫消息')
-
-  await emitRaw(h.kernel, {
-    post_type: 'message',
-    message_type: 'group',
-    group_id: GROUP_ID,
-    user_id: 50002,
-    message_id: 12,
-    sender: { user_id: 50002, nickname: '路人甲' },
-    message: [{ type: 'text', data: { text: '今天天气怎么样' } }],
-  })
-  const prompt = await waitFor(() => h.ctx._prompts[0], { label: '接续窗口补正文进模型' })
-  assert.ok(prompt.content[0].text.includes('[接上条]'), '接续窗口 prompt 带 [接上条]')
+  await waitFor(() => h.ctx._prompts.length >= 1, { label: '纯 @ 照常开一轮' })
 
   // /help 不进模型、经 deliver 出站
   const beforePrompts = h.ctx._prompts.length

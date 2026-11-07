@@ -109,10 +109,14 @@ function withTimeout(promise, ms) {
 }
 
 /** 写一个探针文件（目录可写检查）。成功返回 ''，失败返回原因。 */
-function probeWritable(dir) {
+function probeWritable(dir, offline = false) {
   const d = toStr(dir)
   if (!d) return '目录路径为空'
   try {
+    if (offline) {
+      fs.accessSync(d, fs.constants.R_OK | fs.constants.W_OK)
+      return ''
+    }
     ensureDir(d)
     const file = path.join(d, '.diagnose-tmp')
     fs.writeFileSync(file, 'ok')
@@ -223,10 +227,10 @@ async function checkAgentPreset(kernel, runtime) {
   )
 }
 
-function checkTools(kernel, runtime) {
+function checkTools(kernel, runtime, offline = false) {
   const prefix = toStr(runtime?.toolPrefix) || 'mcp__qq__'
   let names = []
-  const status = safe(() => (typeof kernel?.status === 'function' ? kernel.status() : null), null)
+  const status = !offline ? safe(() => (typeof kernel?.status === 'function' ? kernel.status() : null), null) : null
   if (status && Array.isArray(status.tools)) names = status.tools.map(String)
   else if (kernel?.toolDefs instanceof Map) names = [...kernel.toolDefs.keys()].map((k) => `${prefix}${k}`)
   else if (Array.isArray(kernel?.tools)) names = kernel.tools.map(String)
@@ -245,7 +249,8 @@ function checkTools(kernel, runtime) {
   )
 }
 
-async function checkOneBot(kernel, runtime) {
+async function checkOneBot(kernel, runtime, offline = false) {
+  if (offline) return makeCheck('onebot', 'OneBot 连接', false, true, '离线自检：跳过网络探测（不代表连接已验证）')
   const wsUrl = sanitizeUrl(runtime?.onebot?.wsUrl)
   const httpUrl = sanitizeUrl(runtime?.onebot?.httpUrl)
   const where = [wsUrl ? `WS ${wsUrl}` : '', httpUrl ? `HTTP ${httpUrl}` : ''].filter(Boolean).join('；')
@@ -299,7 +304,7 @@ function checkPersona(kernel) {
   return makeCheck('persona', '人设就绪', true, true, `投递文件齐全（${files.join(' + ')}）；${dirInfo}`, '')
 }
 
-function checkDirs(kernel) {
+function checkDirs(kernel, offline = false) {
   const paths = safe(() => kernel?.paths, null) || {}
   const runtime = safe(() => kernel?.runtime, null) || {}
   const dataDir = toStr(paths.dataDir) || toStr(kernel?.dataDir)
@@ -324,13 +329,15 @@ function checkDirs(kernel) {
   }
   const failures = []
   for (const [label, dir] of dirs) {
-    const err = probeWritable(dir)
+    const err = probeWritable(dir, offline)
     if (err) failures.push(`${label}不可写（${toStr(dir)}）：${err}`)
   }
   if (failures.length) {
     return makeCheck('dirs', '目录可写', true, false, failures.join('；'), '检查目录权限/磁盘空间；Windows 可用 icacls 授权，Linux 看 owner/mode；或把 dataDir 换到可写目录')
   }
-  return makeCheck('dirs', '目录可写', true, true, `已探测 ${dirs.length} 个目录（写入 .diagnose-tmp 后已删除）`, '')
+  return makeCheck('dirs', '目录可写', true, true, offline
+    ? `已检查 ${dirs.length} 个目录的读写权限（access；未创建目录或写入探针）`
+    : `已探测 ${dirs.length} 个目录（写入 .diagnose-tmp 后已删除）`, '')
 }
 
 function checkImagegen(kernel) {
@@ -464,7 +471,7 @@ function renderReport({ checks, summary, generatedAt, version, reportPath, write
  * @param {number|Date} [opts.now] 固定时间（测试用）
  * @returns {Promise<{ok:true, generatedAt:string, checks:object[], summary:{pass:number,fail:number,warn:number,text:string}, report:string, reportPath:string, fixPrompt:string}>}
  */
-export async function runDiagnostics({ kernel = {}, store = null, log = console, now = Date.now() } = {}) {
+export async function runDiagnostics({ kernel = {}, store = null, log = console, now = Date.now(), offline = false, persist = true } = {}) {
   const ms = now instanceof Date ? now.getTime() : (Number(now) || Date.now())
   const generatedAt = formatTime(ms)
   const runtime = safe(() => kernel?.runtime, null) || {}
@@ -479,12 +486,14 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
     checks.push(checkAdminQq(raw))
     // ② DSH / preset / 工具
     checks.push(checkDsh(kernel))
-    checks.push(await checkAgentPreset(kernel, runtime))
-    checks.push(checkTools(kernel, runtime))
+    checks.push(offline
+      ? await checkAgentPreset({}, runtime) // 离线只看配置，不调用宿主校验回调。
+      : await checkAgentPreset(kernel, runtime))
+    checks.push(checkTools(kernel, runtime, offline))
     // ③ OneBot 连接 / 人设 / 目录
-    checks.push(await checkOneBot(kernel, runtime))
+    checks.push(await checkOneBot(kernel, runtime, offline))
     checks.push(checkPersona(kernel))
-    checks.push(checkDirs(kernel))
+    checks.push(checkDirs(kernel, offline))
     // ④ 可选能力 + 运行信息
     checks.push(checkImagegen(kernel))
     checks.push(checkLinkParser(kernel))
@@ -508,7 +517,7 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
   const dataDir = toStr(paths.dataDir) || toStr(kernel?.dataDir) || toStr(safe(() => path.dirname(toStr(store?.configPath)), ''))
   const configPath = toStr(kernel?.configPath) || toStr(safe(() => store?.configPath, ''))
   const reportsDir = dataDir ? path.join(dataDir, 'reports') : ''
-  let reportPath = reportsDir ? path.join(reportsDir, `diagnose-${fileStamp(ms)}.md`) : ''
+  let reportPath = persist && reportsDir ? path.join(reportsDir, `diagnose-${fileStamp(ms)}.md`) : ''
   let writeError = ''
 
   let report = renderReport({ checks, summary, generatedAt, version, reportPath, writeError, dataDir, configPath })
@@ -522,16 +531,16 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
       report = renderReport({ checks, summary, generatedAt, version, reportPath: '', writeError, dataDir, configPath })
       try { log?.warn?.(`[诊断] 报告落盘失败：${writeError}`) } catch { /* ignore */ }
     }
-  } else {
+  } else if (persist) {
     writeError = '数据目录路径不可用'
     report = renderReport({ checks, summary, generatedAt, version, reportPath: '', writeError, dataDir, configPath })
   }
 
-  const fixPrompt = reportPath
+  const fixPrompt = !persist ? '离线自检未写入报告；需要完整运维报告时请运行「一键诊断 / 导出运维报告」。' : reportPath
     ? `请阅读 \`${reportPath}\`，按「建议」逐项修复 dsh-onebot-qq 的配置/环境；需要改配置文件时先备份；不要把 token/API Key 回显到聊天里；改完按报告末尾的复检命令再跑一次诊断。`
     : '（报告未能落盘）请让控制台重新执行「🩺 一键诊断 / 导出运维报告」，然后把报告正文贴给 DSH，让它按「建议」逐项修复 dsh-onebot-qq 的配置/环境；改前先备份，不要把 token/API Key 回显到聊天里。'
 
-  try { log?.info?.(`[诊断] ${summary.text}${reportPath ? `；报告：${reportPath}` : '；报告落盘失败'}`) } catch { /* ignore */ }
+  try { log?.info?.(`[诊断] ${summary.text}${reportPath ? `；报告：${reportPath}` : persist ? '；报告落盘失败' : '；未写报告'}`) } catch { /* ignore */ }
 
   return { ok: true, generatedAt, checks, summary, report, reportPath, fixPrompt }
 }

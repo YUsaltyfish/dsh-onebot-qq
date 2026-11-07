@@ -22,7 +22,7 @@ test('命令分发统一检查扩展权限：普通成员拒绝、主人放行�
 })
 
 test('卸载丢弃合批，不提交新会话或模型任务', async () => {
-  const h = await bootKernel({ config: { pacing: { merge: { enabled: true, windowMs: 30, windowActiveMs: 30 } } } })
+  const h = await bootKernel({ config: { pacing: { merge: { enabled: true, waitMs: 30 } } } })
   await emitRaw(h.kernel, groupAtEvent({ text: '待合批', messageId: 101 }))
   assert.equal(h.ctx._prompts.length, 0)
   h.dispose()
@@ -73,7 +73,7 @@ test('建会话等待期间插话也计入本轮引用', async (t) => {
 })
 
 test('管线异步等待期间卸载：恢复后不重新创建合批定时器', async () => {
-  const h = await bootKernel({ config: { pacing: { merge: { enabled: true, windowMs: 30 } } } })
+  const h = await bootKernel({ config: { pacing: { merge: { enabled: true, waitMs: 30 } } } })
   let resume
   h.kernel.pipeline.use('before-turn', async () => { await new Promise((resolve) => { resume = resolve }) }, { order: 999 })
   let submits = 0

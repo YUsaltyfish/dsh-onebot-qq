@@ -25,6 +25,7 @@ function setup({ enabled = true, bonus = 1.5, groups = { 100: true }, cont = {} 
   p.apply({
     reply: {
       enabled: true,
+      quietHours: { enabled: false }, // 本文件仅测试续聊，不依赖运行时的昼夜
       groups,
       sensitivity: 0.45,
       continuation: {

@@ -7,15 +7,15 @@
  *   set     写一个白名单配置键（热生效）
  *   module  子插件启停（写 pluginConfig.<id>.enabled）
  *   group   群管控：ignore / allowlist / blocklist / keywords / spont / welcome 的 add/remove/toggle/ensure
- *   memory  群记忆：list / read / save / config / setcfg / refresh
+ *   memory  群记忆：list / read / save / delete / config / setcfg / refresh
  *   persona 人设：list / switch（platform/persona-ref.js，跨平台软链→复制降级）
  *   action  动作：reply-preset / reset-session / welcome-images / welcome-test / clear-qq-sessions
  *           + 新手引导（onebot-check / onebot-reconnect / imagegen-check）
  *           + 运维诊断（diagnose → admin/diagnostics.js，生成脱敏报告）
- *           + 运维动作（selfcheck / cleanup-tmp / dedup-baks）→ ops provider，没有则“本机未配置”
+ *           + 内置运维（selfcheck / cleanup-tmp / dedup-baks），清理必须持有预演凭据
  *
  * 纪律：
- *   · **不 spawn 任何系统命令**、不读包外私有路径；运维能力全走 ops provider；
+ *   · **不 spawn 任何系统命令**、不加载站点私有扩展；运维能力均为内置实现；
  *   · 所有业务失败返回 `{ok:false,error:"人话"}`（不 throw —— RPC host 直接把它塞进 value 信封）；
  *   · 写配置只经 admin/store.js；文件只经 platform 的路径/原子写工具。
  */
@@ -33,7 +33,6 @@ import {
   ACTIONS, GROUP_PATHS, SECRET_MASK, allControls, collectModules, collectSchema, findControl,
   getPath, pluginDefs, readValue, setPath, writeValue,
 } from './schema.js'
-import { hasOps } from '../ops/provider.js'
 
 /** 8 个端点名（host 的未知端点报错信息也用它）。 */
 export const ENDPOINTS = ['schema', 'status', 'set', 'module', 'group', 'memory', 'persona', 'action']
@@ -81,18 +80,6 @@ function withTimeout(promise, ms) {
     if (typeof timer.unref === 'function') timer.unref()
   })
   return Promise.race([Promise.resolve(promise), timeout]).finally(() => { if (timer) clearTimeout(timer) })
-}
-
-/** 服务探活结果归一：支持 `{服务名: 'active'}` 与单服务 `{unit, state}` 两种 ops 返回。 */
-function normalizeServiceProbe(raw) {
-  if (!raw || typeof raw !== 'object') return null
-  if (typeof raw.unit === 'string' && raw.state !== undefined) return { [raw.unit]: String(raw.state) }
-  const map = {}
-  for (const [name, value] of Object.entries(raw)) {
-    if (typeof value === 'string') map[name] = value
-    else if (value && typeof value === 'object' && value.state !== undefined) map[name] = String(value.state)
-  }
-  return Object.keys(map).length ? map : null
 }
 
 /** 文件大小（拿不到 = 0）。 */
@@ -262,13 +249,12 @@ function listWelcomeImages(dirRaw, limit = 200) {
 
 /**
  * 建 8 端点控制器。
- * @param {{kernel?:object, configPath?:string, dataDir?:string, log?:object, ops?:object}} opts
- * @returns {{handle:(endpoint:string,payload?:object)=>Promise<object>, setOps:(ops:object)=>void,
+ * @param {{kernel?:object, configPath?:string, dataDir?:string, log?:object}} opts
+ * @returns {{handle:(endpoint:string,payload?:object)=>Promise<object>,
  *            store:object, configPath:string, endpoints:string[], schema:Function, status:Function}}
  */
-export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '', log = console, ops = null } = {}) {
+export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '', log = console } = {}) {
   const store = createConfigStore({ kernel, configPath, dataDir, log })
-  let opsRef = ops || null
 
   const warn = (m) => { try { log?.warn?.(`[控制台] ${m}`) } catch { /* ignore */ } }
 
@@ -561,7 +547,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const welcome = welcomeStatus(raw, rt)
     const dshSessions = Number(dshHealth.sessions ?? dshHealth.follows ?? lines.mapped) || 0
 
-    const services = hasOps(opsRef, 'systemdProbe') ? normalizeServiceProbe(await opsRef.systemdProbe()) : null
+    const services = null // 通用插件不探测或捏造宿主系统服务。
 
     // 新手引导 / 连接状态（契约 §3.2）：路径、配置完成度、OneBot 连接、生图（key 永不回显）
     const paths = pathsOf()
@@ -876,6 +862,9 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
   // ── memory（群记忆）──────────────────────────────────────────
   const MEMORY_SECTIONS = ['## 唤醒与对话风格', '## 群里的人', '## 其它']
+  /** 私聊记忆沿用同三个小节，但人物节叫「对方与提到的人」（与积累器一致）。 */
+  const PRIVATE_SECTIONS = ['## 唤醒与对话风格', '## 对方与提到的人', '## 其它']
+  const sectionsOf = (kind) => (kind === 'private' ? PRIVATE_SECTIONS : MEMORY_SECTIONS)
   const gmCfg = () => pluginCfgRuntime('group-memory')
   /** 单篇读取上限（字节）：控制台保存也按它限制，避免“保存成功但模型读不到尾巴”。 */
   const memoryMaxBytes = () => Math.max(1000, Number(gmCfg().maxBytes) || 24000)
@@ -885,13 +874,16 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const iso = new Date().toISOString().replace(/[-:T.]/g, '')
     return `${iso.slice(0, 8)}-${iso.slice(8, 14)}`
   }
-  /** 只留某群最近 keep 份（积累器 `<id>-YYYYMMDD-HHmmss[-n].md` + 控制台 `<id>-...-manual.md` 一起算）。 */
-  function pruneRevisionsFor(id, keep) {
+  /** 历史版本文件名前缀（与插件一致：群 `<群号>`，私聊 `private_<QQ号>`）。 */
+  const revBaseOf = (line) => (line.kind === 'private' ? `private_${line.id}` : String(line.id))
+
+  /** 只留某会话最近 keep 份（积累器 `<前缀>-YYYYMMDD-HHmmss[-n].md` + 控制台 `<前缀>-...-manual.md` 一起算）。 */
+  function pruneRevisionsFor(line, keep) {
     if (keep <= 0) return 0
     const revDir = path.join(memoryDir(), '.revisions')
     let names = []
     try { names = fs.readdirSync(revDir) } catch { return 0 }
-    const re = new RegExp(`^${id}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+    const re = new RegExp(`^${revBaseOf(line)}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
     const entries = names.filter((n) => re.test(n))
       .map((n) => ({ n, at: (() => { try { return fs.statSync(path.join(revDir, n)).mtimeMs } catch { return 0 } })() }))
       .sort((a, b) => a.at - b.at || a.n.localeCompare(b.n))
@@ -910,33 +902,82 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     return resolveDataPath(rawDir, dataDir || kernel?.dataDir || rt?.dataDir || '')
   }
 
-  function memFile(gid) {
-    const id = String(gid == null ? '' : gid).trim()
-    if (!/^\d{4,12}$/.test(id)) throw new Error(`群号不合法：${JSON.stringify(gid)}`)
-    const file = path.join(memoryDir(), `${id}.md`)
+  /** 会话标识：`group:<群号>` / `private:<QQ号>`；兼容旧 payload.group_id。 */
+  function memChatOf(payload = {}) {
+    let chat = toStr(payload.chat)
+    if (!chat && payload.group_id != null) chat = `group:${toStr(payload.group_id)}`
+    const m = /^(group|private):(\d{4,12})$/.exec(chat)
+    if (!m) throw new Error(`会话不合法：${JSON.stringify(payload.chat || payload.group_id)}（形如 group:123456 / private:213445357）`)
+    const kind = m[1]
+    const id = m[2]
+    const file = kind === 'private'
+      ? path.join(memoryDir(), 'private', `${id}.md`)
+      : path.join(memoryDir(), `${id}.md`)
     if (!isInsidePath(memoryDir(), file)) throw new Error('记忆文件路径越界')
-    return { id, file }
+    return { chat, kind, id, file }
   }
 
-  function memInfo(gid) {
-    const { id, file } = memFile(gid)
+  function memInfo(line) {
+    const { chat, kind, id, file } = line
     try {
       const st = fs.statSync(file)
       const text = fs.readFileSync(file, 'utf8')
       return {
-        group_id: id, exists: true, bytes: st.size,
+        chat, kind, id,
+        ...(kind === 'group' ? { group_id: id } : { private_id: id }),
+        exists: true, bytes: st.size,
         mtime: new Date(st.mtimeMs).toISOString(),
         mtimeMs: st.mtimeMs,
         bullets: text.split(/\r?\n/).filter((l) => l.startsWith('- ')).length,
       }
     } catch {
-      return { group_id: id, exists: false, bytes: 0, mtime: '', bullets: 0 }
+      return {
+        chat, kind, id,
+        ...(kind === 'group' ? { group_id: id } : { private_id: id }),
+        exists: false, bytes: 0, mtime: '', bullets: 0,
+      }
     }
+  }
+
+  /** 私聊记忆涉及哪些 QQ：聊天留档 private_*.jsonl ∪ <dir>/private/*.md。 */
+  function memoryPrivateIds() {
+    const ids = new Set()
+    const pushName = (n) => { const m = /^(\d{4,12})/.exec(n); if (m) ids.add(m[1]) }
+    try {
+      for (const name of fs.readdirSync(archiveDirNow())) if (name.startsWith('private_') && name.includes('.jsonl')) pushName(name.slice('private_'.length))
+    } catch { /* 目录还没建 */ }
+    try {
+      for (const name of fs.readdirSync(path.join(memoryDir(), 'private'))) if (name.endsWith('.md')) pushName(name)
+    } catch { /* 目录还没建 */ }
+    return [...ids].sort((a, b) => Number(a) - Number(b))
+  }
+
+  /** 私聊对象的显示名：取留档里最近一条带昵称的入站消息（失败就空，前端回落 QQ 号）。 */
+  function memoryPrivateName(id) {
+    try {
+      const file = path.join(archiveDirNow(), `private_${id}.jsonl`)
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n')
+      for (let i = lines.length - 1; i >= Math.max(0, lines.length - 80); i -= 1) {
+        let row
+        try { row = JSON.parse(lines[i]) } catch { continue }
+        const nick = toStr(row?.sender?.nickname || row?.sender?.card || row?.sender?.name)
+        if (nick && !/^\d+$/.test(nick)) return nick
+      }
+    } catch { /* 没留档 / 读失败 */ }
+    return ''
+  }
+
+  function archiveDirNow() {
+    const rt = runtimeOf()
+    const resolved = resolvedPathOf(rt?.archive?.dir)
+    if (resolved) return resolved
+    const rawDir = String(getPath(store.read(), ['archive', 'dir']) || 'logs/qq_chat')
+    return resolveDataPath(rawDir, dataDir || kernel?.dataDir || rt?.dataDir || '')
   }
 
   async function memoryGroupIds(onebotGroupsIn) {
     // 口径（与现网 group-memory 的 discover_groups 一致）：有群线会话的群 ∪ 唤醒词数字键 ∪ 已有文件。
-    // ⚠️ 唤醒词键可能是 1–3 位/13+ 位纯数字（不是群号）：必须过滤成 4–12 位，否则 memFile 抛错会整页挂掉。
+    // ⚠️ 唤醒词键可能是 1–3 位/13+ 位纯数字（不是群号）：必须过滤成 4–12 位，否则会话解析抛错会整页挂掉。
     const ids = new Set()
     for (const gid of (parseKeywordMap(pluginCfg(store.read(), 'gate-wake').keywords).keys())) {
       if (/^\d{4,12}$/.test(gid)) ids.add(gid)
@@ -954,14 +995,13 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     return [...ids].sort((a, b) => Number(a) - Number(b))
   }
 
-  /** 群记忆自动积累的现状：优先内置积累器（插件自带定时器），否则退回 ops provider。 */
+  /** 群记忆自动积累只由内置积累器（插件自带定时器）提供。 */
   function memoryAccumulateStatus() {
     const fn = kernel?.shared?.memoryAccumulateStatus
     if (typeof fn === 'function') {
       const st = safe(() => fn(), null)
       if (st) return { source: 'builtin', ...st }
     }
-    if (hasOps(opsRef, 'memoryAccumulate')) return { source: 'ops', enabled: true, running: false }
     return { source: 'none', enabled: false, running: false }
   }
 
@@ -981,7 +1021,6 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)
       return { cron: '', text: parts.join(' · '), status: acc }
     }
-    if (acc.source === 'ops') return { cron: '', text: '由本机运维能力驱动（ops.memoryAccumulate）', status: acc }
     return { cron: '', text: '（未启用自动积累；可打开「自动积累群记忆」或手动积累）', status: acc }
   }
 
@@ -1002,14 +1041,27 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const onebotGroups = await fetchGroupList(kernel)
       const nameByGid = new Map(onebotGroups.map((g) => [g.id, g.name]))
       const keywordMap = parseKeywordMap(pluginCfg(raw, 'gate-wake').keywords)
-      const ids = await memoryGroupIds(onebotGroups)
-      const groups = ids.map((id) => ({
-        ...memInfo(id),
-        name: nameByGid.get(id) || '',
-        managed: keywordMap.has(id),
+      const groupIds = await memoryGroupIds(onebotGroups)
+      const privIds = memoryPrivateIds()
+      // 「关闭记忆的会话」：与插件同一条解析口径（group:群号 / private:QQ号，逗号或空白分隔）
+      const muted = new Set()
+      for (const raw of String(gmCfg().mutedChats || '').split(/[\s,，]+/)) {
+        const s = raw.trim()
+        if (/^(?:group|private):\d{4,12}$/.test(s)) muted.add(s)
+      }
+      const items = [
+        ...groupIds.map((id) => ({ key: `group:${id}`, name: nameByGid.get(id) || '', managed: keywordMap.has(id) })),
+        ...privIds.map((id) => ({ key: `private:${id}`, name: memoryPrivateName(id), managed: false })),
+      ]
+      const groups = items.map((it) => ({
+        ...memInfo(memChatOf({ chat: it.key })),
+        name: it.name,
+        managed: it.managed,
+        muted: muted.has(it.key),
       }))
       return {
         ok: true, op, dir, groups, sections: MEMORY_SECTIONS,
+        mutedChats: [...muted].join(', '),
         schedule: schedule.text,
         accumulate,
         estimate: null,
@@ -1017,14 +1069,15 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
 
     if (op === 'read') {
-      const { id, file } = memFile(payload.group_id)
+      const line = memChatOf(payload)
       let content = ''
-      try { content = fs.readFileSync(file, 'utf8') } catch { content = '' }
-      return { ok: true, op, ...memInfo(id), content }
+      try { content = fs.readFileSync(line.file, 'utf8') } catch { content = '' }
+      return { ok: true, op, ...memInfo(line), content }
     }
 
     if (op === 'save') {
-      const { id, file } = memFile(payload.group_id)
+      const line = memChatOf(payload)
+      const { file } = line
       const content = String(payload.content == null ? '' : payload.content)
       if (!content.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
       const bytes = Buffer.byteLength(content, 'utf8')
@@ -1046,20 +1099,62 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         // 旧版留档：与积累器同一命名/同一保留策略（-manual 后缀也计入 retainRevisions）
         try {
           const revDir = ensureDir(path.join(memoryDir(), '.revisions'))
-          let revFile = path.join(revDir, `${id}-${revisionStamp()}-manual.md`)
+          const base = revBaseOf(line)
+          let revFile = path.join(revDir, `${base}-${revisionStamp()}-manual.md`)
           for (let i = 1; fs.existsSync(revFile) && i < 100; i += 1) {
-            revFile = path.join(revDir, `${id}-${revisionStamp()}-${i}-manual.md`)
+            revFile = path.join(revDir, `${base}-${revisionStamp()}-${i}-manual.md`)
           }
           fs.copyFileSync(file, revFile)
           try { fs.chmodSync(revFile, 0o600) } catch { /* Windows 无 chmod 语义 */ }
-          pruneRevisionsFor(id, keep)
-        } catch (e) { warn(`记忆旧版留档失败 ${id}: ${e.message}`) }
+          pruneRevisionsFor(line, keep)
+        } catch (e) { warn(`记忆旧版留档失败 ${line.chat}: ${e.message}`) }
       }
       atomicWriteFileSync(file, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o600 })
-      const missing = MEMORY_SECTIONS.filter((s) => !content.includes(s))
+      const missing = sectionsOf(line.kind).filter((s) => !content.includes(s))
       return {
-        ok: true, op, ...memInfo(id),
+        ok: true, op, ...memInfo(line),
         message: `已保存 ${bytes} 字节${missing.length ? `　⚠️ 缺少小节：${missing.join('、')}` : ''}`,
+      }
+    }
+
+    if (op === 'delete') {
+      const line = memChatOf(payload)
+      const { id, file } = line
+      if (payload.confirm !== true) {
+        return { ok: true, op, needsConfirm: true, message: '（未执行）删除会把该会话记忆移入回收站，确定吗？' }
+      }
+      const dir = memoryDir()
+      const trashDir = path.join(dir, '.trash', `${line.kind === 'private' ? `private_${id}` : id}-${revisionStamp()}`)
+      if (!isInsidePath(dir, trashDir)) throw new Error('回收站路径越界')
+      /** 同盘 rename；跨盘（EXDEV）退化为 copy + unlink */
+      const moveOne = (from, to) => {
+        ensureDir(path.dirname(to))
+        try { fs.renameSync(from, to); return true } catch (e) {
+          if (e?.code !== 'EXDEV') throw e
+          fs.copyFileSync(from, to)
+          fs.unlinkSync(from)
+          return true
+        }
+      }
+      const moved = { main: false, revisions: 0 }
+      if (fs.existsSync(file)) moved.main = moveOne(file, path.join(trashDir, `${id}.md`))
+      const revDir = path.join(dir, '.revisions')
+      let revNames = []
+      try { revNames = fs.readdirSync(revDir) } catch { revNames = [] }
+      const revRe = new RegExp(`^${revBaseOf(line)}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+      for (const n of revNames.filter((f) => revRe.test(f))) {
+        try { if (moveOne(path.join(revDir, n), path.join(trashDir, 'revisions', n))) moved.revisions += 1 } catch (e) {
+          warn(`记忆历史版本移入回收站失败 ${n}: ${e.message}`)
+        }
+      }
+      if (!moved.main && moved.revisions === 0) {
+        return { ok: true, op, chat: line.chat, moved, trash: '', message: '这个会话本来就没有记忆文件' }
+      }
+      const rel = path.relative(dir, trashDir).split(path.sep).join('/')
+      warn(`记忆 ${line.chat} 已移入回收站 ${rel}（正文=${moved.main ? 1 : 0}，历史版本=${moved.revisions}）`)
+      return {
+        ok: true, op, chat: line.chat, moved, trash: rel,
+        message: `已移入回收站（正文 ${moved.main ? 1 : 0} 份，历史版本 ${moved.revisions} 份）`,
       }
     }
 
@@ -1092,7 +1187,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       if (payload.confirm !== true) {
         return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
       }
-      // ① 内置积累器（插件自带调度器）优先；② 退回 ops provider（老部署）
+      // 只调用内置积累器（插件自带调度器）。
       const builtin = kernel?.shared?.memoryAccumulate
       if (typeof builtin === 'function') {
         const result = await builtin({ ...payload, confirm: true })
@@ -1102,18 +1197,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
           message: result?.message || '已在后台开始积累（过会儿点「刷新」看结果）',
         }
       }
-      if (!hasOps(opsRef, 'memoryAccumulate')) {
-        return {
-          ok: false,
-          error: '没有可用的群记忆积累器：请在「群记忆」页打开「自动积累群记忆」，或安装带 ops.memoryAccumulate 的本机运维能力',
-        }
-      }
-      const result = await opsRef.memoryAccumulate({ ...payload, confirm: true })
-      if (result == null) return { ok: false, error: '本机群记忆积累器调用失败（详见日志）' }
-      return { ok: true, op, ...(isPlainObject(result) ? result : {}), message: result?.message || '已在后台开始积累（过会儿点「刷新」看结果）' }
+      return { ok: false, error: '内置群记忆积累器未启用：请检查 group-memory 子插件是否加载' }
     }
 
-    throw new Error(`未知记忆操作：${op}（可用：list / read / save / config / setcfg / refresh）`)
+    throw new Error(`未知记忆操作：${op}（可用：list / read / save / delete / config / setcfg / refresh）`)
   }
 
   // ── persona（人设）──────────────────────────────────────────
@@ -1131,12 +1218,6 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
 
     let switched
-    if (hasOps(opsRef, 'personaSwitch')) {
-      const result = await opsRef.personaSwitch(name)
-      if (result == null) throw new Error('本机人设切换能力（ops.personaSwitch）调用失败，详见日志')
-      if (isPlainObject(result) && result.ok === false) throw new Error(String(result.error || result.message || '本机人设切换失败'))
-      switched = isPlainObject(result) ? result : {}
-    }
 
     // 配置里钉死了 activePersona 的话要同步改；本地投递与保存共用路径事务。
     const saved = await store.update((next) => {
@@ -1145,7 +1226,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       setPath(next, ['pluginConfig', 'persona-voice', 'activePersona'], name)
     }, {
       what: `切人设 → ${name}`, allowPending: true,
-      effect: switched ? null : () => {
+      effect: () => {
         const transaction = beginPersonaSwitch({ workspaceDir: before.workspaceDir || '', personaDir: before.dir || '', name, mode: 'auto' })
         switched = transaction.result
         return transaction
@@ -1162,7 +1243,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       ...switched,
       ...after,
       backup,
-      // ops 实现自己的提示优先（可能说明了它额外做了什么）
+      // 平台事务的结果与统一提示。
       message: toStr(switched.message) || fallbackMessage,
     }
   }
@@ -1436,22 +1517,24 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       return await runDiagnostics({ kernel, store, log })
     }
 
-    // ── 运维动作 → ops provider（没有就明确说“本机未配置”，不是 500）──
-    if (id === 'selfcheck') return await runOpsAction('selfcheck', payload, '离线自检')
-    if (id === 'cleanup-tmp') return await runOpsAction('cleanup', payload, '清理临时文件')
-    if (id === 'dedup-baks') return await runOpsAction('dedup', payload, '备份代际去重')
+    // 内置运维：离线自检复用诊断检查；清理/去重由内核维护器校验预演凭据。
+    if (id === 'selfcheck') {
+      const result = await runDiagnostics({ kernel, store, log, offline: true, persist: false })
+      return { ...result, id, message: [result.summary.text,
+        ...result.checks.map((c) => `${c.ok ? '✅' : c.required ? '❌' : '⚠️'} ${c.label}：${c.detail}`),
+      ].join('\n') }
+    }
+    if (id === 'cleanup-tmp' || id === 'dedup-baks') {
+      const method = id === 'cleanup-tmp' ? 'cleanup' : 'dedup'
+      if (typeof kernel?.maintenance?.[method] !== 'function') throw new Error('内置维护器未就绪，请检查内核装配')
+      const result = await kernel.maintenance[method](payload)
+      return { id, ...result,
+        ...(payload.confirm !== true && result?.ok !== false ? { needsConfirm: true, dryRun: true } : {}),
+        ...(result?.ok === false ? { error: result.error || result.message || '维护操作被拒绝' } : {}),
+      }
+    }
 
     throw new Error(`动作未接线：${id}`)
-  }
-
-  /** 运维动作统一入口：没配置/调用失败都返回 ok:false + 人话。 */
-  async function runOpsAction(name, payload, title) {
-    if (!hasOps(opsRef, name)) {
-      return { ok: false, error: `本机未配置运维能力（ops.${name}）：${title}需要站点私有实现，见 docs/运维接口.md` }
-    }
-    const result = await opsRef[name](payload)
-    if (result == null) return { ok: false, error: `本机运维能力调用失败（ops.${name}，详见日志）` }
-    return { ok: true, ...(isPlainObject(result) ? result : {}) }
   }
 
   // ── 分发 ───────────────────────────────────────────────────
@@ -1477,7 +1560,6 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
   return {
     handle,
-    setOps(next) { opsRef = next || null },
     store,
     get configPath() { return store.configPath },
     endpoints: ENDPOINTS,

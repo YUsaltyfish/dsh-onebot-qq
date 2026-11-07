@@ -17,7 +17,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function boot(t, { config = {}, pacing = null } = {}) {
   const h = await bootKernel({
     config: {
-      pacing: pacing || { merge: { enabled: false } },
+      pacing: pacing || { merge: { enabled: false }, reply: { quietHours: { enabled: false } } },
       ...config,
       pluginConfig: {
         'link-parser': { enabled: false },
@@ -35,9 +35,12 @@ test('quoteEnforce：模型引用「刚触发本轮」的消息且插话未达�
   const h = await boot(t)
   const send = h.ctx._registeredTools.get('mcp__qq__send_message')
   h.ctx.setPromptHandler(async (req) => {
+    // 真机链路：DSH 开一轮 → 工具执行 → 轮结束（turn/start 才绑定本轮上下文）
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/start' })
     await send.execute({ target: `group:${GROUP_ID}`, text: '回复刚来的那条', reply_to: 88 }, { agent: { session: { id: req.sessionId } } })
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/end' })
   })
-  // 手工把本轮 triggerMsgId 设为 88（真实链路由入站消息决定）
+  // 本轮 triggerMsgId 由入站消息（88）决定
   h.kernel.activeTurns.set(`group:${GROUP_ID}`, null)
 
   await emitRaw(h.kernel, groupAtEvent({ text: '触发', messageId: 88 }))
@@ -45,7 +48,9 @@ test('quoteEnforce：模型引用「刚触发本轮」的消息且插话未达�
   assert.equal(h.sent.at(-1).wire.includes('[CQ:reply'), false, '引用刚触发消息（零信息量）被抹掉')
 
   h.ctx.setPromptHandler(async (req) => {
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/start' })
     await send.execute({ target: `group:${GROUP_ID}`, text: '回复更早那条', reply_to: 77 }, { agent: { session: { id: req.sessionId } } })
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/end' })
   })
   // 新一轮：消息 89，turnCtx.triggerMsgId=89，显式引用 77 ≠ 触发消息 → 保留
   await emitRaw(h.kernel, groupAtEvent({ text: '触发2', messageId: 89 }))
@@ -170,8 +175,11 @@ test('两条线并发：工具按 DSH 会话 id 认线，target 写错时按会�
   const sessions = []
   h.ctx.setPromptHandler(async (req) => {
     sessions.push(req.sessionId)
+    // 真机链路：turn/start 绑定本轮（私聊），工具才能按会话纠正 target
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/start' })
     // 模型把 target 写成了群，但本轮其实是私聊会话 → 工具应按会话纠正
     await send.execute({ target: `group:${GROUP_ID}`, text: '我是私聊回复' }, { agent: { session: { id: req.sessionId } } })
+    h.ctx.emit('session/event', { id: req.sessionId }, { type: 'turn/end' })
   })
   await emitRaw(h.kernel, privateEvent({ text: '私聊一句', messageId: 110 }))
   await waitFor(() => h.sent.length >= 1, { label: '私聊出站' })

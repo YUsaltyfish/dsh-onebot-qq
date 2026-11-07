@@ -417,8 +417,11 @@ export function createDshDriver(opts) {
    * 取群聊上文（给 before-turn 拼 `ev.historyBlock`）。
    *
    * 为什么是"增量"：群上文以前每轮整份重发，副本永远留在会话历史里（100 轮 = 100 份同样的 10 条），
-   * 既烧 token 又冲淡最近对话。现在以 `ChatState.lastContextId` 为水位，只给上次之后新出现的消息；
-   * 水位在拉到的窗口里找不到（消息被挤出窗口）就直接给基线。
+   * 既烧 token 又冲淡最近对话。现在以 `ChatState.lastContextId` 为水位，只给上次之后新出现的消息。
+   *
+   * 2026-11-04 起改为**从唤醒消息倒查**：区间 = `[水位, 唤醒消息)`，最多 `groupContextCount` 条
+   * （靠近唤醒的优先）。等待槽合并进来的后随消息已经在正文里，这里按 `mergedIds` 排除 + 不越过
+   * 唤醒消息，避免同一句话出现两遍。锚点消息在窗口里找不到（被刷掉）时退化为"取到窗口末尾"。
    *
    * 返回 `\n[群聊上文]\n[昵称(QQ:号)]: 内容…`（契约里 historyBlock 自带前缀），没新增就返回 ''。
    * @param {object} ev  BotMessageEvent（用 chatKey / groupId / messageId）
@@ -428,7 +431,10 @@ export function createDshDriver(opts) {
     const onebot = onebotOf()
     if (!ev?.groupId || !onebot || !(count > 0)) return ''
     try {
-      const list = await onebot.groupHistory(ev.groupId, count + 2)
+      const mergedIds = new Set((Array.isArray(ev._scratch?.mergedIds) ? ev._scratch.mergedIds : []).map(String))
+      const anchorId = ev.messageId == null ? null : String(ev.messageId)
+      // 多拉一点：窗口要同时包住"水位"和"唤醒消息"，合并进来的条数也算进去
+      const list = await onebot.groupHistory(ev.groupId, count + mergedIds.size + 10)
       if (!Array.isArray(list) || !list.length) return ''
       const state = opts.state?.get(ev.chatKey)
       let start = 0
@@ -436,12 +442,19 @@ export function createDshDriver(opts) {
         const i = list.findIndex((m) => String(m.message_id) === String(state.lastContextId))
         if (i >= 0) start = i + 1
       }
+      // 终点 = 唤醒消息之前（唤醒本身是当前正文；它后面的都已合并进正文）
+      let end = list.length
+      let anchorIdx = -1
+      if (anchorId != null) {
+        anchorIdx = list.findIndex((m) => String(m.message_id) === anchorId)
+        if (anchorIdx >= 0) end = anchorIdx
+      }
       const now = Date.now()
       const selfId = onebot.selfId
       const lines = []
-      for (const m of list.slice(start)) {
+      for (const m of list.slice(start, end)) {
         const mid = String(m.message_id)
-        if (mid === String(ev.messageId)) continue                        // 本条正文已在 prompt 里
+        if (mergedIds.has(mid)) continue                                  // 已并进正文
         if (now - Number(m.time) * 1000 > GROUP_CONTEXT_MAX_AGE_MS) continue
         const who = m.sender?.card || m.sender?.nickname || String(m.sender?.user_id ?? '')
         const uid = m.sender?.user_id ?? ''
@@ -451,8 +464,15 @@ export function createDshDriver(opts) {
         const txt = clipChars(extractText(raw, selfId).text, 120).trim()
         if (txt) lines.push(`[${who}(QQ:${uid})]: ${txt}`)
       }
-      // 水位推进到"本轮看到的最新一条"，而不是只记注入成功的：空文本/超龄消息下一轮不该重扫。
-      if (state) state.lastContextId = list[list.length - 1]?.message_id ?? state.lastContextId
+      // 水位推进到"本轮确实看过的最后一条"：合并进来的最后一条 > 唤醒消息 > 窗口末尾（无锚点时）。
+      if (state) {
+        let seenIdx = anchorIdx
+        for (let i = list.length - 1; i >= 0 && seenIdx >= 0; i -= 1) {
+          if (mergedIds.has(String(list[i].message_id))) { seenIdx = Math.max(seenIdx, i); break }
+        }
+        const lastSeen = seenIdx >= 0 ? list[seenIdx] : list[list.length - 1]
+        state.lastContextId = lastSeen?.message_id ?? state.lastContextId
+      }
       return lines.length ? `\n[群聊上文]\n${lines.slice(-count).join('\n')}` : ''
     } catch (e) {
       log.debug(`取群聊上文失败 (${ev.groupId}): ${e.message}`)

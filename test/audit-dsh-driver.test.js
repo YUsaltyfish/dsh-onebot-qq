@@ -112,6 +112,29 @@ test('6. fetchGroupContext 增量水位：不重复旧消息、排除本条、�
   assert.equal(inc.includes('旧消息一'), false, '水位之前的旧消息不重复')
 })
 
+test('6b. fetchGroupContext 锚点倒查：截止到唤醒消息之前，并排除合并进来的消息', async (t) => {
+  const h = await boot(t)
+  const now = Math.floor(Date.now() / 1000)
+  const mk = (id, text, ago) => ({
+    message_id: id, time: now - ago,
+    sender: { user_id: MEMBER_QQ, nickname: '群友' },
+    message: [{ type: 'text', data: { text } }],
+  })
+  h.kernel.onebot.groupHistory = async () => [
+    mk(21, '旧一', 100), mk(22, '旧二', 90), mk(23, '唤醒正文', 80),
+    mk(24, '后随一', 79), mk(25, '后随二', 78),
+  ]
+  const chatKey = `group:${GROUP_ID}`
+  h.kernel.state.get(chatKey).lastContextId = 21
+  const ev = { chatKey, groupId: GROUP_ID, messageId: 23, _scratch: { mergedIds: [23, 24, 25] } }
+  const block = await h.kernel.dsh.fetchGroupContext(ev, 5)
+  assert.ok(block.includes('旧二'), '水位之后、唤醒之前的上文要给')
+  assert.equal(block.includes('唤醒正文'), false, '唤醒消息本身是当前正文，不进上文')
+  assert.equal(block.includes('后随一'), false, '合并进正文的消息不能重复出现在上文')
+  assert.equal(block.includes('后随二'), false)
+  assert.equal(h.kernel.state.get(chatKey).lastContextId, 25, '水位推进到合并的最后一条')
+})
+
 test('7. syncSessionTitles：标题同步成「群名 (群号)」；失败不中断', async (t) => {
   const h = await boot(t)
   const sid = await h.kernel.dsh.ensureSession(`group:${GROUP_ID}`, '测试群')

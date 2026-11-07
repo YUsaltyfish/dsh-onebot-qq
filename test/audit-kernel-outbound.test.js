@@ -253,7 +253,7 @@ test('管线：pre-gate 抛错 = fail-closed（后续阶段与 terminal 都不�
   assert.equal(terminaled, false)
 })
 
-test('管线：passive-tap / intercept 抛错 = fail-open，后续照跑；terminal 有 ALS TurnContext', async () => {
+test('管线：passive-tap / intercept 抛错 = fail-open，后续照跑；terminal 不在 ALS 里（防泄漏）', async () => {
   const pipeline = new Pipeline({ log: quietLog() })
   const errored = []
   pipeline.onPluginError((_e, info) => errored.push(info.stage))
@@ -276,7 +276,9 @@ test('管线：passive-tap / intercept 抛错 = fail-open，后续照跑；termi
   await pipeline.run(ev, async (e) => {
     terminaled = true
     assert.ok(e.turnCtx, 'terminal 前已挂 TurnContext')
-    assert.equal(currentTurn(), e.turnCtx, 'terminal 在 ALS 里')
+    // 2026-11-05：terminal 故意不放进 ALS —— 里面的等待槽定时器 / DSH 长期循环会继承 store，
+    // 导致排队轮全认成这一轮（引用串轮）。工具执行期的 ALS 由内核在调工具前显式设置。
+    assert.equal(currentTurn(), null, 'terminal 不应带 ALS store')
   })
   assert.equal(woken, true)
   assert.equal(terminaled, true)

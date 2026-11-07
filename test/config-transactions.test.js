@@ -157,7 +157,7 @@ test('all config-writing endpoint kinds read the latest state inside the transac
   await store.update((raw) => {
     raw.pluginConfig['persona-voice'] = { activePersona: 'Before' }
   })
-  const admin = createAdminEndpoints({ kernel, log, ops: { personaSwitch: async () => ({ ok: true }) } })
+  const admin = createAdminEndpoints({ kernel, log })
   const entered = deferred()
   const release = deferred()
   const first = store.update(async (raw) => {

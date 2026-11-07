@@ -34,10 +34,12 @@ import { OneBotAdapter } from './kernel/onebot-adapter.js'
 import { ChatState, Pipeline, createDeliver, turnStore } from './kernel/state-pipeline.js'
 import { createPacing } from './kernel/pacing.js'
 import { createDshDriver } from './kernel/dsh-driver.js'
+import { createMaintenance } from './ops/maintenance.js'
 import { startCompatServer } from './kernel/compat-server.js'
 import { loadConfig, validateConfig, resolveRuntimePaths, saveConfig } from './kernel/config-store.js'
 import { ensureDir, resolveTmpDir, normForCompare } from './platform/paths.js'
 import { DEFAULT_PERSONA_NAME, ensureDefaultPersona } from './platform/persona-seed.js'
+import { readJsonFile, writeJsonFileSync } from './platform/atomic.js'
 
 const require = createRequire(import.meta.url)
 
@@ -369,8 +371,12 @@ export async function apply(ctx, bundleConfig = {}) {
       tmpFiles.clear()
     },
   }
-  // 启动时顺手清掉上次运行留下的老临时图（只清自己目录下、超过 24h 的）
-  pruneTmpDirs(['incoming', 'imagegen'], log)
+  // 缓存清理由控制台预演、确认后执行；不在启动时另开一套删除实现。
+  const maintenance = createMaintenance({
+    dataDir, configPath,
+    tempRoots: ['incoming', 'imagegen'].map((kind) => resolveTmpDir(kind)),
+    inUseFiles: () => tmpFiles,
+  })
 
   // ── 4. 适配器 + 状态 + 管线 + 节奏 + 出站 + DSH 驱动 ─────────────
   const imagegenCfg = discovered.find((d) => d.id === 'imagegen')?.cfg
@@ -383,7 +389,16 @@ export async function apply(ctx, bundleConfig = {}) {
   })
   const state = new ChatState({ log })
   const pipeline = new Pipeline({ log })
-  const pacing = createPacing({ log: logFor('pacing'), state })
+  // pacing.apply() 可立即播种并保存基线；闭包不能引用稍后才初始化的 kernel/dsh。
+  const privateStateFile = path.join(dataDir, 'state', 'private-proactive.json')
+  let privateState = {}
+  try { privateState = readJsonFile(privateStateFile) } catch (e) {
+    if (e?.code !== 'ENOENT') log.warn(`私聊主动计时读取失败（按首次运行处理）: ${e.message}`)
+  }
+  const pacing = createPacing({
+    log: logFor('pacing'), state, privateState,
+    onPrivateStateChange: (snapshot) => writeJsonFileSync(privateStateFile, snapshot, { mode: 0o600 }),
+  })
   pacing.apply(runtime.pacing)
   const archiveCfg = { ...runtime.archive }
   const archive = makeArchiver(archiveCfg, log)
@@ -391,7 +406,7 @@ export async function apply(ctx, bundleConfig = {}) {
 
   let disposed = false
   const kernel = {
-    log, onebot, state, pipeline, pacing, tmp,
+    log, onebot, state, pipeline, pacing, tmp, maintenance,
     adminQq: Number(runtime.adminQq) || 0,
     configReady,
     version: PACKAGE_VERSION,
@@ -467,8 +482,14 @@ export async function apply(ctx, bundleConfig = {}) {
 
   // ── 出站：唯一实现（deliver + deliver.media） ──────────────────
   const outboundHooks = kernel.outboundHooks
+  const isAutonomousKind = (kind) => kind === 'proactive' || kind === 'continuation'
+  const quietBlocksTurn = (turnCtx) => isAutonomousKind(turnCtx?.wakeKind) && pacing.isQuietTime()
   const deliver = createDeliver({
     onebot, log, adminQq: kernel.adminQq,
+    beforeSend: (rec) => {
+      const turnCtx = rec.turnCtx ?? turnStore.getStore() ?? kernel.activeTurns.get(rec.target) ?? null
+      if (quietBlocksTurn(turnCtx)) throw new Error('主动消息处于免打扰时段')
+    },
     longForward: {
       threshold: runtime.outbound?.longForwardThreshold ?? 400,
       chunkSize: runtime.outbound?.longForwardChunkSize ?? 800,
@@ -480,7 +501,7 @@ export async function apply(ctx, bundleConfig = {}) {
       state.markSent(rec.target)
       pacing.noteOutbound(rec.target)
       // 主动接话的统计只认"这一轮真的发了"（普通回话不参合）
-      if (rec.turnCtx?.wakeKind === 'proactive') pacing.markProactiveSent(rec.target)
+      if (rec.turnCtx?.wakeKind === 'proactive') pacing.markProactiveSent(rec.target, rec.turnCtx)
       // 连续对话：普通回话真的发出去了，才从这一刻开始算"隔多久再检查"
       pacing.noteReplySent(rec.target, rec.turnCtx)
       archive(rec.target, { dir: 'out', ts: Date.now(), messageId: rec.messageId ?? null, text: rec.text, mode: rec.mode })
@@ -498,7 +519,12 @@ export async function apply(ctx, bundleConfig = {}) {
     const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
     const kind = turnCtx?.wakeKind
     // 主动接话 / 连续对话都是"它自己找的话"：默认不指人、不挂引用
-    if (!turnCtx || (kind !== 'proactive' && kind !== 'continuation')) return
+    if (!turnCtx || !isAutonomousKind(kind)) return
+    if (quietBlocksTurn(turnCtx)) {
+      out.blocked = true
+      out.blockReason = '主动消息处于免打扰时段'
+      return
+    }
     // 例外：续聊开了「引用最后一条人类消息」时，只保留这一个引用目标（其余一律清掉）
     const forceQuote = kind === 'continuation' ? (Number(turnCtx._forceReplyTo) || null) : null
     if (out.ats?.length || (out.replyTo != null && out.replyTo !== forceQuote)) {
@@ -521,6 +547,8 @@ export async function apply(ctx, bundleConfig = {}) {
     const turnCtx = out.turnCtx ?? null
     // 主动接话/续聊不挂引用（上一道钩子已清掉显式值，这里也不再补）
     if (!turnCtx || turnCtx.wakeKind === 'proactive' || turnCtx.wakeKind === 'continuation') return
+    // 私聊不自动挂引用（2026-11-04 主人定：一对一不需要指代；模型显式传 reply_to 不受影响）
+    if (String(out.target || '').startsWith('private:')) return
     if (out.noReply || out.replyTo != null || out.ats?.length) return
     const need = Number(runtime.outbound?.quoteAfterMsgs ?? 3)
     if (need <= 0) return
@@ -580,11 +608,14 @@ export async function apply(ctx, bundleConfig = {}) {
     if (!sessionId) return null
     return kernel.turnBySession.get(String(sessionId)) || null
   }
+  // 认轮优先级：**DSH 会话绑定（turn/start）> ALS > activeTurns**。
+  // 为什么不先看 ALS：DSH 的 agent 循环是长期任务，可能继承到某次 prompt 提交时的旧 store；
+  // 工具执行若先信 ALS，排队轮会全部认成"当时那一轮"（引用/身份/计数全串）。
   const resolveCurrentTurn = (target, sessionId) => {
-    const fromStore = turnStore.getStore()
-    if (fromStore) return fromStore
     const bySession = turnOfSession(sessionId)
     if (bySession) return bySession
+    const fromStore = turnStore.getStore()
+    if (fromStore) return fromStore
     if (target && kernel.activeTurns.has(String(target))) return kernel.activeTurns.get(String(target))
     return null
   }
@@ -605,8 +636,9 @@ export async function apply(ctx, bundleConfig = {}) {
       reply_to: { type: 'integer', description: '要引用回复的消息 ID（可选，传 0 明确不挂）' },
       sticker: { type: 'string', description: '顺手带一张表情包：心情/关键词（「无语」「夸人」）或 `#12` 点名；只有提示里出现 [表情:…] 时才传，不传 = 不发' },
     },
-    async execute(args = {}) {
-      const turnCtx = resolveCurrentTurn(args.target)
+    async execute(args = {}, exec = null) {
+      // 按本轮 DSH 会话认轮（工具包装会把 exec 传进来）；认不出才回退 target/ALS。
+      const turnCtx = resolveToolTurn(exec, args.target)
       const r = await deliver(args.target, args.text, {
         replyTo: args.reply_to,
         turnCtx,
@@ -1018,9 +1050,31 @@ export async function apply(ctx, bundleConfig = {}) {
     }
   }
 
+  // 私聊主动轮每个异步边界之后复查：只认当前配置目标与已连接的协议端。
+  const privateProactiveAllowed = (chatKey) => {
+    const health = onebot.health()
+    return !disposed && configReady && pacing.proactiveEnabled()
+      && pacing.allowedPrivateIds().includes(String(chatKey).slice(8))
+      && health.linked === true && health.stale !== true
+      && health.qqLoggedIn !== false && health.qqReceiveGood !== false
+  }
+  const privateCandidateCurrent = (ev) => privateProactiveAllowed(ev.chatKey)
+    && Number(state.get(ev.chatKey).arrivalSequence || 0) === Number(ev._scratch.proactiveArrivalSequence || 0)
+  const checkPrivateProactive = async (ev) => {
+    if (!privateCandidateCurrent(ev)) return false
+    ev.sender.isMaster = String(ev.sender.qq) === String(kernel.adminQq)
+    if (!await pipeline.checkGate(ev)) return false
+    // pre-gate 插件可有独立主人配置；主动身份只信实例配置的目标，不借合成发言提权。
+    ev.sender.isMaster = String(ev.sender.qq) === String(kernel.adminQq)
+    if (ev.turnCtx) ev.turnCtx.isMaster = ev.sender.isMaster
+    return privateCandidateCurrent(ev)
+  }
+
   // ── 入站：一条消息走完全部阶段，末端交给 agent ───────────────
   const runTurn = async (ev) => {
     if (disposed || !ev.wake) return
+    if (isAutonomousKind(ev.wake.kind) && pacing.isQuietTime()) return
+    if (ev._scratch?.privateProactive && !privateCandidateCurrent(ev)) return
     // 第二道防线：chatKey 必须是 group:<数字> / private:<数字>。异常事件（如无身份的 notice）
     // 曾造出 `private:undefined` 会话；到这里一律丢弃并留一行错误日志，绝不建会话。
     if (!/^(group|private):\d{1,12}$/.test(String(ev.chatKey || ''))) {
@@ -1046,6 +1100,8 @@ export async function apply(ctx, bundleConfig = {}) {
       })
       const submit = async (sid) => {
         if (disposed) return
+        if (ev._scratch?.privateProactive && !await checkPrivateProactive(ev)) return
+        if (quietBlocksTurn(turnCtx)) return
         turnCtx.sessionId = sid
         turnCtx.promptText = makePrompt(sid)
         bindTurnHooks(sid)
@@ -1084,17 +1140,37 @@ export async function apply(ctx, bundleConfig = {}) {
   }
 
   // ── 主动接话：没入站也能起一轮候选（走正规管线语义，出站不 @ 不引用由 decorate 钩子硬挡） ──
-  const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs, quoteTo }) => {
-    if (disposed) return
-    const isContinuation = reason === 'continuation'
+  const runProactiveTurn = async ({ chatKey, groupId, reason, humanMsgs, quoteTo, silenceMs, unanswered }) => {
+    if (disposed || pacing.isQuietTime()) return
+    const target = /^(group|private):(\d{1,12})$/.exec(String(chatKey || ''))
+    if (!target) return
+    const isGroup = target[1] === 'group'
+    const isContinuation = isGroup && reason === 'continuation'
+    if (!isGroup && !privateProactiveAllowed(chatKey)) return
     const ev = createEvent({
-      chatKey, isGroup: true, groupId,
+      chatKey, isGroup, groupId: isGroup ? (groupId ?? target[2]) : null,
       messageId: null,
-      sender: { qq: 0, name: '', card: null, isMaster: false },
+      sender: { qq: isGroup ? 0 : Number(target[2]), name: '', card: null,
+        isMaster: !isGroup && target[2] === String(kernel.adminQq) },
       text: '', time: Date.now(),
     })
     ev.wake = { kind: isContinuation ? 'continuation' : 'proactive', reason }
     ev._scratch.silentFailure = true
+    if (!isGroup) {
+      ev._scratch.privateProactive = true
+      // 真人消息改变语境后放弃旧候选；由其正常入站回合回复，不抢在旁边再主动一句。
+      ev._scratch.proactiveArrivalSequence = Number(state.get(chatKey).arrivalSequence || 0)
+      if (!await checkPrivateProactive(ev)) return
+      ev.hint.push(`[私聊主动联系:目标 QQ ${target[2]}；这是系统机会，不是对方刚说了话。`
+        + `静默时长 silenceMs=${Math.max(0, Number(silenceMs) || 0)}；未获回应次数 unanswered=${Math.max(0, Number(unanswered) || 0)}。`
+        + '按当前人设、这段关系和私聊记忆，自然分享、关心或表达亲近；不使用固定问候模板，不催回复、不声称对方在线。'
+        + '没有合适的话可什么都不发；未回不等于冷落，按关系自然接续或另起话题。]')
+      await pipeline.runStage('before-turn', ev)
+      if (disposed || ev.stopped || !privateCandidateCurrent(ev)) return
+      ev.turnCtx = createTurnContext(ev)
+      log.info(`[私聊主动] ${chatKey} 候选入站（静默 ${Math.round((Number(silenceMs) || 0) / 60000)} 分钟，未回 ${Number(unanswered) || 0} 次）→ 交模型判断说不说`)
+      return state.serialize(ev.chatKey, () => runTurn(ev))
+    }
     // 连续对话：给模型一个"刚才聊过、现在要不要补一句"的语境，并明确允许什么都不做
     ev.hint.push(isContinuation
       ? `[续聊检查:你刚回过话,之后群里又有 ${Number(humanMsgs) || 0} 条新消息(见上文);想补一句就正常发一条,不想补就什么都别做,这轮不发也没关系]`
@@ -1111,9 +1187,10 @@ export async function apply(ctx, bundleConfig = {}) {
     ev.turnCtx = createTurnContext(ev)
     // 续聊可选「引用最后一条人类消息」：把目标 message_id 带进本轮，出站钩子①会用它（其它轮一律清掉）
     if (isContinuation && quoteTo) ev.turnCtx._forceReplyTo = Number(quoteTo) || null
-    holdActiveTurn(chatKey, ev.turnCtx)
+    // activeTurns 只在真实 turn/start 绑定；准入失败/卸载不留下假活跃轮。
     log.info(`[${isContinuation ? '连续对话' : '主动接话'}] ${chatKey} 候选入站（${isContinuation ? '续聊检查' : reason === 'silence' ? '冷场找话' : '话题合适'}）→ 交模型判断接不接`)
-    return turnStore.run(ev.turnCtx, () => state.serialize(ev.chatKey, () => runTurn(ev)))
+    // 同样不包 ALS：这轮提交的 prompt 会起 DSH agent 循环，粘住 store 会污染后续排队轮。
+    return state.serialize(ev.chatKey, () => runTurn(ev))
   }
   pacing.start({
     onProactiveTurn: runProactiveTurn,
@@ -1174,14 +1251,18 @@ export async function apply(ctx, bundleConfig = {}) {
     }
 
     try {
-      // 静默合批：同群几百毫秒内的多条唤醒并成一轮（主动接话轮不进来）
+      // 等待槽：唤醒消息先压 pacing.merge.waitMs 再入站 —— 私聊合批、群聊唤醒各自成轮
+      // （非唤醒消息只并入当前槽，永远不单独成轮；忙线时唤醒直接排队，详见 kernel/pacing.js）
       await pipeline.run(ev, (wokenEv) => {
         if (disposed) return
         return pacing.submit(wokenEv, (e) => state.serialize(e.chatKey, () => runTurn(e)))
       })
       if (disposed) return
-      // 没唤醒的群消息 → 交给主动接话：到点了就按语境挑时机（有 wake 的不进来，避免被叫时同时抢话）
-      if (!ev.wake && !ev.stopped) pacing.consider(ev)
+      // 非唤醒消息：先看能不能并入已打开的等待槽；没槽才交给主动接话
+      if (!ev.wake && !ev.stopped) {
+        const absorbed = !isNoticeEvent && pacing.collect(ev)
+        if (!absorbed) pacing.consider(ev)
+      }
     } catch (e) {
       log.error(`入站处理异常 (${ev.chatKey}): ${e.stack || e.message}`)
     } finally {
@@ -1528,22 +1609,4 @@ export async function apply(ctx, bundleConfig = {}) {
 /** 深拷贝（只用于只读快照 raw；配置里不会有函数/循环引用）。 */
 function deepClone(value) {
   try { return JSON.parse(JSON.stringify(value)) } catch { return value }
-}
-
-/** 清理本包自己的临时目录里超过 maxAgeMs 的残留文件（best-effort，只删文件）。 */
-function pruneTmpDirs(kinds, log, maxAgeMs = 24 * 3600 * 1000) {
-  for (const kind of kinds) {
-    let dir
-    try { dir = resolveTmpDir(kind) } catch { continue }
-    let names = []
-    try { names = fs.readdirSync(dir) } catch { continue }
-    for (const name of names) {
-      const file = path.join(dir, name)
-      try {
-        const st = fs.statSync(file)
-        if (st.isFile() && Date.now() - st.mtimeMs > maxAgeMs) fs.unlinkSync(file)
-      } catch { /* 别的进程正在用/已删 */ }
-    }
-    log.debug(`临时目录已清理: ${dir}`)
-  }
 }

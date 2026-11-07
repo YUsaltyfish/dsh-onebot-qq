@@ -378,6 +378,99 @@ test('imagegen openai-chat 参考图请求体：messages 里带 data URL 的 ima
   assert.match(imgPart.image_url.url, /^data:image\/png;base64,/, '参考图用 data URL')
 })
 
+test('imagegen 异步任务站：提交回 task_id → 轮询 /tasks/{id} 到 completed → 下载数组形式的图片地址', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { timeoutMs: 30 },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  let polls = 0
+  let downloads = 0
+  installFetchMock(t, (url) => {
+    if (url.endsWith('/images/generations')) {
+      return jsonResponse({ code: 200, data: [{ status: 'submitted', task_id: 'task_abc' }] })
+    }
+    if (url === 'https://example.invalid/v1/tasks/task_abc') {
+      polls += 1
+      return polls === 1
+        ? jsonResponse({ code: 200, data: { id: 'task_abc', status: 'pending', progress: 0 } })
+        : jsonResponse({
+          code: 200,
+          data: {
+            id: 'task_abc',
+            status: 'completed',
+            progress: 100,
+            result: { images: [{ url: ['https://example.invalid/files/task_abc.png'] }] },
+          },
+        })
+    }
+    if (url === 'https://example.invalid/files/task_abc.png') {
+      downloads += 1
+      return new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } })
+    }
+    return jsonResponse({ error: 'unexpected url: ' + url }, 404)
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
+  assert.equal(r.ok, true)
+  assert.equal(r.protocol, 'openai-images', '异步站仍走 openai-images 协议（判据是响应形态，不是配置）')
+  assert.ok(fs.existsSync(r.file), '任务完成后应下载并落盘')
+  assert.equal(r.actualSize, '1x1')
+  assert.equal(polls, 2, 'pending 时要继续轮询')
+  assert.equal(downloads, 1, '完成后下载一次图片')
+  assert.ok(h.sent.some((s) => s.kind === 'media'), '生成后经唯一媒体出站口发出')
+})
+
+test('imagegen 异步任务失败：把上游原因抛出、不重试', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { timeoutMs: 30 },
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  let submits = 0
+  installFetchMock(t, (url) => {
+    if (url.endsWith('/images/generations')) {
+      submits += 1
+      return jsonResponse({ code: 200, data: [{ status: 'submitted', task_id: 'task_bad' }] })
+    }
+    if (url === 'https://example.invalid/v1/tasks/task_bad') {
+      return jsonResponse({ code: 200, data: { id: 'task_bad', status: 'failed', error: { message: '内容审核未通过' } } })
+    }
+    return jsonResponse({ error: 'unexpected' }, 404)
+  })
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  await assert.rejects(() => tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` }), /内容审核未通过/)
+  assert.equal(submits, 1, '任务失败不重新提交（不重复扣费）')
+  assert.ok(h.sent.some((s) => s.kind === 'msg'), '插件自己如实代答一句失败说明')
+})
+
+test('imagegen 六种比例×1k/2k、默认low与显式high、非法参数不提交', async (t) => {
+  const presets = { '1:1': [1024,1024], '16:9': [1536,864], '9:16': [864,1536], '3:4': [864,1152], '4:3': [1152,864], '21:9': [1568,672] }
+  for (const [ratio, dims] of Object.entries(presets)) {
+    for (const tier of ['1k', '2k']) {
+      const h = await bootImagegen(t, { imagegen: { qualitySizeTiers: true }, credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME' } } })
+      const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+      const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+      await assert.rejects(() => tool.execute({ prompt: '猫', aspect_ratio: '2:3' }), /aspect_ratio/)
+      await assert.rejects(() => tool.execute({ prompt: '猫', resolution: '4k' }), /resolution/)
+      await assert.rejects(() => tool.execute({ prompt: '猫', quality: 'ultra' }), /quality/)
+      assert.equal(calls.length, 0)
+      await tool.execute({ prompt: '猫', aspect_ratio: ratio, resolution: tier, ...(tier === '2k' ? { quality: 'high' } : {}) })
+      const body = JSON.parse(calls[0].opts.body)
+      assert.equal(body.size, dims.map((n) => n * (tier === '2k' ? 2 : 1)).join('x'))
+      assert.equal(body.quality, tier === '2k' ? 'high' : 'low')
+    }
+  }
+})
+
+test('imagegen 质量档位：low/medium/high 均可显式透传', async (t) => {
+  for (const quality of ['low', 'medium', 'high']) {
+    const h = await bootImagegen(t, { imagegen: { qualitySizeTiers: true }, credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME' } } })
+    const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+    const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+    await tool.execute({ prompt: '猫', quality })
+    assert.equal(JSON.parse(calls[0].opts.body).quality, quality)
+  }
+})
+
 test('avatar：QQ 头像下载 → 缓存复用（第二次不再下载）', async (t) => {
   const h = await bootImagegen(t)
   let calls = 0
@@ -398,15 +491,30 @@ test('avatar：QQ 头像下载 → 缓存复用（第二次不再下载）', asy
 // 额外请求字段（extraBody，JSON）：不同平台字段不同，由用户在控制台自己补
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('imagegen 额外字段：留空时请求体与旧版一致（不多发任何字段）', async (t) => {
+test('imagegen 档位默认关闭：请求体不带 quality/size，显式传参也不上送', async (t) => {
   const h = await bootImagegen(t, {
+    credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
+  })
+  const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
+  const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
+  const r = await tool.execute({ prompt: '一只猫', quality: 'high', resolution: '2k', aspect_ratio: '16:9', target: `group:${GROUP_ID}` })
+  const body = JSON.parse(String(calls[0].opts.body))
+  assert.deepEqual(Object.keys(body).sort(), ['model', 'n', 'prompt'], `档位关闭时不上送 quality/size：${Object.keys(body)}`)
+  assert.equal('watermark' in body, false)
+  assert.equal('quality' in r, false, '结果不回报质量档位')
+  assert.equal('size' in r, false, '结果不回报尺寸档位')
+})
+
+test('imagegen 档位打开：请求体带 quality/size，留空不多发字段', async (t) => {
+  const h = await bootImagegen(t, {
+    imagegen: { qualitySizeTiers: true },
     credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
   })
   const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
   const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
   await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
   const body = JSON.parse(String(calls[0].opts.body))
-  assert.deepEqual(Object.keys(body).sort(), ['model', 'n', 'prompt', 'size'], `不应有多余字段：${Object.keys(body)}`)
+  assert.deepEqual(Object.keys(body).sort(), ['model', 'n', 'prompt', 'quality', 'size'], `不应有多余字段：${Object.keys(body)}`)
   assert.equal('watermark' in body, false)
 })
 
@@ -424,21 +532,21 @@ test('imagegen 额外字段：{"watermark": false} → 文生图 JSON 带上（s
 
 test('imagegen 额外字段：任意平台字段（quality/style/数字）都能并进 JSON 并覆盖默认值', async (t) => {
   const h = await bootImagegen(t, {
-    imagegen: { extraBody: '{"quality": "hd", "style": "vivid", "n": 2}' },
+    imagegen: { qualitySizeTiers: true, extraBody: '{"quality": "hd", "style": "vivid", "n": 2}' },
     credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
   })
   const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
   const tool = h.ctx._registeredTools.get('mcp__qq__generate_image')
   await tool.execute({ prompt: '一只猫', target: `group:${GROUP_ID}` })
   const body = JSON.parse(String(calls[0].opts.body))
-  assert.equal(body.quality, 'hd')
+  assert.equal(body.quality, 'low', '默认质量优先于额外字段')
   assert.equal(body.style, 'vivid')
   assert.equal(body.n, 2, '用户写的值应覆盖默认 n=1')
 })
 
 test('imagegen 额外字段：图生图逐项追加到 multipart（布尔转字符串）', async (t) => {
   const h = await bootImagegen(t, {
-    imagegen: { extraBody: '{"watermark": false, "quality": "hd"}' },
+    imagegen: { qualitySizeTiers: true, extraBody: '{"watermark": false, "quality": "hd"}' },
     credentials: { gptImage: { baseUrl: 'https://example.invalid/v1', apiKey: 'REPLACE_ME', model: 'gpt-image-2' } },
   })
   const calls = installFetchMock(t, () => jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
@@ -451,7 +559,8 @@ test('imagegen 额外字段：图生图逐项追加到 multipart（布尔转字�
   const edit = calls.find((c) => c.url.endsWith('/images/edits'))
   assert.ok(edit, '应请求 /images/edits')
   assert.equal(edit.opts.body.get('watermark'), 'false', '布尔应转成字符串 false')
-  assert.equal(edit.opts.body.get('quality'), 'hd')
+  assert.equal(edit.opts.body.get('quality'), 'low')
+  assert.equal(edit.opts.body.getAll('size').length, 1, 'multipart 尺寸只追加一次')
   assert.equal(edit.opts.body.get('model'), 'gpt-image-2')
 })
 

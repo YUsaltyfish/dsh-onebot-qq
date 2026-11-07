@@ -55,6 +55,71 @@ function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-gm-'))
 }
 
+test('群记忆积累：会话记忆关闭（mutedChats）→ 自动/手动都不跑，读取侧也不给指针', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const now = Date.now()
+  writeArchive(archiveDir, [
+    msg(now - 60_000, 111, '甲', '这条不该被积累'),
+    msg(now - 50_000, 222, '乙', '因为记忆关着'),
+  ])
+  let called = 0
+  const runner = async () => { called += 1; return { ok: true, text: '# 群记忆\n- x' } }
+  const { bot, shared, tools, stages } = makeBot({
+    dataDir, archiveDir,
+    cfg: { accumulateMinNewMsgs: 1, mutedChats: `group:${GROUP}` },
+    runner,
+  })
+  plugin.setup(bot)
+  // 手动积累：muted 的群被跳过 → 一次模型都不调
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(called, 0, '关闭记忆的群不该被积累（手动也一样）')
+  assert.ok((r.skipped || []).includes(GROUP) || (r.groups || 0) === 0, `应跳过或不计入：${JSON.stringify(r)}`)
+
+  // 读取侧：before-turn 不推指针；read_memory 明确拒绝
+  const beforeTurn = stages.find(([stage]) => stage === 'before-turn')[1]
+  const ev = {
+    chatKey: `group:${GROUP}`, isGroup: true, groupId: GROUP, wake: { kind: 'at' }, hint: [], messageId: 1,
+    sender: { qq: 111, name: '甲' },
+  }
+  beforeTurn(ev)
+  assert.deepEqual(ev.hint, [], '关闭记忆的会话不应注入指针')
+  await assert.rejects(async () => tools.get('read_memory').execute({ target: `group:${GROUP}` }), /记忆已关闭/)
+})
+
+test('私聊记忆积累：读 private_*.jsonl → 写 private/<QQ>.md（工具提交 target=private:…）', async () => {
+  const dataDir = tmp()
+  const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
+  const QQ = '213445357'
+  const now = Date.now()
+  const rows = [
+    { ts: now - 60_000, dir: 'in', chat: `private:${QQ}`, sender: { qq: QQ, nickname: '主人' }, text: '以后叫我老板', messageId: now - 60_000 },
+    { ts: now - 50_000, dir: 'out', chat: `private:${QQ}`, sender: { qq: 999, nickname: '机器人' }, text: '好的', messageId: now - 50_000 },
+  ]
+  fs.mkdirSync(archiveDir, { recursive: true })
+  fs.writeFileSync(path.join(archiveDir, `private_${QQ}.jsonl`), rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  let prompt = ''
+  let submit = null
+  const runner = async ({ prompt: p }) => {
+    prompt = p
+    submit({ target: `private:${QQ}`, points: '- **主人(213445357)**：要求叫「老板」' })
+    return { ok: true, text: '已提交' }
+  }
+  const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
+  submit = (a) => bot.shared.memoryAccumulateSubmit(a)
+  plugin.setup(bot)
+
+  const r = await shared.memoryAccumulateSync({ confirm: true })
+  assert.equal(r.ok, true)
+  assert.equal(r.failed.length, 0, JSON.stringify(r.failed))
+  const file = path.join(dataDir, 'qq-memory', 'private', `${QQ}.md`)
+  assert.ok(fs.existsSync(file), '私聊记忆应写到 private/ 子目录')
+  assert.match(fs.readFileSync(file, 'utf8'), /老板/)
+  assert.equal(fs.existsSync(path.join(dataDir, 'qq-memory', `${QQ}.md`)), false, '不能和群记忆目录混在一起')
+  assert.match(prompt, /私聊/, '私聊积累提示词应标注私聊')
+  assert.match(prompt, /private:/, '提示词应告诉模型 target 写 private:')
+})
+
 test('群记忆积累：消息够 → 调后台任务 → 写回 + 保留历史版本', async () => {
   const dataDir = tmp()
   const archiveDir = path.join(dataDir, 'logs', 'qq_chat')

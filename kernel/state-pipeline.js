@@ -26,8 +26,6 @@ const emptyChatState = () => ({
   lastSendAt: 0,      // 自发接话的"静默期"判据
   lastInboundAt: 0,
   arrivalSequence: 0, // 本线消息入站序号，回合记录基线，不受异步准入耗时影响
-  followUpUntil: 0,   // "@ 之后同一人补发的正文"接续窗口截止时间
-  followUpCache: null, // 接续窗口里挂起的引用/图片
   lastContextId: null, // 群上文水位（只补新消息，不整份重发）
   turnQueue: [],      // 引用锚队列：每轮 wake 后 push { triggerId, arrived, at }
 })
@@ -157,6 +155,32 @@ export class Pipeline {
     try { hook(e, { stage, pluginId, ev }) } catch { /* 旁路监听自己崩了也不许影响主流程 */ }
   }
 
+  /** 系统合成轮只检查硬门禁，不采集、不拦截、不冒充真人唤醒。 */
+  async checkGate(ev) {
+    await this.runStage('pre-gate', ev)
+    return Boolean(ev && !ev.stopped)
+  }
+
+  /** 复用同一阶段的排序、容错与 stop 语义。 */
+  async runStage(stage, ev) {
+    if (!ev || ev.stopped) return
+    for (const s of [...this.stages.get(stage)]) {
+      if (ev.stopped) break
+      if (stage === 'passive-tap') {
+        try { Promise.resolve(s.fn(ev)).catch((e) => this._fail(e, stage, s.pluginId, ev)) }
+        catch (e) { this._fail(e, stage, s.pluginId, ev) }
+        continue
+      }
+      try { await s.fn(ev) } catch (e) {
+        if (stage === 'pre-gate') {
+          ev.stopped = true
+          ev.stopReason = `pre-gate 插件异常(${s.pluginId})`
+        }
+        this._fail(e, stage, s.pluginId, ev)
+      }
+    }
+  }
+
   /**
    * 依次跑五个阶段；没被 stop 且有 wake 才把这一轮交给 terminal（拼 prompt → 交模型）。
    * 容错语义按契约分两种：
@@ -167,29 +191,17 @@ export class Pipeline {
   async run(ev, terminal) {
     if (!ev || ev.stopped) return undefined
     for (const stage of STAGES) {
-      for (const s of [...this.stages.get(stage)]) {
-        if (ev.stopped) break
-        if (stage === 'passive-tap') {
-          try { Promise.resolve(s.fn(ev)).catch((e) => this._fail(e, stage, s.pluginId, ev)) }
-          catch (e) { this._fail(e, stage, s.pluginId, ev) }
-          continue
-        }
-        try {
-          await s.fn(ev)
-        } catch (e) {
-          if (stage === 'pre-gate') {
-            ev.stopped = true
-            ev.stopReason = `pre-gate 插件异常(${s.pluginId})`
-          }
-          this._fail(e, stage, s.pluginId, ev)
-        }
-      }
+      await this.runStage(stage, ev)
       if (ev.stopped) return undefined
     }
     if (!ev.wake) return undefined // 没唤醒 = 这条不归模型管
-    // 唤醒通过才创建 TurnContext，并挂进 AsyncLocalStorage —— 贯穿 prompt/工具/出站，turn/end 时自然失效
+    // 唤醒通过才创建 TurnContext。⚠️ **不要**把它塞进 AsyncLocalStorage 再调 terminal：
+    //   terminal 会排等待槽定时器（pacing.submit）并提交 prompt；Node 定时器与 DSH agent 的
+    //   长期循环都会继承当时 ALS 的 store —— 一次唤醒的上下文会粘住整段活动，
+    //   之后排队轮的工具全认成这一轮（引用全挂同一唤醒、身份/计数串轮）。
+    //   工具执行期的 ALS 由内核在调工具前显式设置（见 index.js 的工具包装）。
     ev.turnCtx = createTurnContext(ev)
-    return turnStore.run(ev.turnCtx, () => terminal(ev))
+    return terminal(ev)
   }
 }
 
@@ -201,7 +213,7 @@ export class Pipeline {
  * 超长消息 → 合并转发卡片（需求：超长消息发成一张卡片，不刷屏）。
  * 卡片失败要**降级成普通分段**，话不能吞。独立成函数只是为了让 deliver 读得完。
  */
-async function sendLongAsForward({ onebot, log, target, text, longForward, replyMaxLength }) {
+async function sendLongAsForward({ onebot, log, target, text, longForward, replyMaxLength, checkBeforeSend }) {
   const lf = longForward || {}
   const chunk = Math.max(200, Number(lf.chunkSize) || 800)
   const name = String(onebot.selfNickname || lf.nodeName || '机器人').slice(0, 24)
@@ -210,6 +222,7 @@ async function sendLongAsForward({ onebot, log, target, text, longForward, reply
     type: 'node',
     data: { uin, name, content: [{ type: 'text', data: { text: escapeCq(t) } }] },
   }))
+  await checkBeforeSend()
   try {
     // 合并转发同样非幂等：retries:0（同一张卡片发两遍比发失败还糟）
     const messageId = await onebot.sendForward(target, nodes, {
@@ -224,6 +237,7 @@ async function sendLongAsForward({ onebot, log, target, text, longForward, reply
     let messageId = null
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 500)) // 同一秒灌一堆像刷屏
+      await checkBeforeSend()
       messageId = await onebot.sendMessage(target, escapeCq(parts[i]))
     }
     return { messageId, mode: 'forward-fallback' }
@@ -240,13 +254,14 @@ async function sendLongAsForward({ onebot, log, target, text, longForward, reply
  *   标记当场废掉 → @ 静默失效，而且只在非豁免会话里失效，极难发现。
  *
  * @param {{onebot: object, log?: object, adminQq?: number|string|null, longForward?: object, replyMaxLength?: number,
- *          onAfterSend?: Function, outboundHooks?: Function[]}} cfg
+ *          onAfterSend?: Function, outboundHooks?: Function[], beforeSend?: Function}} cfg
+ *   beforeSend(rec) —— 每次真实发送前的最终守卫（文本/媒体/降级子条共用）；异常拒发，不能吞。
  *   onAfterSend(rec) —— 发送成功后的落点：留档 + ChatState.markSent 都收口在这儿
  *   （deliver 不持有 ChatState，免得同一份状态两处写）
  *   outboundHooks —— 宿主自己的出站钩子数组（与 deliver.onDecorate 同一个池子，便于宿主把
  *   `bot.onOutbound` 直接接进去；不传就内部自建）
  */
-export function createDeliver({ onebot, log = console, adminQq = null, longForward = {}, replyMaxLength = 3000, onAfterSend = null, outboundHooks = [] }) {
+export function createDeliver({ onebot, log = console, adminQq = null, longForward = {}, replyMaxLength = 3000, onAfterSend = null, outboundHooks = [], beforeSend = null }) {
   const hooks = outboundHooks
   const sentHooks = []
   async function afterSend(rec) {
@@ -314,11 +329,15 @@ export function createDeliver({ onebot, log = console, adminQq = null, longForwa
     let messageId = null
     let mode = out.replyTo != null ? 'reply' : (out.ats.length ? 'at' : 'plain')
     if (wantForward) {
-      ({ messageId, mode } = await sendLongAsForward({ onebot, log, target: to, text: out.text, longForward: lf, replyMaxLength }))
+      ({ messageId, mode } = await sendLongAsForward({ onebot, log, target: to, text: out.text, longForward: lf, replyMaxLength,
+        checkBeforeSend: async () => { if (beforeSend) await beforeSend(out) },
+      }))
     } else {
       wire = (out.replyTo != null ? `[CQ:reply,id=${out.replyTo}] ` : '')
         + (out.ats.length ? out.ats.map((q) => `[CQ:at,qq=${q}]`).join(' ') + ' ' : '')
         + escapeCq(out.text)
+      // 最终守卫 fail-closed；不能像装饰钩子一样吞掉异常后继续发送。
+      if (beforeSend) await beforeSend(out)
       messageId = await onebot.sendMessage(to, wire)
     }
     const rec = { target: to, text: out.text, ats: out.ats, replyTo: out.replyTo, mode, messageId, hits: safe.hits, wire, turnCtx: out.turnCtx }
@@ -357,9 +376,11 @@ export function createDeliver({ onebot, log = console, adminQq = null, longForwa
     if (!/^\[CQ:/i.test(String(cqBody || ''))) throw new Error('sendMedia 的 cqBody 必须是 CQ 码串（纯文本请用 deliver）')
     // caption 里的 [ ] 会把 CQ 码拆坏，必须转义；cqBody 本身是 CQ 码，不能碰
     const wire = (cap ? escapeCq(cap) + ' ' : '') + cqBody
+    const turnCtx = turnStore.getStore() ?? null
+    if (beforeSend) await beforeSend({ target: to, turnCtx, mode: 'media', text: cap })
     const messageId = await onebot.sendMedia(to, wire)
     // 媒体消息也带上本轮上下文（主动接话统计"已接"、留档排查都要它）；没有上下文时保持 null
-    const rec = { target: to, text: cap, ats: [], replyTo: null, mode: 'media', messageId, hits: safe.hits, wire, turnCtx: turnStore.getStore() ?? null }
+    const rec = { target: to, text: cap, ats: [], replyTo: null, mode: 'media', messageId, hits: safe.hits, wire, turnCtx }
     await afterSend(rec)
     return rec
   }

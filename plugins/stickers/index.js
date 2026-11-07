@@ -370,13 +370,13 @@ export default {
 
     // ── 入口 ②：主动想起（内核管概率、模型管语境、本插件管挑图） ───────────────
     // 命中只往 hint 加一行短标记；发不发、发什么由模型定 —— 内核不懂语境，绝不替它直发。
-    // 前置（任一不满足就不掷、零成本）：库开着 / 概率>0 / 只在群聊（旧实现 offerGroupsOnly 默认 true）/
-    //  冷却已过 / 库里有可挑的图。
+    // 前置（任一不满足就不掷、零成本）：库开着 / 概率>0 / 冷却已过 / 库里有可挑的图。
+    // 群聊与私聊同样掷骰（2026-11-04 主人定；旧实现私聊不提醒，导致私聊几乎不发）
     bot.on('before-turn', (ev) => {
       if (cfg.enabled === false || !ev.wake) return // 没唤醒的消息不该掷骰（也别白推进冷却）
       if (ev.wake.kind === 'welcome') return // 入群欢迎轮只发欢迎语，别塞"发表情包"提醒分心
       const pct = Number(cfg.offerPercent) || 0
-      if (!(pct > 0) || !ev.isGroup) return // 私聊不主动提醒（想发时仍可自己调工具）
+      if (!(pct > 0)) return
       const now = Date.now()
       const cd = cooldownMs()
       if (cd > 0 && now - (offerAt.get(ev.chatKey) || 0) < cd) return

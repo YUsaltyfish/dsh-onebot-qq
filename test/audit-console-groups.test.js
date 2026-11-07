@@ -36,14 +36,17 @@ test('主动接话：基础项不带 advanced，14 个进阶项全部带 advance
   assert.ok(adv.every((c) => c.key.startsWith('pacing.reply.')))
 })
 
-test('消息设置：原回话细节 4 项 + 合批 6 项都在同一页', async (t) => {
+test('消息设置：原回话细节 4 项 + 合批 2 项都在同一页（旧 5 个窗口参数已删除）', async (t) => {
   const schema = await schemaOf(t)
   const keys = schema.controls.filter((c) => c.group === '消息设置').map((c) => c.key)
   for (const k of [
     'outbound.replyMaxLength', 'outbound.longForwardThreshold', 'outbound.longForwardChunkSize', 'outbound.quoteAfterMsgs',
-    'pacing.merge.enabled', 'pacing.merge.windowMs', 'pacing.merge.windowActiveMs', 'pacing.merge.activeGapMs',
-    'pacing.merge.maxWaitMs', 'pacing.merge.skipIfSlowMs',
+    'pacing.merge.enabled', 'pacing.merge.waitMs',
   ]) assert.ok(keys.includes(k), `消息设置应含 ${k}`)
+  for (const gone of ['pacing.merge.windowMs', 'pacing.merge.windowActiveMs', 'pacing.merge.activeGapMs',
+    'pacing.merge.maxWaitMs', 'pacing.merge.skipIfSlowMs']) {
+    assert.equal(keys.includes(gone), false, `旧键 ${gone} 不应再出现`)
+  }
 })
 
 test('「其他」页：权限 / 门禁 / 文件 / 发图 / 头像 五组的控件统一并进来，且有详细悬停解释', async (t) => {

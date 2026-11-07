@@ -6,6 +6,8 @@
  *     `POST {base}/images/edits`（multipart 图生图；重复 `image` 字段 = 多张参考，顺序即传入顺序）。
  *   · `openai-chat`：`POST {base}/chat/completions`（JSON，messages 里放文本 + 参考图 data URL）。
  *     适合只提供 chat 出图能力的中转站；响应尽量宽容地解析 URL / base64 / markdown 图 / data URI。
+ *   同步站 / 异步任务站**自动兼容**，不用另选协议：响应里直接给图就下载；只给 `task_id` 就轮询
+ *   `GET {base}/tasks/{id}`（`status=completed` 后取 `result.images[0].url`，超时沿用 `timeoutMs`）。
  *
  * 凭据纪律：**代码里不写死任何 apiKey / baseUrl** —— 实例配置 `credentials.gptImage`
  * （`bot.credentials` / `setup(bot, opts)` 的 `opts.credentials`）注入，或环境变量：
@@ -113,19 +115,108 @@ async function throwImagegenError(res) {
   throw new Error(String(emsg || `HTTP ${res.status}`).slice(0, 200))
 }
 
-/** 统一解析响应：`data[0].{url|b64_json}` → 本地图片路径（两条线共用） */
-async function imagegenResult(res, what, timeoutMs, tmp) {
-  if (!res.ok) await throwImagegenError(res)
-  const data = await res.json()
-  const item = (data.data || [])[0]
-  if (!item) throw new Error(`${what}响应无 data`)
-  if (item.url) {
-    const rf = await fetchWithTimeout(item.url, { method: 'GET' }, timeoutMs, '图片下载')
-    if (!rf.ok) throw new Error(`图片下载 HTTP ${rf.status}`)
-    return saveBuf(Buffer.from(await rf.arrayBuffer()), tmp)
+/** 异步任务站：提交后只回 task_id，需轮询 `GET {base}/tasks/{id}` 直到出图（apib.ai 一类中转站） */
+const TASK_POLL_MS = 3000
+const TASK_DONE = new Set(['completed', 'succeeded', 'success', 'done', 'finished'])
+const TASK_FAIL = new Set(['failed', 'error', 'cancelled', 'canceled', 'rejected', 'expired', 'timeout'])
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, Math.max(0, ms)) })
+
+/** 任务状态 → 日志用的一行进度（带 progress 百分比时一起给） */
+function taskProgress(item) {
+  const status = String(item?.status || '').trim() || 'unknown'
+  const n = Number(item?.progress)
+  return Number.isFinite(n) ? `${status} ${Math.round(n)}%` : status
+}
+
+/** 任务响应里的图片引用：`result.images[0].url`（字符串或数组）/ `result.url` / 顶层 `url`/`b64_json` */
+function extractTaskImage(item) {
+  if (!item || typeof item !== 'object') return null
+  const result = item.result && typeof item.result === 'object' ? item.result : item
+  for (const one of Array.isArray(result.images) ? result.images : []) {
+    const found = extractImageRef(one)
+    if (found) return found
   }
-  if (item.b64_json) return saveBuf(Buffer.from(item.b64_json, 'base64'), tmp)
-  throw new Error('无法取得图片内容')
+  // 同步站的顶层直给形态：b64_json 可能是小图，不能套「≥256 字符才算 base64」的启发式
+  if (typeof result.b64_json === 'string' && result.b64_json.trim()) return { kind: 'b64', data: result.b64_json }
+  const direct = extractImageRef(result.url ?? result.image_url ?? null)
+  if (direct) return direct
+  return extractImageRef(result)
+}
+
+/**
+ * 轮询异步任务直到出图（同步站根本走不到这里）。
+ * 判据是**响应形态**（只有 task_id、没有图），不是配置 —— 同一协议的同步站/异步站自动兼容。
+ * 总时限沿用生图超时 `timeoutMs`；超时错误带 task_id：任务通常已扣费，凭它还能去中转站后台捞图。
+ * 轮询路径固定 `{base}/tasks/{id}`（apib.ai 实测）；别家路径不同时再补一条配置，不预先写。
+ */
+async function waitForTask({ base, apiKey, taskId, what, timeoutMs, log }) {
+  const totalMs = Math.max(1000, Number(timeoutMs) || 240000)
+  const url = `${base}/tasks/${encodeURIComponent(taskId)}`
+  const headers = { authorization: `Bearer ${apiKey}` }
+  const t0 = Date.now()
+  const deadline = t0 + totalMs
+  let lastStatus = 'submitted'
+  for (;;) {
+    const left = deadline - Date.now()
+    if (left <= 0) {
+      throw new Error(`${what}任务已提交但 ${Math.round(totalMs / 1000)}s 内未出图（task_id=${taskId}，最后状态 ${lastStatus}）；`
+        + '上游通常已扣费，可到中转站后台按该 id 查图')
+    }
+    let item = {}
+    try {
+      const res = await fetchWithTimeout(url, { method: 'GET', headers }, Math.min(30000, Math.max(1000, left)), `${what}任务查询`)
+      if (!res.ok) {
+        const raw = await res.text().catch(() => '')
+        throw new Error(`HTTP ${res.status}${raw ? `：${raw.slice(0, 120)}` : ''}`)
+      }
+      const data = await res.json()
+      item = (data && Array.isArray(data.data) ? data.data[0] : data?.data) || data || {}
+    } catch (e) {
+      // 轮询期网络抖动不判死刑：下一轮再查（总时限兜底）；HTTP 错误直接失败，别空转到超时
+      if (/^HTTP \d{3}/.test(String(e.message))) throw new Error(`${what}任务查询失败（task_id=${taskId}）：${e.message}`)
+      log?.warn?.(`[生图] 任务轮询异常（task_id=${taskId}），稍后重试: ${e.message}`)
+      await sleep(Math.min(TASK_POLL_MS, Math.max(0, deadline - Date.now())))
+      continue
+    }
+    const status = String(item.status || '').trim().toLowerCase()
+    lastStatus = taskProgress(item)
+    if (TASK_FAIL.has(status)) {
+      const reason = item.error?.message || item.error || item.message || item.fail_reason || '上游未给出原因'
+      throw new Error(`${what}任务失败（task_id=${taskId}）：${String(reason).slice(0, 200)}`)
+    }
+    if (TASK_DONE.has(status)) {
+      const found = extractTaskImage(item)
+      if (!found) throw new Error(`${what}任务已完成但响应里没有图片（task_id=${taskId}）`)
+      log?.info?.(`[生图] 异步任务完成 (${Date.now() - t0}ms, task_id=${taskId})`)
+      return found
+    }
+    log?.info?.(`[生图] 异步任务轮询中 (${Math.round((Date.now() - t0) / 1000)}s, task_id=${taskId}, ${lastStatus})`)
+    await sleep(Math.min(TASK_POLL_MS, Math.max(0, deadline - Date.now())))
+  }
+}
+
+/**
+ * 统一解析生图响应 → 本地图片路径（两条协议共用）：
+ *   · 同步站：`data[0].{url|b64_json}` 直接出图，照旧下载/落盘；
+ *   · 异步站：`data[0]` 只有 `status` + `task_id` → 轮询任务，完成后再取图（`result.images[0].url`）。
+ */
+async function imagegenResult(res, { what, timeoutMs, tmp, base, apiKey, log }) {
+  if (!res.ok) await throwImagegenError(res)
+  let data
+  try { data = await res.json() } catch { throw new Error(`${what}响应不是 JSON（该中转站可能不支持 /images/* 出图）`) }
+  const item = (Array.isArray(data?.data) ? data.data[0] : null)
+  if (!item) throw new Error(`${what}响应无 data`)
+  const immediate = extractTaskImage(item)
+  if (immediate) return materializeImage(immediate, timeoutMs, tmp, what)
+  const status = String(item.status || '').trim().toLowerCase()
+  if (TASK_FAIL.has(status)) {
+    throw new Error(`${what}任务失败：${String(item.error?.message || item.message || '上游未给出原因').slice(0, 200)}`)
+  }
+  const taskId = String(item.task_id || item.taskId || '').trim()
+  if (!taskId) throw new Error(`无法取得图片内容（响应: ${JSON.stringify(item).slice(0, 200)}）`)
+  log?.info?.(`[生图] ${what}走异步任务（task_id=${taskId}, ${taskProgress(item)}），轮询取图…`)
+  const found = await waitForTask({ base, apiKey, taskId, what, timeoutMs, log })
+  return materializeImage(found, timeoutMs, tmp, what)
 }
 
 /**
@@ -134,6 +225,14 @@ async function imagegenResult(res, what, timeoutMs, tmp) {
  */
 function extractImageRef(value) {
   if (value == null) return null
+  if (Array.isArray(value)) {
+    // 有的中转站把地址包成数组：`url: ["https://…"]`
+    for (const one of value) {
+      const found = extractImageRef(one)
+      if (found) return found
+    }
+    return null
+  }
   if (typeof value === 'object') {
     // 常见形态：{ url } / { image_url: { url } } / { b64_json } / { data } / { image } / { text }
     for (const key of ['url', 'b64_json', 'data', 'image', 'image_url', 'content', 'text']) {
@@ -187,19 +286,19 @@ function extractChatImage(data) {
   return extractImageRef(data)
 }
 
-/** 把解析出来的图片引用落成本地快照（下载 URL / 解码 base64） */
-async function materializeChatImage(found, timeoutMs, tmp, protocol) {
+/** 把解析出来的图片引用落成本地快照（下载 URL / 解码 base64）；`label` 只用于报错前缀 */
+async function materializeImage(found, timeoutMs, tmp, label) {
   if (found?.kind === 'b64') {
     const buf = Buffer.from(found.data, 'base64')
-    if (!buf.length) throw protocolError(protocol, '响应里的 base64 图片为空')
+    if (!buf.length) throw new Error(`${label}响应里的 base64 图片为空`)
     return saveBuf(buf, tmp)
   }
-  if (!found?.url) throw protocolError(protocol, '响应里没有可下载的图片地址')
-  const res = await fetchWithTimeout(found.url, { method: 'GET' }, timeoutMs, '生图(chat协议)图片下载')
-  if (!res.ok) throw protocolError(protocol, `图片下载 HTTP ${res.status}`)
+  if (!found?.url) throw new Error(`${label}响应里没有可下载的图片地址`)
+  const res = await fetchWithTimeout(found.url, { method: 'GET' }, timeoutMs, `${label}图片下载`)
+  if (!res.ok) throw new Error(`${label}图片下载 HTTP ${res.status}`)
   const buf = Buffer.from(await res.arrayBuffer())
   const head = buf.subarray(0, 64).toString('utf8').trimStart().toLowerCase()
-  if (!buf.length || head.startsWith('<')) throw protocolError(protocol, '下载到的内容不是图片（可能是 HTML/错误页）')
+  if (!buf.length || head.startsWith('<')) throw new Error(`${label}下载到的内容不是图片（可能是 HTML/错误页）`)
   return saveBuf(buf, tmp)
 }
 
@@ -244,7 +343,7 @@ async function chatGenerate({ prompt, refs, extras = {}, timeoutMs, creds, tmp }
   if (!found) {
     throw protocolError(protocol, `${what}响应里没找到图片（支持 content 里的 URL/markdown/data URI、message.images[]、data[0].{url,b64_json}）`)
   }
-  return materializeChatImage(found, timeoutMs, tmp, protocol)
+  return materializeImage(found, timeoutMs, tmp, `生图(${protocol}协议)`)
 }
 
 /**
@@ -290,7 +389,7 @@ async function gptGenerate(opts) {
 }
 
 /** openai-images 协议：文生图 JSON，图生图 multipart（重复 `image` 字段 = 多张参考，顺序即传入顺序） */
-async function imagesGenerate({ prompt, refs, size, extras = {}, timeoutMs, creds, tmp }) {
+async function imagesGenerate({ prompt, refs, size, extras = {}, timeoutMs, creds, tmp, log }) {
   const base = String(creds.baseUrl || '').replace(/\/+$/, '')
   if (!base) throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
   const headers = { authorization: `Bearer ${creds.apiKey}` }
@@ -300,14 +399,13 @@ async function imagesGenerate({ prompt, refs, size, extras = {}, timeoutMs, cred
     const res = await fetchWithTimeout(`${base}/images/generations`, {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body),
     }, timeoutMs, '生图')
-    return imagegenResult(res, '生图', timeoutMs, tmp)
+    return imagegenResult(res, { what: '生图', timeoutMs, tmp, base, apiKey: creds.apiKey, log })
   }
   const form = new FormData()
   form.append('model', creds.model)
   form.append('prompt', prompt)
   form.append('n', '1')
-  if (size) form.append('size', size)
-  appendFormFields(form, extras)
+  appendFormFields(form, { ...extras, ...(size ? { size } : {}) })
   refs.forEach((real, i) => {
     const buf = fs.readFileSync(real)
     const mediaType = detectImageMediaType(buf)
@@ -316,7 +414,7 @@ async function imagesGenerate({ prompt, refs, size, extras = {}, timeoutMs, cred
   const what = refs.length > 1 ? `图生图(${refs.length}张参考)` : '图生图'
   // ⚠️ edits 只吃 multipart，不要给它加 content-type（浏览器/Node 会自己带 boundary）
   const res = await fetchWithTimeout(`${base}/images/edits`, { method: 'POST', headers, body: form }, timeoutMs, what)
-  return imagegenResult(res, what, timeoutMs, tmp)
+  return imagegenResult(res, { what, timeoutMs, tmp, base, apiKey: creds.apiKey, log })
 }
 
 /** 凭据解析：实例配置注入优先，其次环境变量；代码里永远没有明文 key / 默认 baseUrl */
@@ -344,6 +442,7 @@ export default {
       text: '生图是可选能力：填好地址 / 模型 / API Key 后，模型就能在聊天里生成或修改图片。\n'
         + '· 协议怎么选：中转站兼容 /images/generations 与 /images/edits → 选「OpenAI 兼容 /images/*」（默认）；\n'
         + '  只提供 chat/completions 出图的（部分中转站）→ 选「OpenAI 兼容 chat/completions」。\n'
+        + '· 同步站 / 异步任务站自动兼容，不用另选协议：提交后只回 task_id 的站会自动轮询取图。\n'
         + '· 地址填到 /v1 为止（例：https://relay.example/v1）；模型名以你的中转站为准。\n'
         + '· API Key 的优先级：环境变量 QQ_IMAGEGEN_API_KEY > 下面这个输入框。\n'
         + '· 没配置时生图工具会明确提示"未配置生图凭据"，不影响聊天；填完（离开输入框即保存）点「运维」页的「🖼 检查生图配置」验证。',
@@ -378,6 +477,12 @@ export default {
     cooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 60, group: '生图', label: '全局冷却', hint: '普通用户两次生图之间至少隔多久（所有群共用）；主人发起的生图免冷却，但仍不能同时生成多张。' },
     ackCooldownMs: { type: 'int', unit: '秒', scale: 1000, default: 30, group: '生图', label: '「在画了」冷却', hint: '同一会话几秒内只说一次「在画了」，避免每张图都刷这句。' },
     timeoutMs: { type: 'int', unit: '秒', scale: 1000, default: 240, group: '生图', label: '生图超时', hint: '单次生图最多等多久；超时就放弃并回一句失败说明。' },
+    qualitySizeTiers: {
+      type: 'bool', default: false, group: '生图', label: '质量/尺寸档位（quality / size）',
+      hint: '打开：工具可指定 quality（low / medium / high）与 resolution（1k / 2k）+ aspect_ratio，插件换算成 quality / size 发给上游。\n'
+        + '关闭（默认）：不向上游发送 quality 与 size，由上游按自己的默认出图；工具参数与换算代码保留，传了也不生效。\n'
+        + '换回支持质量/尺寸档位的上游再打开。',
+    },
     extraBody: {
       type: 'text', group: '生图', label: '额外请求字段（JSON）', default: '',
       hint: '不同平台/中转站的请求字段不一样，这里可以自己补。写一个 JSON 对象，留空 = 不加任何额外字段。\n'
@@ -425,6 +530,8 @@ export default {
     const timeoutMs = () => toMs(cfg.timeoutMs, 240000)
     // 额外请求字段：每次现读（控制台改完下一张就生效）；非法 JSON 由 parseExtraBody 抛清晰错误
     const extrasNow = () => parseExtraBody(cfg.extraBody)
+    // 质量/尺寸档位总闸：关闭（默认）时既不向上游发 quality 也不发 size；参数与换算代码保留，换回支持档位的上游再打开
+    const tiersOn = () => cfg.qualitySizeTiers === true
     const inCooldown = () => lastGenAt > 0 && Date.now() - lastGenAt < cdMs()
 
     // 句池取不到时按兜底句发 —— 不能因为句池文件坏了就沉默
@@ -460,8 +567,19 @@ export default {
      * 尺寸：显式 size > 按**第一张参考图**比例自动选 1K 档 > 方图 1024x1024。
      * 为什么不交给上游 auto：实测不传 size / 传 auto 会给 2048 级（超出"一般不大于 1K"的约定）。
      */
-    function chooseSize(explicit, refs) {
+    function chooseSize(explicit, refs, resolution, aspectRatio) {
+      const tier = String(resolution || '1k').trim().toLowerCase()
+      if (!['1k', '2k'].includes(tier)) throw new Error('resolution 只支持 1k / 2k')
+      const ratio = String(aspectRatio || '').trim().replaceAll('：', ':')
+      const presets = {
+        '1:1': [1024, 1024], '16:9': [1536, 864], '9:16': [864, 1536],
+        '3:4': [864, 1152], '4:3': [1152, 864], '21:9': [1568, 672],
+      }
+      if (ratio && !presets[ratio]) throw new Error('aspect_ratio 只支持 16:9 / 9:16 / 3:4 / 4:3 / 1:1 / 21:9')
       const s = String(explicit || '').trim()
+      if (s && (resolution || ratio)) throw new Error('size 与 resolution/aspect_ratio 不能同时指定')
+      if (ratio) return presets[ratio].map((n) => n * (tier === '2k' ? 2 : 1)).join('x')
+      if (tier === '2k') return chooseSize('', refs).split('x').map((n) => Number(n) * 2).join('x')
       if (s) {
         if (!/^\d{2,4}x\d{2,4}$/.test(s)) throw new Error(`size 需形如 1024x1024，收到: "${s}"`)
         return s
@@ -585,6 +703,7 @@ export default {
       description:
         '按提示词生成或修改图片。不传 image = 文生图；传了 image = 图生图/改图，以那张图为参考，'
         + 'image 可给多张（数组，按顺序 = 图1、图2）。传了 target 就生成后直接发到该 QQ 会话。'
+        + '⚠️ 质量/尺寸档位（quality / resolution / aspect_ratio / size）目前默认关闭：**不要传**，传了也不生效、不会上送，由上游自己决定画质与尺寸（控制台可打开）。'
         + '⚠️ 画图有全局冷却：冷却中被挡会返回 {blocked:true,retryAfterMs,suggestedText} —— 此时**必须自己**用 '
         + 'mcp__qq__send_message 回一句（口吻照 suggestedText），然后结束本轮，**不要再调、不要重试**。'
         + '生成失败时本插件已代答，**不要重试、不要改写提示词再调一次**。',
@@ -598,7 +717,10 @@ export default {
         },
         target: { type: 'string', description: '会话目标 group:123456 或 private:123456；传了就生成后直接发过去，不传只返回本地文件路径' },
         text: { type: 'string', description: '随图发送的一句说明文字，可选' },
-        size: { type: 'string', description: '一般不用传：不传时按图1比例自动选 1K 档（竖 1024x1536 / 横 1536x1024 / 方 1024x1024）；只有要特定比例才传' },
+        size: { type: 'string', description: '兼容旧调用的像素尺寸（如 1024x1024）；仅「质量/尺寸档位」打开时生效（默认关闭，由上游决定）；不能和 resolution/aspect_ratio 同时传' },
+        resolution: { type: 'string', enum: ['1k', '2k'], description: '分辨率档位：1k（默认）或 2k；仅「质量/尺寸档位」打开时生效（默认关闭，由上游决定）；2k为相同比例1k尺寸的宽高各翻倍' },
+        aspect_ratio: { type: 'string', enum: ['16:9', '9:16', '3:4', '4:3', '1:1', '21:9'], description: '仅支持这六种比例；仅「质量/尺寸档位」打开时生效（默认关闭，由上游决定）' },
+        quality: { type: 'string', enum: ['low', 'medium', 'high'], description: '画质档位：low（默认，快、省）、medium、high；仅「质量/尺寸档位」打开时生效（默认关闭，由上游决定）' },
       },
 
       async execute(args = {}) {
@@ -639,9 +761,17 @@ export default {
         if (!creds.apiKey || !creds.baseUrl) {
           throw new Error('未配置生图凭据：请设置环境变量 QQ_IMAGEGEN_BASE_URL / QQ_IMAGEGEN_API_KEY，或在实例配置 credentials.gptImage 里填')
         }
-        const size = chooseSize(args.size, refs)
-        // 额外请求字段先解析：JSON 写错要**立刻**报错（不占冷却、也不先说「在画了」）
-        const extras = extrasNow()
+        // 质量/尺寸档位：默认关闭 —— 不发 quality/size，由上游按自己的默认出图（参数与换算代码保留）
+        const tiers = tiersOn()
+        let size
+        let quality
+        if (tiers) {
+          size = chooseSize(args.size, refs, args.resolution, args.aspect_ratio)
+          quality = String(args.quality || 'low').trim().toLowerCase()
+          if (!['low', 'medium', 'high'].includes(quality)) throw new Error('quality 只支持 low / medium / high')
+        }
+        // 其它额外字段照旧；档位打开时聊天指定的质量和尺寸优先，避免控制台旧字段覆盖用户选择。
+        const extras = tiers ? { ...extrasNow(), quality, size } : { ...extrasNow() }
 
         // ① 全局冷却：被挡的**不生成、不排队、不代答**，只把「被挡 + 还剩多久 + 一句参考话」交回模型
         const turn = bot.currentTurn?.()
@@ -672,7 +802,7 @@ export default {
         let file
         try {
           file = await gptGenerate({
-            prompt, refs, size, extras, timeoutMs: timeoutMs(), creds, tmp: bot.core?.tmp,
+            prompt, refs, size, extras, timeoutMs: timeoutMs(), creds, tmp: bot.core?.tmp, log,
           })
         } catch (e) {
           log.error(`[生图] ${refs.length ? '图生图' : '生图'}失败 (${Date.now() - t0}ms, prompt=${prompt.slice(0, 60)}): ${e.message}`)
@@ -701,12 +831,12 @@ export default {
           ms: Date.now() - t0,
           mode: refs.length ? 'edit' : 'generate',
           protocol: creds.protocol,
-          size,
+          ...(tiers ? { size, quality } : {}),
           refs: refs.length,
           actualSize: px ? `${px.w}x${px.h}` : null,
         }
         log.info(`[生图] (${out.protocol}) ${out.mode === 'edit' ? '图生图' : '生图'}完成 (${out.ms}ms, ${out.bytes}B, `
-          + `请求尺寸=${size}, 实际=${out.actualSize || '?'}${refs.length ? `, ref=${refs.join(' + ')}` : ''}, `
+          + `请求尺寸=${tiers ? size : '上游默认'}, 实际=${out.actualSize || '?'}${refs.length ? `, ref=${refs.join(' + ')}` : ''}, `
           + `${Object.keys(extras).length ? `额外字段=${Object.keys(extras).join(',')}, ` : ''}prompt=${prompt.slice(0, 60)}) → ${file}`)
         if (!canReply) return out
 

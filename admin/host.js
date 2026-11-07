@@ -14,7 +14,6 @@
  * 另导出 `handleAdminRpc(endpoint,payload)` 供内核/compat-server 直调（无需浏览器）。
  */
 import { createAdminEndpoints, ENDPOINTS } from './endpoints.js'
-import { loadOpsProvider } from '../ops/provider.js'
 
 /** 浏览器 → host 的 RPC 通道名（前端 client.js 的 CHANNEL 必须一致）。 */
 export const CHANNEL = '/qq-console'
@@ -106,18 +105,15 @@ function webServerHandler(api) {
  * @param {string} [opts.configPath] 实例配置路径（缺省 kernel.configPath）
  * @param {string} [opts.dataDir]    数据目录（缺省 kernel.dataDir）
  * @param {object} [opts.log]        日志器（默认 console）
- * @param {object} [opts.ops]        显式注入 ops provider（默认按 DSH_QQ_OPS / ~/.dsh 加载）
- * @returns {Promise<{handle:Function, handleRpc:Function, dispose:Function, ops:object, api:object, channel:string}>}
+ * @returns {Promise<{handle:Function, handleRpc:Function, dispose:Function, api:object, channel:string}>}
  */
-export async function createAdminHost({ ctx, kernel, configPath = '', dataDir = '', log = console, ops } = {}) {
+export async function createAdminHost({ ctx, kernel, configPath = '', dataDir = '', log = console } = {}) {
   if (!kernel || typeof kernel !== 'object') throw new Error('createAdminHost 需要 kernel（index.js 装配后传入）')
-  const opsProvider = ops || await loadOpsProvider({ log, dataDir: dataDir || kernel.dataDir || '' })
   const api = createAdminEndpoints({
     kernel,
     configPath: configPath || kernel.configPath || '',
     dataDir: dataDir || kernel.dataDir || '',
     log,
-    ops: opsProvider,
   })
   const handleRpc = (endpoint, payload = {}) => rpcEnvelope(api, endpoint, payload)
 
@@ -202,12 +198,11 @@ export async function createAdminHost({ ctx, kernel, configPath = '', dataDir = 
     }
   }
 
-  active = { api, ops: opsProvider }
+  active = { api }
   return {
     handle: api.handle,
     handleRpc,
     dispose,
-    ops: opsProvider,
     api,
     channel: CHANNEL,
     /** 注册结果可能异步到齐（ctx.inject 子 fiber 等 connection/webServer），用 getter 读实时值。 */

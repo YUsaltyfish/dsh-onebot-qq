@@ -37,6 +37,12 @@ export default {
       type: 'int', default: 24000, min: 1000, max: 200000, step: 1000, group: '群记忆', label: '单篇读取上限（字节）',
       hint: '超了按**整行**截断（不切碎多字节字符），末尾注明"过长已截断"',
     },
+    mutedChats: {
+      type: 'str', default: '', group: '群记忆', label: '关闭记忆的会话（每行一条）',
+      hint: '列在这的会话**不再读记忆、也不再积累**（自动/手动积累都跳过）；已有记忆文件仍可在控制台查看/编辑/删除。\n'
+        + '格式：群写 group:群号，私聊写 private:QQ号；一行一条，留空 = 全部开启。\n'
+        + '控制台「群记忆」页每个会话右边的 🔔/🔕 改的就是这项。',
+    },
 
     // ── 自动积累（本插件自带定时器，不需要外部 cron）──────────────────
     accumulateEnabled: {
@@ -123,13 +129,38 @@ export default {
       }
     }
 
-    function groupIdOf(ev) {
-      if (!ev || !ev.isGroup) return null
-      const gid = String(ev.groupId ?? '')
-      if (/^\d{4,12}$/.test(gid)) return gid
-      const m = /^group:(\d{4,12})$/.exec(String(ev.chatKey || ''))
-      return m ? m[1] : null
+    /** 当前会话线 key：群 = `group:<群号>`；私聊 = `private:<QQ号>`。认不出返回 null。 */
+    function lineKeyOf(ev) {
+      if (!ev) return null
+      const key = String(ev.chatKey || '')
+      if (/^(?:group|private):\d{4,12}$/.test(key)) return key
+      if (ev.isGroup) {
+        const gid = String(ev.groupId ?? '')
+        if (/^\d{4,12}$/.test(gid)) return `group:${gid}`
+      }
+      return null
     }
+    const lineIdOf = (key) => {
+      const k = String(key)
+      if (k.startsWith('private:')) return k.slice('private:'.length)
+      if (k.startsWith('group:')) return k.slice('group:'.length)
+      return k
+    }
+    const isPrivateLine = (key) => String(key).startsWith('private:')
+
+    /**
+     * 控制台「关闭记忆的会话」：逗号/空白分隔，形如 group:123456 / private:213445357。
+     * 每次现读 bot.cfg（热改立即生效）；非法项直接忽略，不让一处脏数据把整页/积累打挂。
+     */
+    function mutedKeys() {
+      const out = new Set()
+      for (const raw of String(bot.cfg?.mutedChats || '').split(/[\s,，]+/)) {
+        const s = raw.trim()
+        if (/^(?:group|private):\d{4,12}$/.test(s)) out.add(s)
+      }
+      return out
+    }
+    const isMuted = (chatKey) => mutedKeys().has(String(chatKey || ''))
 
     /** 超过上限按**整行**截断：先按字节砍到上限，再退到最后一个换行（免得切碎多字节字符）。 */
     function clip(text) {
@@ -137,10 +168,13 @@ export default {
       if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
       const cut = Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8')
       const nl = cut.lastIndexOf('\n')
-      return cut.slice(0, nl > 0 ? nl : cut.length).replace(/\r$/, '') + '\n…（本群记忆过长已截断，请精简文件）'
+      return cut.slice(0, nl > 0 ? nl : cut.length).replace(/\r$/, '') + '\n…（记忆过长已截断，请精简文件）'
     }
 
-    const fileOf = (gid) => path.join(dirOf(), `${gid}.md`)
+    /** 记忆文件：群 `<dir>/<群号>.md`；私聊 `<dir>/private/<QQ号>.md`（分目录，避免群号/QQ号撞名）。 */
+    const fileOf = (key) => (isPrivateLine(key)
+      ? path.join(dirOf(), 'private', `${lineIdOf(key)}.md`)
+      : path.join(dirOf(), `${lineIdOf(key)}.md`))
 
     /**
      * 读原文（只剥 BOM 与行尾记账注释，**不按 maxBytes 截断**）。
@@ -149,8 +183,8 @@ export default {
      * ⚠️ 积累器必须用原文：它的「合并 → 整篇写回」如果拿截断后的文本当基准，
      *    超过 maxBytes 的尾部每轮都会丢（旧版的 bug，见读写口径分离）。
      */
-    function loadRaw(gid) {
-      const file = fileOf(gid) // gid 已过 4–12 位纯数字校验 → 不会有路径穿越
+    function loadRaw(key) {
+      const file = fileOf(key) // key 已过 group:/private: + 4–12 位纯数字校验 → 不会有路径穿越
       let st
       try { st = fs.statSync(file) } catch { return null } // 没文件 = 没记忆
       const stamp = `${st.mtimeMs}:${st.size}`
@@ -166,14 +200,14 @@ export default {
     }
 
     /** 给积累器/备份用：不截断。 */
-    function readRaw(gid) {
-      const r = loadRaw(gid)
+    function readRaw(key) {
+      const r = loadRaw(key)
       return r ? { text: r.text, stamp: r.stamp, bytes: r.bytes } : null
     }
 
     /** 给模型用：按 maxBytes 截断（只影响进上下文的文本，不影响写盘基准）。 */
-    function readMemory(gid) {
-      const r = loadRaw(gid)
+    function readMemory(key) {
+      const r = loadRaw(key)
       if (!r) return null
       const text = clip(r.text).trim()
       return { text, stamp: r.stamp, clipped: text.length < r.text.trim().length, bytes: r.bytes }
@@ -182,54 +216,63 @@ export default {
     // ── 入口 ①：before-turn 只推一行指针（首次 / 有更新；未变化 0 字符） ──────────
     bot.on('before-turn', (ev) => {
       if (cfg.enabled === false || !ev.wake) return // 没唤醒的消息不进模型，提示串也没用
-      if (ev.wake.kind === 'welcome') return // 入群欢迎轮不该被"读群记忆"的指针分心
-      const gid = groupIdOf(ev)
-      if (!gid) return
-      const mem = readMemory(gid)
+      if (ev.wake.kind === 'welcome') return // 入群欢迎轮不该被"读记忆"的指针分心
+      const key = lineKeyOf(ev)
+      if (!key) return
+      if (isMuted(ev.chatKey)) {
+        log.debug(`[群记忆] ${key} 会话记忆已关闭 → 不注入指针`)
+        return
+      }
+      const mem = readMemory(key)
       if (!mem) return // 没记忆文件 = 什么都不加（积累器还没跑过）
       const prev = getSeen(ev.chatKey)
+      const priv = isPrivateLine(key)
       if (!prev) {
         setSeen(ev.chatKey, mem.stamp)
-        ev.hint.push('[本群记忆: 调工具 read_memory 可看本群的说话风格与群友画像；'
-          + '第一次在本群回话前建议先读一次。**认人只看 QQ 号**（群友常换昵称，同一人换了名字仍是同一人）]')
-        log.debug(`[群记忆] ${gid} 本会话首次 → 只给指针（${mem.text.length} 字不再贴正文）`)
+        ev.hint.push(priv
+          ? '[本私聊记忆: 调工具 read_memory 可看对方的偏好、称呼与回话约定；'
+            + '第一次在这里回话前建议先读一次。**认人只看 QQ 号**]'
+          : '[本群记忆: 调工具 read_memory 可看本群的说话风格与群友画像；'
+            + '第一次在本群回话前建议先读一次。**认人只看 QQ 号**（群友常换昵称，同一人换了名字仍是同一人）]')
+        log.debug(`[群记忆] ${key} 本会话首次 → 只给指针（${mem.text.length} 字不再贴正文）`)
       } else if (prev !== mem.stamp) {
         setSeen(ev.chatKey, mem.stamp)
-        ev.hint.push('[本群记忆已更新，需要时调 read_memory 重读]')
-        log.debug(`[群记忆] ${gid} 内容有更新 → 只给指针`)
+        ev.hint.push(priv ? '[本私聊记忆已更新，需要时调 read_memory 重读]' : '[本群记忆已更新，需要时调 read_memory 重读]')
+        log.debug(`[群记忆] ${key} 内容有更新 → 只给指针`)
       } else {
-        log.debug(`[群记忆] ${gid} 未变化，本轮不提示`) // 0 字符
+        log.debug(`[群记忆] ${key} 未变化，本轮不提示`) // 0 字符
       }
     })
 
     // ── 入口 ②：工具 read_memory（只读本群那一篇；群里没有文件权限，这是唯一的"翻记忆"路） ──
     bot.registerTool('read_memory', {
       description:
-        '读本群的长期记忆：这个群怎么把机器人叫起来、该怎么回话（语气/长度/称呼/忌讳），以及群里每个人的特点。\n'
+        '读本会话（本群或本私聊）的长期记忆：怎么被叫起来、该怎么回话（语气/长度/称呼/忌讳），以及这里的人的特点。\n'
         + '这份记忆与人设解耦：里面提到机器人自己一律用「我」，不写人设。'
-        + '**认人只看 QQ 号**：条目形如 `- **昵称(QQ)**：…`，群里的人常换昵称，同一个 QQ 换了名字仍是同一个人'
-        + '（按 QQ 对上他，别当成新面孔）。第一次在本群回话前建议先读一次；同一会话读一次就够，'
-        + '之后收到「本群记忆已更新」提示时再重读。只对群会话有效，读不到本群以外的任何文件。',
+        + '**认人只看 QQ 号**：条目形如 `- **昵称(QQ)**：…`，人常换昵称，同一个 QQ 换了名字仍是同一个人'
+        + '（按 QQ 对上他，别当成新面孔）。第一次在本会话回话前建议先读一次；同一会话读一次就够，'
+        + '之后收到「记忆已更新」提示时再重读。只能读本轮会话那一篇，读不到别的群/私聊。',
       // DSH `defineTool` 的 parameters 是**扁平**的「属性名 → 值 schema」映射；required 写在属性上。
       parameters: {
-        target: { type: 'string', required: true, description: '会话目标，形如 group:123456（通常填本轮会话，见开头 [QQ会话 …]）' },
+        target: { type: 'string', required: true, description: '会话目标，形如 group:123456 或 private:213445357（通常填本轮会话，见开头 [QQ会话 …]）' },
       },
       execute(args) {
         const target = String(args?.target || '')
-        const m = /^group:(\d{4,12})$/.exec(target) // 4–12 位纯数字：顺手挡路径穿越，也挡住唤醒词表里的 "*"
-        if (!m) throw new Error('read_memory 只对群会话有效（target 形如 group:123456）')
-        if (cfg.enabled === false) throw new Error('群记忆读取已关闭')
-        const gid = m[1]
-        // 只读本群：拿本轮会话当边界。别的群号不可能是本轮 → 拒绝，别让这条路变成读别的群
+        const m = /^(group|private):(\d{4,12})$/.exec(target) // 4–12 位纯数字：顺手挡路径穿越，也挡住唤醒词表里的 "*"
+        if (!m) throw new Error('read_memory 的 target 形如 group:123456 或 private:213445357')
+        if (cfg.enabled === false) throw new Error('记忆读取已关闭')
+        if (isMuted(target)) throw new Error('这个会话的记忆已关闭（控制台「群记忆」页把它的开关打开即可）')
+        // 只读本轮会话：别的群/私聊不可能是本轮 → 拒绝，别让这条路变成读别处的记忆
         const turn = bot.currentTurn()
         if (turn && turn.chatKey && turn.chatKey !== target) {
-          throw new Error(`只能读本群记忆（本轮会话是 ${turn.chatKey}，不是 ${target}）`)
+          throw new Error(`只能读本会话记忆（本轮会话是 ${turn.chatKey}，不是 ${target}）`)
         }
-        const mem = readMemory(gid)
-        if (!mem) return { ok: true, target, memory: '', hint: '本群还没有记忆文件（积累器还没跑过）' }
-        log.info(`[群记忆] 自读 ${gid} → ${mem.text.length} 字${mem.clipped ? '（已按上限截断）' : ''}`)
+        const mem = readMemory(target)
+        if (!mem) return { ok: true, target, memory: '', hint: '这个会话还没有记忆文件（积累器还没跑过）' }
+        log.info(`[群记忆] 自读 ${target} → ${mem.text.length} 字${mem.clipped ? '（已按上限截断）' : ''}`)
         return {
-          ok: true, target, group_id: gid, chars: mem.text.length, memory: mem.text,
+          ok: true, target, chars: mem.text.length, memory: mem.text,
+          ...(m[1] === 'group' ? { group_id: m[2] } : { private_id: m[2] }),
           ...(mem.clipped ? { clipped: true, hint: `记忆原文 ${mem.bytes} 字节，超过读取上限，已按整行截断；需要完整内容请让人在控制台调大 maxBytes 或精简文件` } : {}),
         }
       },
@@ -239,12 +282,12 @@ export default {
     // 内核的工具守卫只允许「群记忆积累后台会话」调用它；普通 QQ 会话调会被拒。
     bot.registerTool('memory_append', {
       description:
-        '群记忆积累**后台任务专用**：把从最近聊天里提炼出的「新增要点」按群提交，插件会去重后合并进该群记忆文件'
-        + '（群聊会话调不到、也不需要它）。每个群调一次：group_id = 群号；points = 新增要点 Markdown 列表行；'
-        + '没有值得记的写「（无新增）」。调用成功后不要再重复提交同一个群。',
+        '记忆积累**后台任务专用**：把从最近聊天里提炼出的「新增要点」按会话提交，插件会去重后合并进该会话的记忆文件'
+        + '（普通聊天会话调不到、也不需要它）。每个会话调一次：target = group:群号 或 private:QQ号；'
+        + 'points = 新增要点 Markdown 列表行；没有值得记的写「（无新增）」。调用成功后不要再重复提交同一个会话。',
       parameters: {
-        group_id: { type: 'string', required: true, description: '群号（prompt 里【群 号码】的号码，原样抄）' },
-        points: { type: 'string', required: true, description: '本群新增要点：Markdown 列表行（- **昵称(QQ)**：… / - 风格：… / - 其它：…）；没有新增写「（无新增）」' },
+        target: { type: 'string', required: true, description: '会话目标：群写 group:群号，私聊写 private:QQ号（prompt 里【群 …】/【私聊 …】的号码，原样抄）' },
+        points: { type: 'string', required: true, description: '本会话新增要点：Markdown 列表行（- **昵称(QQ)**：… / - 风格：… / - 其它：…）；没有新增写「（无新增）」' },
       },
       execute(args, exec) {
         const submit = bot.shared.memoryAccumulateSubmit
@@ -261,8 +304,10 @@ export default {
       dataDirOf,
       memoryDirOf: dirOf,
       readMemoryOf: readRaw,
-      invalidateMemoryOf: (gid) => rawCache.delete(fileOf(gid)),
+      invalidateMemoryOf: (key) => rawCache.delete(fileOf(key)),
       maxBytesOf,
+      // 积累器内部 key：群 = 群号，私聊 = private:<QQ号>；会话开关直接用 chatKey 判断
+      mutedOf: (key) => isMuted(String(key).startsWith('private:') ? key : `group:${key}`),
     })
     bot.shared.memoryAccumulate = accumulator.manual
     bot.shared.memoryAccumulateStatus = accumulator.status

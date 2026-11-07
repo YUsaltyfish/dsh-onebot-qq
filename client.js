@@ -40,7 +40,7 @@ window.__ModuleLoader__.load({
 		//   ⇒ 以后加一组开关：group 写新名字就自动多一页，前端不用改。
 		// PERSONA_GROUPS（默认空）：如有分组要跟着「人设」显示在总览页，由 schema.personaGroups 指定。
 		// 数据（schema / status / msg / busy / confirmBox）由**外壳统一持有**再往下传：
-		// ① 避免每个标签页各拉一遍 status（status 里要 spawnSync 查四个服务，拉 6 次很浪费）；
+		// ① 避免每个标签页各拉一遍 status（共享同一份健康状态与配置快照）；
 		// ② 操作反馈（消息行）和二次确认弹窗做成**跨标签页共用**，切页不丢。
 		// 标签页组件只负责"渲染自己那一块"，不自己取数。
 
@@ -104,6 +104,59 @@ window.__ModuleLoader__.load({
 			])
 		}
 
+		/** 私聊名单：每次只添加一个 QQ，数字数组仍经通用 set 保存。 */
+		function PrivateChatsEditor(props) {
+			const { control: c, busy, run, call } = props
+			const { useState, useRef } = react
+			const [qq, setQq] = useState('')
+			const [note, setNote] = useState('')
+			const [saving, setSaving] = useState(false)
+			const pending = useRef(false)
+			const ids = Array.isArray(c.value) ? c.value.map(Number) : []
+			const blocked = busy || saving
+			const save = async (value, added) => {
+				if (busy || pending.current) return
+				pending.current = true
+				setSaving(true); setNote('')
+				try {
+					await run(added ? `添加私聊 QQ ${added}` : '移除私聊 QQ', async () => {
+						const result = await call('set', { key: c.key, value })
+						// run 会吞错误，必须在真实写入确认后才清空输入。
+						if (!result || result.ok !== true) throw new Error((result && result.error) || '保存未确认')
+						if (added) setQq('')
+						return result
+					})
+				} catch (e) { setNote(`保存失败：${e.message}`) }
+				finally { pending.current = false; setSaving(false) }
+			}
+			const add = () => {
+				if (blocked || pending.current) return
+				const value = qq.trim()
+				if (!/^\d{1,12}$/.test(value) || Number(value) <= 0) { setNote('请输入一个 1–12 位正整数 QQ 号'); return }
+				const id = Number(value)
+				if (ids.includes(id)) { setNote(`QQ ${id} 已在名单里`); return }
+				return save([...ids, id], id)
+			}
+			return h('div', { key: c.key, title: String(c.hint || '').replace(/\*\*/g, '') }, [
+				h('div', { key: 'row', style: S.row }, [
+					h('span', { key: 'label', style: S.label }, c.label),
+					...ids.map((id) => h('span', { key: id, style: S.chip }, [
+						String(id),
+						h('button', { key: 'remove', type: 'button', style: S.btn, disabled: blocked,
+							'aria-label': `移除私聊 QQ ${id}`, onClick: () => !blocked && save(ids.filter((x) => x !== id)) }, '×'),
+					])),
+					h('input', { key: 'input', style: S.input, value: qq, placeholder: 'QQ 号', inputMode: 'numeric', disabled: blocked,
+						onChange: (e) => { setQq(e.target.value); setNote('') },
+						onKeyDown: (e) => {
+							if (e.key !== 'Enter' || e.isComposing || (e.nativeEvent && e.nativeEvent.isComposing) || e.keyCode === 229) return
+							e.preventDefault(); return add()
+						} }),
+					h('button', { key: 'add', type: 'button', style: S.btn, disabled: blocked || !qq.trim(), onClick: add, 'aria-label': '添加私聊 QQ' }, '+'),
+				]),
+				note ? h('div', { key: 'note', style: S.msg }, note) : null,
+			])
+		}
+
 		/** 开关行（支持 bool / enum / str / group / int / float / text；info = 整行说明块） */
 		function ctrlRow(c, api) {
 			const { busy, run, call, setMsg } = api
@@ -121,6 +174,7 @@ window.__ModuleLoader__.load({
 			}
 			// 群唤醒词：老款「填空 + 添加」交互（存储仍是 config 的文本行格式；不用多行文本框）
 			if (c.key === 'gate-wake.keywords') return h(WakeWordsEditor, { key: c.key, ...api })
+			if (c.type === 'qq-list') return h(PrivateChatsEditor, { key: c.key, ...api, control: c })
 			// 悬停解释（2026-10-11）：和「群记忆」标签页同一套 UX —— 整行 title + 行尾 ⓘ
 			const renderInput = () => {
 				if (c.type === 'bool') {
@@ -396,7 +450,7 @@ window.__ModuleLoader__.load({
 											title: (a.confirm && a.confirm.title) || `⚠️ 确认执行「${a.label}」？`,
 											lines: (p.previewLines && p.previewLines.length) ? p.previewLines : [p.message || '（预演没有输出）'],
 											okLabel: (a.confirm && a.confirm.okLabel) || '确认执行',
-											onOk: () => run(a.label, () => call('action', { id: a.id, confirm: true })),
+											onOk: () => run(a.label, () => call('action', { id: a.id, confirm: true, ...(p.previewToken ? { previewToken: p.previewToken } : {}) })),
 										})
 									}).catch((e) => setMsg(`${a.label} ✗ ${e.message}`))
 										.finally(() => setBusy(false))
@@ -739,10 +793,19 @@ window.__ModuleLoader__.load({
 			const reply = (status && status.reply) || null
 			const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) } catch { return '?' } }
 			const groups = (reply && Array.isArray(reply.groups)) ? reply.groups : []
+			const privateChats = (reply && Array.isArray(reply.privateChats)) ? reply.privateChats : []
+			const privateSilencePaused = all.some((c) => c.key === 'pacing.reply.silenceEnabled' && c.value === false)
+			// 是否处于时段内只信后端调度状态，不在浏览器另算一套时间。
+			const quietHours = reply && reply.quietHours
+			const quietActive = !!(quietHours && quietHours.active)
+			const fmtDateTime = (ts) => {
+				const date = new Date(ts)
+				return ts && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '待安排'
+			}
 			return h('div', null, [
 				h('div', { style: S.msg, key: 'note' },
-					'没人叫它的时候，它也会偶尔自己接一句。先选个档位，下面还能细调；'
-					+ '每个群还要在「群聊」页勾「允许主动接话」。'),
+					'群聊、私聊共用「允许主动接话」总开关。群聊还要在「群聊」页勾选；'
+					+ '私聊只对下面的 QQ 名单生效，默认不主动找任何人。群聊档位不改变私聊间隔。'),
 				h('div', { style: S.group, key: 'pt' }, '快速档位'),
 				h('div', { style: S.row, key: 'presets' }, REPLY_PRESETS.map((m) => h('button', {
 					key: m.id, style: S.btn, disabled: busy, title: m.hint,
@@ -750,8 +813,12 @@ window.__ModuleLoader__.load({
 				}, m.label))),
 				h('div', { style: S.msg, key: 'ph' },
 					reply && reply.enabled
-						? `当前：每小时最多 ${reply.hourlyMax} 次 · 实际间隔 ≥ ${Math.round((reply.minGapMs || 0) / 60000)} 分钟 · 语境门槛 ${Math.round((reply.threshold || 0) * 100)} 分`
-						: '当前：主动接话关着（上面「允许主动接话」打开即可）'),
+						? `群聊：每小时最多 ${reply.hourlyMax} 次 · 实际间隔 ≥ ${Math.round((reply.minGapMs || 0) / 60000)} 分钟 · 语境门槛 ${Math.round((reply.threshold || 0) * 100)} 分`
+						: '当前：群聊、私聊主动接话都关着（打开「允许主动接话」后再配置名单）'),
+				quietHours ? h('div', { style: S.msg, key: 'quiet-status' },
+					quietActive
+						? '当前免打扰：群聊主动接话、群聊续聊和私聊找话已暂停；正常回复不受影响。'
+						: quietHours.enabled === false ? '主动接话免打扰已关闭。' : '当前不在免打扰时段。') : null,
 				...controls.map((c) => ctrlRow(c, props)),
 				// ═══ 具名折叠块（如「连续对话」）：和「高级」一样的按钮，但独立成栏、默认收起 ═══
 				...sections.map((sec) => {
@@ -788,9 +855,21 @@ window.__ModuleLoader__.load({
 									: ' ｜ 还没触发过')),
 						]))
 						: h('div', { style: S.msg, key: 'empty' }, '还没有允许主动接话的群 —— 去「群聊」页勾一下。'),
+					h('div', { style: S.group, key: 'private-title' }, '私聊状态'),
+					privateChats.length
+						? privateChats.map((p) => h('div', { style: S.row, key: p.chatKey || 'private:' + p.userId }, [
+							h('span', { style: S.label, key: 'l' }, `私聊 QQ ${p.userId || String(p.chatKey || '').replace(/^private:/, '')}`),
+							h('span', { key: 'v', style: S.msg },
+								`连续未回复 ${p.unanswered || 0} 次`
+								+ ` ｜ 下次机会 ${!reply.enabled ? '总开关已关闭' : quietActive ? '免打扰中' : privateSilencePaused ? '冷场找话已暂停' : fmtDateTime(p.nextAt)}`
+								+ (p.lastAt
+									? ` ｜ 上次 ${fmtDateTime(p.lastAt)} ${p.lastSent === true ? '已找话' : (p.lastSent === false ? '未发送' : '')}`
+									: ' ｜ 还没触发过')),
+						]))
+						: h('div', { style: S.msg, key: 'private-empty' }, '还没有允许主动找话的私聊；在上面填写 QQ 名单，留空就不发。'),
 					(reply.recent && reply.recent.length)
 						? h('div', { style: S.msg, key: 'recent' }, '最近：' + reply.recent
-							.map((r) => `${fmtTime(r.at)} 群${r.groupId} ${r.sent ? '已接' : '没接'}${r.reason === 'silence' ? '（冷场找话）' : ''}`)
+							.map((r) => `${fmtTime(r.at)} ${r.isGroup === false || String(r.chatKey || '').startsWith('private:') ? '私聊' + (r.userId || String(r.chatKey).replace(/^private:/, '')) : '群' + r.groupId} ${r.sent ? '已接' : '没接'}${r.reason === 'silence' ? '（冷场找话）' : ''}`)
 							.join('；'))
 						: null,
 				]) : null,
@@ -1088,7 +1167,7 @@ window.__ModuleLoader__.load({
 			const { ctx } = props
 			const { useState, useEffect, useCallback } = react
 			const [data, setData] = useState(null)
-			const [cur, setCur] = useState(null)     // { group_id, name, content, bytes, dirty }
+			const [cur, setCur] = useState(null)     // { chat, kind, id, name, content, bytes, dirty }
 			const [cfgOpen, setCfgOpen] = useState(false)   // 「工具配置」展开
 			const [cfg, setCfg] = useState(null)            // 配置表（按需拉）
 			const [msg, setMsg] = useState('')
@@ -1111,23 +1190,26 @@ window.__ModuleLoader__.load({
 					if (d && d.ok === false) throw new Error(d.error)
 					setData(d)
 					const gs = d.groups || []
-					const pick = wantId || (cur && cur.group_id) || (gs[0] && gs[0].group_id)
+					const pick = wantId || (cur && cur.chat) || (gs[0] && gs[0].chat)
 					if (pick) await open(pick, gs)
 					return true
 				} catch (e) { setMsg(`读取列表失败：${e.message}`); return false }
 			}, [call, cur])
 
-			const open = async (gid, gs) => {
+			// chat = group:<群号> / private:<QQ号>（后端 read/save/delete 都认它）
+			const open = async (chat, gs) => {
 				setBusy(true); setMsg('')
 				try {
-					const r = await call('read', { group_id: gid })
+					const r = await call('read', { chat })
 					if (r && r.ok === false) throw new Error(r.error)
-					const g = (gs || (data && data.groups) || []).find((x) => x.group_id === gid) || {}
+					const g = (gs || (data && data.groups) || []).find((x) => x.chat === chat) || {}
 					setCur({
-						group_id: gid, name: g.name || '', content: r.content || '', bytes: r.bytes || 0,
+						chat, kind: g.kind || (String(chat).startsWith('private:') ? 'private' : 'group'),
+						id: g.id || String(chat).split(':')[1] || '',
+						name: g.name || '', content: r.content || '', bytes: r.bytes || 0,
 						mtimeMs: r.mtimeMs || 0, dirty: false,
 					})
-				} catch (e) { setMsg(`读 ${gid} 失败：${e.message}`) } finally { setBusy(false) }
+				} catch (e) { setMsg(`读 ${chat} 失败：${e.message}`) } finally { setBusy(false) }
 			}
 
 			// 积累在后台跑：每 3s 拉一次 list（只更新列表/状态，不碰编辑器，避免覆盖未保存内容）
@@ -1185,7 +1267,7 @@ window.__ModuleLoader__.load({
 				try {
 					// ifMtime：页面打开后积累器可能已经写过；服务端 mtime 不一致会拒绝，避免旧内容整篇覆盖新要点。
 					const r = await call('save', {
-						group_id: cur.group_id, content: cur.content,
+						chat: cur.chat, content: cur.content,
 						...(cur.mtimeMs ? { ifMtime: cur.mtimeMs } : {}),
 					})
 					if (r && r.ok === false) throw new Error(r.error)
@@ -1199,6 +1281,56 @@ window.__ModuleLoader__.load({
 				} catch (e) { setMsg(`保存 ✗ ${e.message}`) } finally { setBusy(false) }
 			}
 
+			// 切换某群的「记忆开关」：写 config 的 group-memory.mutedChats（插件读侧/积累侧都按它拦截）
+			const toggleMute = async (g) => {
+				if (!data) return
+				const key = g.chat
+				const curSet = new Set((data.groups || []).filter((x) => x.muted).map((x) => x.chat))
+				const turnOn = curSet.has(key) // 现在关着 → 这次要打开
+				if (turnOn) curSet.delete(key)
+				else curSet.add(key)
+				const value = [...curSet].sort().join(', ')
+				setBusy(true); setMsg('')
+				try {
+					const r = await call('setcfg', { key: 'group-memory.mutedChats', value })
+					if (r && r.ok === false) throw new Error(r.error)
+					setMsg(`${g.name || g.chat}：记忆已${turnOn ? '打开' : '关闭'} ✓（${turnOn ? '恢复读取与积累' : '不再读取和积累，已有内容仍可编辑'}）`)
+					const d = await call('list')
+					if (d && d.ok !== false) setData(d)
+				} catch (e) { setMsg(`切换记忆开关 ✗ ${e.message}`) } finally { setBusy(false) }
+			}
+
+			// 删除某群记忆：软删除（移到 <记忆目录>/.trash/<群号>-时间戳/，可恢复）
+			// 用途：退群后残留的记忆文件从这里清掉；不会退群、不改群配置。
+			const askDeleteMemory = (g) => setConfirmBox({
+				title: '⚠️ 删除这个群的记忆？',
+				lines: [
+					`${g.kind === 'private' ? '私聊' : '群'}：${g.name || ''}（${g.chat}）`,
+					'会把这篇记忆和它的历史版本一起移到记忆目录下的 .trash/<群号>-时间戳/（软删除，可手动恢复）。',
+					'不会退群、不改群配置；删完这个群就不在列表里了。',
+				],
+				okLabel: '移到回收站',
+				onOk: async () => {
+					setBusy(true); setMsg('')
+					try {
+						const r = await call('delete', { chat: g.chat, confirm: true })
+						if (r && r.ok === false) throw new Error(r.error)
+						setMsg(r && r.message ? r.message : '已移入回收站 ✓')
+						const wasCur = !!(cur && cur.chat === g.chat)
+						if (wasCur) setCur(null)
+						const d = await call('list')
+						if (d && d.ok !== false) {
+							setData(d)
+							const rest = (d.groups || []).filter((x) => x.chat !== g.chat)
+							if (wasCur) {
+								if (rest[0]) await open(rest[0].chat, d.groups)
+								else setCur(null)
+							}
+						}
+					} catch (e) { setMsg(`删除 ✗ ${e.message}`) } finally { setBusy(false) }
+				},
+			})
+
 			if (!data) {
 				return h('div', { style: S.card }, [
 					h('div', { style: S.title, key: 't' }, '群记忆'),
@@ -1210,7 +1342,7 @@ window.__ModuleLoader__.load({
 			const kb = (n) => n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB'
 
 			return h('div', { style: S.card }, [
-				h('div', { style: S.title, key: 't' }, '群记忆 · 每群一篇'),
+				h('div', { style: S.title, key: 't' }, '群记忆 · 每群 / 每私聊一篇'),
 
 				h('div', { style: S.row, key: 'top' }, [
 					h('button', {
@@ -1244,7 +1376,7 @@ window.__ModuleLoader__.load({
 					h('span', {
 						key: 'sch', style: SM.dim,
 						title: data.accumulate
-							? `来源：${data.accumulate.source === 'builtin' ? '插件内置调度器' : data.accumulate.source === 'ops' ? '本机运维能力' : '未启用'}`
+							? `来源：${data.accumulate.source === 'builtin' ? '插件内置调度器' : '未启用'}`
 							: '',
 					}, '自动积累：' + (String(data.schedule || '') || '—')
 						+ (data.accumulate && data.accumulate.running ? '（正在积累…）' : '')),
@@ -1253,7 +1385,7 @@ window.__ModuleLoader__.load({
 				]),
 
 				h('div', { style: SM.dim, key: 'hint' },
-					'每个群一篇 Markdown：记「唤醒与对话风格」和「群里的人」。' +
+					'每个群 / 每个私聊一篇 Markdown：记「唤醒与对话风格」和「群里的人 / 对方与提到的人」。' +
 					'群聊时内核只给模型一行「有这份记忆」的指针，它需要时再自己调 read_memory 读（整篇不往对话正文里贴）；' +
 					'内容由插件自带的积累器定时更新' +
 					'（节奏见上面那行「自动积累」），' +
@@ -1279,39 +1411,69 @@ window.__ModuleLoader__.load({
 				]),
 
 				h('div', { style: SM.layout, key: 'body' }, [
-					// 左：群清单
+					// 左：会话清单（群 + 私聊混排）
 					h('div', { style: SM.list, key: 'l' }, groups.map((g) => h('div', {
-						key: g.group_id, style: SM.item(!!cur && cur.group_id === g.group_id),
+						key: g.chat, style: SM.item(!!cur && cur.chat === g.chat),
 						title: '点一下展开预览，再点一下收起',
 						onClick: () => {
 							// 按压式开关：点已选中的那个 = 收起预览
-							const same = !!(cur && cur.group_id === g.group_id)
+							const same = !!(cur && cur.chat === g.chat)
 							if (cur && cur.dirty && !window.confirm(same ? '当前这篇有未保存的改动，确定要收起吗？' : '当前这篇有未保存的改动，确定要切换吗？')) return
 							if (same) { setCur(null); return }
-							open(g.group_id)
+							open(g.chat)
 						},
 					}, [
-						h('div', { key: 'n', style: { fontWeight: 600 } }, g.name || ('群 ' + g.group_id)),
-						h('div', { key: 's', style: SM.dim },
-							g.group_id + '　' + (g.exists ? kb(g.bytes) + ' / ' + g.bullets + ' 条' : '（还没文件）') +
-							(g.managed ? '' : '　未托管')),
+						h('div', { key: 'row', style: { display: 'flex', alignItems: 'flex-start', gap: 6 } }, [
+							h('div', { key: 'txt', style: { flex: '1 1 auto', minWidth: 0 } }, [
+								h('div', { key: 'n', style: { fontWeight: 600 } },
+									(g.kind === 'private' ? '私聊 · ' : '') + (g.name || (g.kind === 'private' ? ('QQ ' + g.id) : ('群 ' + g.id)))),
+								h('div', { key: 's', style: SM.dim },
+									g.id + '　' + (g.exists ? kb(g.bytes) + ' / ' + g.bullets + ' 条' : '（还没文件）') +
+									(g.kind === 'private' ? '' : (g.managed ? '' : '　未托管')) +
+									(g.muted ? '　🔕 记忆已关' : '')),
+							]),
+							h('button', {
+								key: 'mute',
+								style: Object.assign({}, SM.mini, {
+									flex: '0 0 auto', padding: '0 5px', lineHeight: '16px',
+									opacity: g.muted ? 1 : .5,
+								}),
+								disabled: busy,
+								title: g.muted
+									? '该会话记忆已关闭（不读也不积累）→ 点一下打开'
+									: '该会话记忆开着 → 点一下关闭（不读也不积累，已有内容保留）',
+								onClick: (e) => { e.stopPropagation(); toggleMute(g) },
+							}, g.muted ? '🔕' : '🔔'),
+							h('button', {
+								key: 'del',
+								style: Object.assign({}, SM.mini, { flex: '0 0 auto', padding: '0 6px', lineHeight: '16px' }),
+								disabled: busy,
+								title: '删除该会话记忆（移入 .trash 回收站，可恢复）',
+								onClick: (e) => { e.stopPropagation(); askDeleteMemory(g) },
+							}, '🗑'),
+						]),
 					]))),
 
 					// 右：编辑器
 					h('div', { style: { flex: '1 1 420px', minWidth: 320 }, key: 'r' }, cur ? [
 						h('div', { style: S.row, key: 'hd' }, [
 							h('span', { key: 't', style: { fontWeight: 600 } },
-								(cur.name || ('群 ' + cur.group_id)) + '（' + cur.group_id + '）'),
-							h('button', { key: 'sv', style: S.btn, disabled: busy || !cur.dirty, onClick: save, title: '保存到该群的记忆文件（会写盘）' },
+								(cur.kind === 'private' ? '私聊 · ' : '')
+								+ (cur.name || (cur.kind === 'private' ? ('QQ ' + cur.id) : ('群 ' + cur.id)))
+								+ '（' + cur.id + '）'),
+							((data.groups || []).find((x) => x.chat === cur.chat) || {}).muted
+								? h('span', { key: 'muted', style: SM.dim, title: '该会话记忆已关闭：不再读取/积累，但这里仍可编辑保存' }, '🔕 记忆已关')
+								: null,
+							h('button', { key: 'sv', style: S.btn, disabled: busy || !cur.dirty, onClick: save, title: '保存到该会话的记忆文件（会写盘）' },
 								cur.dirty ? '保存' : '已保存'),
-							h('button', { key: 'rl', style: SM.mini, disabled: busy, onClick: () => open(cur.group_id), title: '丢弃未保存的改动，重新读盘' }, '放弃改动'),
+							h('button', { key: 'rl', style: SM.mini, disabled: busy, onClick: () => open(cur.chat), title: '丢弃未保存的改动，重新读盘' }, '放弃改动'),
 							h('span', { key: 'b', style: SM.dim }, cur.content.length + ' 字符'),
 						]),
 						h('textarea', {
 							key: 'ta', style: SM.area, value: cur.content, disabled: busy, spellCheck: false,
 							onChange: (e) => setCur(Object.assign({}, cur, { content: e.target.value, dirty: true })),
 						}),
-					] : h('div', { style: S.msg, key: 'none' }, '（左边点一个群）')),
+					] : h('div', { style: S.msg, key: 'none' }, '（左边点一个会话）')),
 				]),
 
 				h('div', { style: S.msg, key: 'msg' }, msg || (busy ? '处理中…' : '')),

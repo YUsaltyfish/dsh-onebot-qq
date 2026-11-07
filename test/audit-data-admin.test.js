@@ -14,7 +14,7 @@ import { collectSchema, readValue, writeValue, collectModules } from '../admin/s
 import { runDiagnostics, maskQq, sanitizeUrl, formatTime } from '../admin/diagnostics.js'
 import { createConfigStore } from '../admin/store.js'
 import { createAdminEndpoints } from '../admin/endpoints.js'
-import { bootKernel, emitRaw, waitFor, ADMIN_QQ, GROUP_ID, MEMBER_QQ, groupAtEvent } from './helpers.mjs'
+import { bootKernel, emitRaw, waitFor, ADMIN_QQ, GROUP_ID, MEMBER_QQ, groupAtEvent, privateEvent } from './helpers.mjs'
 
 const quiet = () => ({ info() {}, warn() {}, error() {}, debug() {} })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -90,7 +90,7 @@ test('createConfigStore.update：落盘（备份 + 原子写）+ kernel.reloadCo
   const before = store.read()
   const res = await store.update((raw) => {
     raw.pacing.reply.hourlyMax = 9
-    raw.pluginConfig['gate-wake'] = { ...(raw.pluginConfig['gate-wake'] || {}), groupFollowUpMs: 30000 }
+    raw.pluginConfig['gate-wake'] = { ...(raw.pluginConfig['gate-wake'] || {}), callAck: false }
   }, { what: 'test-update' })
   assert.equal(res.ok, true)
   assert.ok(res.backup, '应生成备份文件')
@@ -113,7 +113,7 @@ test('createConfigStore.update：落盘（备份 + 原子写）+ kernel.reloadCo
 
 test('8 端点：schema / status / set / module 正常返回；非法键返回 {ok:false} 不 throw', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const schema = await endpoints.handle('schema', {})
   assert.equal(schema.ok, true)
   assert.ok(Array.isArray(schema.controls))
@@ -138,7 +138,7 @@ test('8 端点：schema / status / set / module 正常返回；非法键返回 {
 
 test('schema（新手引导）：protocol enum / 模型 suggestions / info 控件 / 4 个可见动作', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const schema = await endpoints.handle('schema', {})
   assert.equal(schema.ok, true)
 
@@ -170,7 +170,7 @@ test('schema（新手引导）：protocol enum / 模型 suggestions / info 控�
 
 test('status（新手引导）：meta / onboarding 5 项 / onebot / imagegen（绝不回显 key）', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const st = await endpoints.handle('status', {})
   assert.equal(st.ok, true)
 
@@ -208,7 +208,7 @@ test('待配置模式：set 保存成功并热应用其余配置（pending 标�
   })
   t.after(() => h.dispose())
   assert.equal(h.kernel.configReady, false, '缺 adminQq → 待配置模式')
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   // 统计 reload 调用：证明 pending 分支也走了热重载（不是只落盘）
   let reloadCalls = 0
   const origReload = h.kernel.reloadConfig.bind(h.kernel)
@@ -271,7 +271,7 @@ test('安装即用：kernel 启动自动投递默认人设（文件 + 投递 + a
   assert.equal(onDisk.pluginConfig['persona-voice'].activePersona, '蓝色大肥鱼')
 
   // 控制台不再提供「创建默认人设」按钮/动作
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const gone = await endpoints.handle('action', { id: 'persona-init' })
   assert.equal(gone.ok, false)
   assert.match(String(gone.error), /未知动作/)
@@ -279,7 +279,7 @@ test('安装即用：kernel 启动自动投递默认人设（文件 + 投递 + a
 
 test('action imagegen-check：未配置逐项提示；合法配置 GET /models 404 只给提示仍算通过', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const empty = await endpoints.handle('action', { id: 'imagegen-check' })
   assert.equal(empty.ok, false, '没填凭据 → 不通过')
   assert.ok(Array.isArray(empty.checks) && empty.checks.length === 4)
@@ -303,7 +303,7 @@ test('action imagegen-check：未配置逐项提示；合法配置 GET /models 4
   t.after(() => {
     globalThis.fetch = originalFetch
   })
-  const endpoints2 = createAdminEndpoints({ kernel: h2.kernel, configPath: h2.configPath, dataDir: h2.dataDir, log: quiet(), ops: null })
+  const endpoints2 = createAdminEndpoints({ kernel: h2.kernel, configPath: h2.configPath, dataDir: h2.dataDir, log: quiet() })
   const ok = await endpoints2.handle('action', { id: 'imagegen-check' })
   assert.equal(ok.ok, true, JSON.stringify(ok))
   assert.equal(fetched, 'https://example.invalid/v1/models')
@@ -313,7 +313,7 @@ test('action imagegen-check：未配置逐项提示；合法配置 GET /models 4
 
 test('action onebot-check / onebot-reconnect：未连接返回可读结果（不 throw）', async (t) => {
   const h = await boot(t) // autoConnect:false → 未连接
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const check = await endpoints.handle('action', { id: 'onebot-check' })
   assert.equal(check.ok, false)
   assert.match(String(check.error), /未连接/)
@@ -326,7 +326,7 @@ test('action onebot-check / onebot-reconnect：未连接返回可读结果（不
 
 test('group 端点：ignore add/remove 写实例配置并热重载', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const add = await endpoints.handle('group', { kind: 'ignore', op: 'add', group_id: GROUP_ID })
   assert.equal(add.ok, true)
   let onDisk = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
@@ -353,7 +353,7 @@ test('persona 端点：list / switch（投递文件 + 同步配置）', async (t
   fs.writeFileSync(path.join(personaDir, 'tester.md'), '# 测试人设\n')
   fs.writeFileSync(path.join(personaDir, 'tester.lines.txt'), '## poke\n专属\n')
   fs.writeFileSync(path.join(personaDir, 'tester.wake.txt'), '小助手\n')
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
 
   const list = await endpoints.handle('persona', { op: 'list' })
   assert.equal(list.ok, true)
@@ -368,10 +368,10 @@ test('persona 端点：list / switch（投递文件 + 同步配置）', async (t
   assert.ok(String(sw.message || '').includes('tester'), '返回可读提示')
 })
 
-test('ops 未配置：memory refresh 走内置积累器（不再要求 ops）/ action selfcheck 等降级不 throw', async (t) => {
+test('无本机扩展：memory refresh需确认，内置离线自检与清理预演正常返回', async (t) => {
   const h = await boot(t)
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
-  // 群记忆积累已内置到插件（shared.memoryAccumulate），没有 ops 也能跑：
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
+  // 群记忆积累由插件内置（shared.memoryAccumulate）：
   // 未确认 → 返回 needsConfirm；确认后 → 交给内置积累器（本测试只验证路由，不真跑模型）
   const ask = await endpoints.handle('memory', { op: 'refresh' })
   assert.equal(ask.ok, true)
@@ -382,8 +382,14 @@ test('ops 未配置：memory refresh 走内置积累器（不再要求 ops）/ a
   ]) {
     // eslint-disable-next-line no-await-in-loop
     const r = await endpoints.handle(ep, payload)
-    assert.equal(r.ok, false, `${ep} ${payload.id} 应降级`)
-    assert.match(String(r.error), /未配置/)
+    assert.equal(r.ok, true, `${ep} ${payload.id}：${r.error || ''}`)
+    if (payload.id === 'selfcheck') {
+      assert.ok(r.checks.length > 0)
+      assert.equal(r.reportPath, '')
+    } else {
+      assert.equal(r.needsConfirm, true)
+      assert.equal(typeof r.previewToken, 'string')
+    }
   }
 })
 
@@ -539,7 +545,7 @@ test('action diagnose（正常配置）：返回 checks/summary/report/reportPat
     },
   })
   t.after(() => h.dispose())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   // 人设项：启动时已自动投递默认人设（安装即用），无需手动动作
 
   const result = await endpoints.handle('action', { id: 'diagnose' })
@@ -585,7 +591,7 @@ test('action diagnose（待配置模式 adminQq=0）：仍成功并落盘；conf
   const h = await bootKernel({ dataDir, config: { adminQq: 0 } })
   t.after(() => h.dispose())
   assert.equal(h.kernel.configReady, false, '前置：待配置模式')
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
 
   const result = await endpoints.handle('action', { id: 'diagnose' })
   assertDiagnoseShape(result)
@@ -609,7 +615,7 @@ test('action diagnose：协议端未连接只让 onebot 项 fail，绝不 throw�
   for (const d of ['workspace', 'personas', 'state', 'logs/qq_chat']) fs.mkdirSync(path.join(dataDir, d), { recursive: true })
   const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ } }) // autoConnect:false，且无 fake 协议端
   t.after(() => h.dispose())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
 
   const result = await endpoints.handle('action', { id: 'diagnose' })
   assertDiagnoseShape(result)
@@ -626,7 +632,7 @@ test('action diagnose：Agent preset 存在/不存在/宿主无服务（agentPre
   for (const d of ['workspace', 'personas', 'state', 'logs/qq_chat']) fs.mkdirSync(path.join(dataDir, d), { recursive: true })
   const h = await bootKernel({ dataDir, config: { adminQq: ADMIN_QQ, dsh: { agentPreset: 'qq-chat' } } })
   t.after(() => h.dispose())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
 
   // ① 宿主提供 agentPresets 且 preset 存在 → agentPreset 项 ✅
   const origGet = h.ctx.get.bind(h.ctx)
@@ -733,7 +739,7 @@ test('diagnose：老内核缺 checkOneBot / checkAgentPreset → 降级不判 �
 test('秘密字段：set 响应/日志/状态都不回显明文；config.json 落盘为 0600', async (t) => {
   const h = await bootKernel({ config: { adminQq: ADMIN_QQ } })
   t.after(() => h.dispose())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
 
   const secret = 'SUPER_SECRET_TOKEN_123'
   const set = await endpoints.handle('set', { key: 'onebot.wsToken', value: secret })
@@ -763,7 +769,7 @@ test('秘密字段：set 响应/日志/状态都不回显明文；config.json �
 test('WAKE-P 人设自带唤醒词可从控制台删除（写回 personas/<人设>.wake.txt）', async (t) => {
   const h = await bootKernel({})
   t.after(() => h.dispose?.())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const src0 = h.kernel.shared.readWakeWords.source()
   assert.ok(src0.wakeFile, '默认人设应有 wake 文件')
   const file = src0.wakeFile
@@ -783,7 +789,7 @@ test('WAKE-P 人设自带唤醒词可从控制台删除（写回 personas/<人�
 test('WAKE-P2 人设唤醒词只允许删除；删不存在的词给友好错误', async (t) => {
   const h = await bootKernel({})
   t.after(() => h.dispose?.())
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const add = await endpoints.handle('group', { kind: 'keywords', op: 'add', group_id: '*', value: '新词', source: 'persona' })
   assert.equal(add.ok, false)
   assert.match(String(add.error), /只支持删除/)
@@ -804,7 +810,7 @@ async function memoryHarness(t, cfg = {}) {
       },
     },
   })
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const memDir = path.join(h.dataDir, 'qq-memory')
   fs.mkdirSync(memDir, { recursive: true })
   return { h, endpoints, memDir }
@@ -839,6 +845,100 @@ test('群记忆控制台：save 带 ifMtime 时拒绝陈旧覆盖（积累器刚
   }
 })
 
+test('私聊记忆：指针 / read_memory / 控制台列表·读取·删除都复用同一套', async (t) => {
+  const { h, endpoints, memDir } = await memoryHarness(t)
+  const privDir = path.join(memDir, 'private')
+  fs.mkdirSync(privDir, { recursive: true })
+  fs.writeFileSync(path.join(privDir, `${ADMIN_QQ}.md`), [
+    '# 私聊 · 对话记忆',
+    '## 唤醒与对话风格', '- 称呼用「主人」',
+    '## 对方与提到的人', `- **主人(${ADMIN_QQ})**：喜欢干脆`,
+    '## 其它', '',
+  ].join('\n'))
+  // 同数字的群文件（不同目录，互不影响）
+  fs.writeFileSync(path.join(memDir, `${ADMIN_QQ}.md`), '# 群记忆\n## 唤醒与对话风格\n- 群里的话\n## 群里的人\n- **x(111)**：y\n## 其它\n')
+
+  // 1) before-turn 给私聊指针（不贴正文）
+  await emitRaw(h.kernel, privateEvent({ text: '在吗', messageId: 6101 }))
+  await waitFor(() => h.ctx._prompts[0], { label: '私聊首轮' })
+  const p0 = h.ctx._prompts[0].content[0].text
+  assert.ok(p0.includes('[本私聊记忆'), '私聊首轮应注入私聊记忆指针')
+  assert.equal(p0.includes('喜欢干脆'), false, '私聊记忆正文不贴进 prompt')
+
+  // 2) read_memory 支持 private: 目标，并和同名群号区分
+  const tool = h.ctx._registeredTools.get('mcp__qq__read_memory')
+  const priv = await tool.execute({ target: `private:${ADMIN_QQ}` })
+  assert.equal(priv.ok, true)
+  assert.match(String(priv.memory), /喜欢干脆/)
+  const grp = await tool.execute({ target: `group:${ADMIN_QQ}` })
+  assert.match(String(grp.memory), /群里的话/)
+
+  // 3) 控制台列表混排：私聊项 kind/chat/name
+  const list = await endpoints.handle('memory', { op: 'list' })
+  const item = (list.groups || []).find((x) => x.chat === `private:${ADMIN_QQ}`)
+  assert.ok(item, '记忆列表应包含私聊记忆')
+  assert.equal(item.kind, 'private')
+  assert.equal(item.private_id, String(ADMIN_QQ))
+
+  // 4) 读/删私聊只动 private/ 目录，同号群文件不动
+  const read = await endpoints.handle('memory', { op: 'read', chat: `private:${ADMIN_QQ}` })
+  assert.match(read.content, /喜欢干脆/)
+  const del = await endpoints.handle('memory', { op: 'delete', chat: `private:${ADMIN_QQ}`, confirm: true })
+  assert.equal(del.ok, true)
+  assert.equal(fs.existsSync(path.join(privDir, `${ADMIN_QQ}.md`)), false, '私聊记忆应移入回收站')
+  assert.equal(fs.existsSync(path.join(memDir, `${ADMIN_QQ}.md`)), true, '同名群文件不能被误删')
+})
+
+test('群记忆控制台：list 返回每群开关状态；setcfg 改 mutedChats 后立即生效', async (t) => {
+  const { endpoints, memDir } = await memoryHarness(t, { mutedChats: `group:${GROUP_ID}` })
+  fs.writeFileSync(path.join(memDir, `${GROUP_ID}.md`), '# 群记忆\n## 唤醒与对话风格\n- x\n')
+  const on = await endpoints.handle('memory', { op: 'list' })
+  assert.equal(on.ok, true)
+  const g = (on.groups || []).find((x) => x.group_id === String(GROUP_ID))
+  assert.equal(g.muted, true, '配置里列了该群 → list 应返回 muted:true')
+  assert.equal(on.mutedChats, `group:${GROUP_ID}`)
+
+  const off = await endpoints.handle('memory', { op: 'setcfg', key: 'group-memory.mutedChats', value: '' })
+  assert.equal(off.ok, true)
+  const after = await endpoints.handle('memory', { op: 'list' })
+  assert.equal((after.groups || []).find((x) => x.group_id === String(GROUP_ID)).muted, false, '清空后应恢复开启')
+  assert.equal(after.mutedChats, '')
+})
+
+test('群记忆控制台：delete 软删除到 .trash（正文+历史版本），幂等且不碰别的群', async (t) => {
+  const { endpoints, memDir } = await memoryHarness(t)
+  const file = path.join(memDir, `${GROUP_ID}.md`)
+  fs.writeFileSync(file, '# 群记忆\n## 唤醒与对话风格\n- 老内容\n')
+  const revDir = path.join(memDir, '.revisions')
+  fs.mkdirSync(revDir, { recursive: true })
+  fs.writeFileSync(path.join(revDir, `${GROUP_ID}-20260101-010101.md`), '旧版1\n')
+  fs.writeFileSync(path.join(revDir, `${GROUP_ID}-20260101-010101-1.md`), '旧版2\n')
+  fs.writeFileSync(path.join(revDir, '999999999-20260101-010101.md'), '别的群\n')
+
+  const ask = await endpoints.handle('memory', { op: 'delete', group_id: GROUP_ID })
+  assert.equal(ask.ok, true)
+  assert.equal(ask.needsConfirm, true, '未带 confirm 只询问，不动文件')
+  assert.equal(fs.existsSync(file), true)
+
+  const r = await endpoints.handle('memory', { op: 'delete', group_id: GROUP_ID, confirm: true })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.moved, { main: true, revisions: 2 })
+  assert.equal(fs.existsSync(file), false, '正文应已移走')
+  assert.equal(fs.existsSync(path.join(revDir, `${GROUP_ID}-20260101-010101.md`)), false, '历史版本应已移走')
+  assert.equal(fs.existsSync(path.join(revDir, '999999999-20260101-010101.md')), true, '别的群历史版本不许动')
+  const trash = path.join(memDir, r.trash)
+  assert.equal(fs.existsSync(path.join(trash, `${GROUP_ID}.md`)), true, '回收站里保留正文（可恢复）')
+  assert.equal(fs.existsSync(path.join(trash, 'revisions', `${GROUP_ID}-20260101-010101.md`)), true, '回收站里保留历史版本')
+
+  const again = await endpoints.handle('memory', { op: 'delete', group_id: GROUP_ID, confirm: true })
+  assert.equal(again.ok, true, '幂等：再删一次也成功')
+  assert.match(String(again.message), /本来就没有/)
+
+  const bad = await endpoints.handle('memory', { op: 'delete', group_id: '../x', confirm: true })
+  assert.equal(bad.ok, false)
+  assert.match(String(bad.error), /会话不合法/)
+})
+
 test('群记忆控制台：save 上限跟随 maxBytes（避免保存成功但模型读不到）', async (t) => {
   const { endpoints } = await memoryHarness(t, { maxBytes: 1000 })
   const body = `# 群记忆\n## 群里的人\n- ${'很长的内容'.repeat(400)}\n`
@@ -864,7 +964,7 @@ test('群记忆控制台：唤醒词里的非群号数字键不会让 list 整�
       },
     },
   })
-  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet(), ops: null })
+  const endpoints = createAdminEndpoints({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   fs.mkdirSync(path.join(h.dataDir, 'qq-memory'), { recursive: true })
   fs.writeFileSync(path.join(h.dataDir, 'qq-memory', '456789.md'), '# 群记忆\n## 唤醒与对话风格\n- x\n')
   const r = await endpoints.handle('memory', { op: 'list' })

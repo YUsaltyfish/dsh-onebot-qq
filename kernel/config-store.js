@@ -30,6 +30,8 @@ import path from 'node:path'
 import { resolveDataDir, resolveDataPath } from '../platform/paths.js'
 import { readJsonFile, writeJsonFileSync, backupFileSync, atomicWriteFileSync } from '../platform/atomic.js'
 
+import { REPLY_DEFAULTS } from './pacing.js'
+
 export const CONFIG_VERSION = 2
 
 /** 不含任何私有值的默认配置（adminQq = 0 表示未配置，激活时会明确报错）。 */
@@ -69,11 +71,7 @@ export function defaultConfig() {
     pacing: {
       merge: {
         enabled: true,
-        windowMs: 2000,
-        maxWaitMs: 6000,
-        skipIfSlowMs: 30000,
-        windowActiveMs: 4000,
-        activeGapMs: 15000,
+        waitMs: 5000,   // 唤醒后等多久再入站；等待期内到达的消息并进同一轮
       },
       reply: {
         enabled: false,
@@ -86,6 +84,9 @@ export function defaultConfig() {
         sensitivity: 0.45,
         maxChars: 140,
         groups: [],
+        privateChats: [],
+        privatePolicy: { ...REPLY_DEFAULTS.privatePolicy },
+        quietHours: { ...REPLY_DEFAULTS.quietHours },
         // 连续对话（只暴露 3 个可调项，其余是内部闸门；见 kernel/pacing.js 的同名默认值）
         continuation: {
           enabled: false,
@@ -346,6 +347,36 @@ export function applyCredentialEnv(cfg, env = process.env) {
 }
 
 /**
+ * 已废弃的配置键：删键/改名时往这里加一行。
+ * 载入时从合并后的配置里剔除并写回实例文件（先备份 `bak-prune`），免得 config.json
+ * 里一直留着不生效的旧键、看起来像"改了没生效"。
+ * ⚠️ **只删这里列出的键**：其它未知键一律保留（用户手写注释、新版本才有、未来扩展）。
+ */
+const OBSOLETE_CONFIG_KEYS = [
+  ['pacing', 'merge', 'windowMs'],
+  ['pacing', 'merge', 'windowActiveMs'],
+  ['pacing', 'merge', 'activeGapMs'],
+  ['pacing', 'merge', 'maxWaitMs'],
+  ['pacing', 'merge', 'skipIfSlowMs'],
+  ['pluginConfig', 'gate-wake', 'groupFollowUpMs'],
+]
+
+/** 按清单剔除废弃键；返回是否真的删掉了东西 */
+function pruneObsoleteConfig(cfg) {
+  let changed = false
+  for (const keys of OBSOLETE_CONFIG_KEYS) {
+    let node = cfg
+    for (let i = 0; i < keys.length - 1 && node && typeof node === 'object'; i += 1) node = node[keys[i]]
+    const last = keys[keys.length - 1]
+    if (node && typeof node === 'object' && Object.prototype.hasOwnProperty.call(node, last)) {
+      delete node[last]
+      changed = true
+    }
+  }
+  return changed
+}
+
+/**
  * 旧配置键兼容：2026-10-27 之前这段叫 `napcat`，之后统一叫 `onebot`。
  * 新键优先，旧键只补新键缺的字段 —— 老 `config.json` 一个字不改也能直接跑。
  * ⚠️ 字面量 `'napcat'` 是历史键名，不能删（删了线上配置读不到）。
@@ -385,10 +416,12 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
   const migrated = isLegacyShape(raw)
   const merged = migrated ? migrateLegacyConfig(raw) : deepMerge(defaultConfig(), raw)
   merged.version = CONFIG_VERSION
-  // 迁移态落盘：否则控制台读的是旧结构、写回后又被迁移逻辑覆盖（用户会误以为"改了不生效"）
-  if (migrated && createIfMissing) {
+  // 废弃键清理：内存里先剔掉，能写就顺手写回（备份 bak-prune），下次启动文件也干净
+  const pruned = pruneObsoleteConfig(merged)
+  // 迁移态 / 清理态落盘：否则控制台读的是旧结构、写回后又被迁移逻辑覆盖（用户会误以为"改了不生效"）
+  if ((migrated || pruned) && createIfMissing) {
     try {
-      backupFileSync(file, 'bak-legacy')
+      backupFileSync(file, migrated ? 'bak-legacy' : 'bak-prune')
       writeJsonFileSync(file, merged, { mode: 0o600 })
     } catch { /* 只读目录等：保持内存迁移，不阻塞启动 */ }
   }

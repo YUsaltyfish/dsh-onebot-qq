@@ -8,7 +8,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ChatState } from '../kernel/state-pipeline.js'
+import { ChatState, Pipeline, currentTurn, turnStore } from '../kernel/state-pipeline.js'
+import { createTurnContext } from '../contracts.js'
 import { bootKernel, emitRaw, groupAtEvent, waitFor, ADMIN_QQ, GROUP_ID } from './helpers.mjs'
 
 const quiet = { info() {}, debug() {}, warn() {}, error() {} }
@@ -123,4 +124,77 @@ test('未到 turn/start 就失败：不留下永久锚', async (t) => {
   const q = h.kernel.state.get(`group:${GROUP_ID}`).turnQueue
   assert.equal(q.length, 0, '失败的轮次不应留下锚')
   assert.equal(h.kernel.pendingTurns.size, 0, '失败的轮次不应留在待启动队列')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-11-05 回归：ALS 泄漏导致排队轮全部引用第一轮唤醒
+// 根因：Pipeline.run 把 terminal 包在 turnStore.run 里 → pacing.submit 在其中排等待槽定时器
+//       → Node 定时器 / DSH agent 长期循环继承旧 store → 排队轮的工具认成第一轮。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Pipeline.run 的 terminal 不在 ALS 里跑（切断等待槽定时器/DSH 循环继承旧上下文）', async () => {
+  const pipeline = new Pipeline({ log: quiet })
+  const ev = {
+    chatKey: 'private:1', isGroup: false, sender: { qq: 1 }, text: 'x',
+    wake: { kind: 'private' }, hint: [], _scratch: {}, images: [],
+  }
+  let seen = 'unset'
+  await pipeline.run(ev, () => { seen = currentTurn() })
+  assert.equal(seen, null, 'terminal 执行时不应带任何 turnCtx 的 ALS store')
+  assert.ok(ev.turnCtx, 'TurnContext 仍要挂到事件上供后续使用')
+})
+
+test('排队轮引用：工具执行时残留的旧 ALS 不能抢走本轮身份', async (t) => {
+  const h = await boot(t)
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  await emitRaw(h.kernel, groupAtEvent({ text: 'A', messageId: 4001 }))
+  await waitFor(() => h.ctx._prompts.length >= 1, { label: 'A prompt' })
+  const sid = h.ctx._prompts[0].sessionId
+  emitTurn(h.ctx, sid, 'turn/start')
+  // 本轮期间群里又插了一句 → 满足自动引用阈值（arrivals ≥ 1）
+  await emitRaw(h.kernel, groupAtEvent({ text: '插话', messageId: 4002, at: false }))
+
+  // 模拟 DSH agent 循环里残留的"上一轮"上下文
+  const stale = createTurnContext({
+    chatKey: `group:${GROUP_ID}`, isGroup: true, messageId: 999,
+    wake: { kind: 'at' }, sender: { qq: 1 }, _scratch: {},
+  })
+  await turnStore.run(stale, () => send.execute(
+    { target: `group:${GROUP_ID}`, text: '回复' },
+    { agent: { session: { id: sid } } },
+  ))
+  assert.match(h.sent.at(-1).wire, /\[CQ:reply,id=4001\]/, `应引本轮 4001，实际：${h.sent.at(-1).wire}`)
+})
+
+test('等待槽排队：连续多轮各自引用自己的唤醒，不串到第一轮', async (t) => {
+  const h = await bootKernel({
+    config: {
+      pacing: { merge: { enabled: true, waitMs: 40 } },
+      outbound: { quoteAfterMsgs: 1 },
+      pluginConfig: {
+        'link-parser': { enabled: false },
+        'persona-voice': { splitReplyEnabled: false, quoteEnforce: false },
+        'gate-wake': { adminQq: ADMIN_QQ },
+      },
+    },
+  })
+  t.after(() => h.dispose())
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  for (const [i, text] of ['第一问', '第二问', '第三问'].entries()) {
+    await emitRaw(h.kernel, groupAtEvent({ text, messageId: 5001 + i }))
+  }
+  await waitFor(() => h.ctx._prompts.length >= 3, { label: '三轮准入' })
+  // 三轮之后群里又来一句 → 每轮都比基线多出插话，满足自动引用阈值
+  await emitRaw(h.kernel, groupAtEvent({ text: '插一句', messageId: 5004, at: false }))
+  const sid = h.ctx._prompts[0].sessionId
+  for (let i = 0; i < 3; i += 1) {
+    emitTurn(h.ctx, sid, 'turn/start')
+    await send.execute({ target: `group:${GROUP_ID}`, text: `回复${i}` }, { agent: { session: { id: sid } } })
+    assert.match(
+      h.sent.at(-1).wire,
+      new RegExp(`\\[CQ:reply,id=${5001 + i}\\]`),
+      `第 ${i + 1} 轮应引自己的唤醒，实际：${h.sent.at(-1).wire}`,
+    )
+    emitTurn(h.ctx, sid, 'turn/end')
+  }
 })
