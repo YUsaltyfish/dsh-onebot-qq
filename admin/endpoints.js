@@ -1251,9 +1251,9 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   // ── action（动作按钮）────────────────────────────────────────
 
   const REPLY_PRESETS = {
-    quiet: { hourlyMax: 1, minGapMs: 45 * 60000, coldSilenceMs: 20 * 60000, sensitivity: 0.75, maxChars: 100 },
-    semi: { hourlyMax: 3, minGapMs: 15 * 60000, coldSilenceMs: 5 * 60000, sensitivity: 0.6, maxChars: 120 },
-    active: { hourlyMax: 6, minGapMs: 8 * 60000, coldSilenceMs: 3 * 60000, sensitivity: 0.45, maxChars: 140 },
+    quiet: { interval: { minMs: 14400000, maxMs: 28800000, unansweredMinMs: 28800000, unansweredMaxMs: 57600000, maxBackoffMs: 86400000 }, sensitivity: 0.75, maxChars: 100 },
+    semi: { interval: { minMs: 3600000, maxMs: 14400000, unansweredMinMs: 14400000, unansweredMaxMs: 36000000, maxBackoffMs: 86400000 }, sensitivity: 0.6, maxChars: 120 },
+    active: { interval: { minMs: 1800000, maxMs: 7200000, unansweredMinMs: 7200000, unansweredMaxMs: 21600000, maxBackoffMs: 86400000 }, sensitivity: 0.45, maxChars: 140 },
   }
   const REPLY_PRESET_NAMES = { quiet: '安静', semi: '适中', active: '活泼' }
 
@@ -1272,9 +1272,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }, { what: `主动接话档位 → ${preset}`, allowPending: true })
       return {
         ok: true, id, preset, value: p, backup: saved.backup,
-        message: `✅ 已切到「${REPLY_PRESET_NAMES[preset]}」档：每小时最多 ${p.hourlyMax} 次`
-          + `（两次实际间隔 ≥ ${Math.round(Math.max(p.minGapMs, 3600000 / p.hourlyMax) / 60000)} 分钟）、`
-          + `冷场 ${Math.round(p.coldSilenceMs / 60000)} 分钟、敏感度 ${Math.round(p.sensitivity * 100)}%。`,
+        message: `✅ 已切到「${REPLY_PRESET_NAMES[preset]}」档：群聊私聊共用 ${p.interval.minMs / 3600000}–${p.interval.maxMs / 3600000} 小时随机窗，`
+          + `未回复时 ${p.interval.unansweredMinMs / 3600000}–${p.interval.unansweredMaxMs / 3600000} 小时，退避上限 ${p.interval.maxBackoffMs / 3600000} 小时。`,
       }
     }
 

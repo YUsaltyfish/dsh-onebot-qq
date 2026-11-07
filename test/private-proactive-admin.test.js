@@ -13,16 +13,17 @@ test('私聊控件沿用主动接话页和总开关，默认名单为空，时�
   assert.equal(list.group, '主动接话')
   assert.deepEqual(list.value, [])
   assert.equal(schema.controls.filter((c) => c.key === 'pacing.reply.enabled').length, 1)
-  for (const [field, hours] of Object.entries({ coldSilenceMs: 4, minGapMs: 4, unansweredGapMs: 12, maxBackoffMs: 24 })) {
-    const key = `pacing.reply.privatePolicy.${field}`
+  for (const [field, hours] of Object.entries({ minMs: 1, maxMs: 4, unansweredMinMs: 4, unansweredMaxMs: 10, maxBackoffMs: 24 })) {
+    const key = `pacing.reply.interval.${field}`
     const control = schema.controls.find((c) => c.key === key)
     assert.equal(control.group, '主动接话')
-    assert.equal(control.section, '私聊间隔')
+    assert.equal(control.section, undefined)
+    assert.equal(control.step, 0.5)
     assert.equal(control.unit, '小时')
     assert.equal(control.value, hours)
-    const raw = {}
-    assert.equal(writeValue({}, key, 6, raw).stored, 21600000)
-    assert.equal(readValue({}, key, raw), 6)
+    const raw = { pacing: { reply: { interval: { minMs: 1800000, unansweredMinMs: 1800000, maxMs: 5400000, unansweredMaxMs: 5400000, maxBackoffMs: 86400000 } } } }
+    assert.equal(writeValue({}, key, 1.5, raw).stored, 5400000)
+    assert.equal(readValue({}, key, raw), 1.5)
   }
   assert.equal(schema.groups.some((g) => g.name === '私聊'), false)
 })
@@ -57,12 +58,26 @@ test('免打扰配置同页展示，默认23点至8点上海时间，起止相�
   }
 })
 
-test('私聊提示准确说明共用小时频率下限和冷场开关', () => {
+test('随机窗只留一套主控，成对校验拒绝倒置且不修改配置', () => {
   const controls = collectSchema({}).controls
   const byKey = (key) => controls.find((c) => c.key === `pacing.reply.${key}`)
-  assert.match(byKey('privatePolicy.minGapMs').hint, /共用.*60÷次数.*间隔下限/)
-  assert.match(byKey('privatePolicy.minGapMs').hint, /0.*群聊、私聊都关闭/)
-  assert.match(byKey('hourlyMax').hint, /0.*群聊、私聊主动接话都关闭/)
+  for (const old of ['hourlyMax', 'minGapMs', 'coldSilenceMs', 'privatePolicy.minGapMs']) {
+    assert.equal(byKey(old), undefined)
+    assert.throws(() => writeValue({}, `pacing.reply.${old}`, 1), /白名单/)
+  }
+  for (const [min, max] of [['minMs', 'maxMs'], ['unansweredMinMs', 'unansweredMaxMs']]) {
+    const raw = {}
+    assert.throws(() => writeValue({}, `pacing.reply.interval.${min}`, 12, raw), /最小值不能大于最大值.*先提高最长/)
+    assert.deepEqual(raw, {})
+    writeValue({}, `pacing.reply.interval.${max}`, 14, raw)
+    writeValue({}, `pacing.reply.interval.${min}`, 12, raw)
+    assert.throws(() => writeValue({}, `pacing.reply.interval.${max}`, 11, raw), /最小值不能大于最大值/)
+    assert.equal(readValue({}, `pacing.reply.interval.${max}`, raw), 14)
+    writeValue({}, `pacing.reply.interval.${min}`, 0.5, raw)
+    writeValue({}, `pacing.reply.interval.${max}`, 0.5, raw)
+  }
+  assert.throws(() => writeValue({}, 'pacing.reply.interval.maxBackoffMs', 5), /退避上限不能小于/)
+  assert.throws(() => writeValue({}, 'pacing.reply.interval.maxMs', 25), /先调大退避上限/)
   const silence = byKey('silenceEnabled')
   assert.match(silence.label, /群聊、私聊/)
   assert.match(silence.hint, /私聊主动找话暂停/)
@@ -217,11 +232,17 @@ test('同页展示私聊状态与私聊recent；旧后端缺privateChats仍可�
   const schema = collectSchema({})
   const reply = {
     enabled: true,
-    groups: [],
+    groups: [{ chatKey: 'group:88888', groupId: '88888', unanswered: 3, nextAt: Date.now() + 3600000 }],
     privateChats: [{ chatKey: 'private:12345', userId: '12345', unanswered: 2, nextAt: Date.now() + 43200000, lastAt: Date.now(), lastSent: false }],
     recent: [{ at: Date.now(), chatKey: 'private:12345', isGroup: false, userId: '12345', groupId: null, sent: false }],
   }
   const rendered = text(ReplyModeTab({ schema, status: { reply } }))
+  assert.match(rendered, /群 88888/)
+  assert.match(rendered, /连续未回复 3 次/)
+  assert.doesNotMatch(rendered, /本小时|快速档位|每小时最多|undefined 次/)
+  assert.match(rendered, /刷新页面不会重抽/)
+  const customized = text(ReplyModeTab({ schema, status: { reply: { ...reply, interval: { minMs: 1800000, maxMs: 7200000, unansweredMinMs: 7200000, unansweredMaxMs: 21600000, maxBackoffMs: 43200000 } } } }))
+  assert.match(customized, /正常 0.5–2 小时，未回复 2–6 小时，持续未回复退避上限 12 小时/)
   assert.match(rendered, /私聊 QQ 12345/)
   assert.match(rendered, /连续未回复 2 次/)
   assert.match(rendered, /下次机会/)

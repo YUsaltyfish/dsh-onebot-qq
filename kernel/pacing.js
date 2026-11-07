@@ -17,8 +17,8 @@
  *     也不起念；只有显式开启后才 start/apply 起来。
  *
  * 频率口径（控制台/文档只认这一种，别再搞第二套算法）：
- *   相邻两次机会至少间隔 `minGapMs`；同时 3600s ÷ `hourlyMax` 也是间隔下限 →
- *   实际间隔 = max(minGapMs, 3600s/hourlyMax)，所以"每小时最多 N 次"是**硬上限**。
+ *   群聊/私聊共用 interval 随机窗；每次安排只抽一次并持久化 nextAt。
+ *   真实发送才累加未回，真人私聊/明确群唤醒重置；普通群消息不重排。
  */
 
 const HOUR = 3600000
@@ -29,9 +29,8 @@ const log1p = (v) => Math.log1p(Math.max(0, Number(v) || 0))
 /** 主动接话默认参数：配置缺键时用它（与 config-store v2 的默认配置对齐，改默认值只改这里） */
 export const REPLY_DEFAULTS = {
   enabled: false,            // 默认关：不装调度、不起念
-  hourlyMax: 6,              // 每小时最多几次"机会"（0 = 关）
-  minGapMs: 480000,          // 两次机会最小间隔（8 分钟）
-  coldSilenceMs: 180000,     // 群安静多久算冷场（3 分钟）
+  interval: { minMs: 3600000, maxMs: 14400000, unansweredMinMs: 14400000,
+    unansweredMaxMs: 36000000, maxBackoffMs: 86400000 },
   silenceEnabled: true,      // 冷场找话：关 = 只在群里有新消息时才可能接话（不定时找话）
   topicWindowMs: 600000,     // 机会窗口：到点后再等多久的合适时机（10 分钟）
   topicMinMsgs: 3,           // 窗口内至少几条消息才按"话题"挑时机（防单条消息就接）
@@ -40,12 +39,6 @@ export const REPLY_DEFAULTS = {
   groups: [],                // 允许主动接话的群号（数组或 {"群号": true} 对象都认）
   quietHours: { enabled: true, start: '23:00', end: '08:00', timeZone: 'Asia/Shanghai' },
   privateChats: [],          // 允许主动问候的 QQ 数字数组；与群共用 enabled 总闸
-  privatePolicy: {
-    coldSilenceMs: 14400000,
-    minGapMs: 14400000,
-    unansweredGapMs: 43200000,
-    maxBackoffMs: 86400000,
-  },
   // 连续对话（2026-10-27）：被真人叫过、且它回过话之后，等一会儿把这期间的新消息塞回模型再判一次。
   // 只暴露 enabled / delayMs / bonus 三个到控制台；其余是防"自己转"的内部闸门（改这里就够了）。
   continuation: {
@@ -90,6 +83,7 @@ export const REPLY_DEFAULTS = {
 export const MERGE_DEFAULTS = {
   enabled: true,
   waitMs: 5000,           // 唤醒后等多久再入站（等待期内的消息并进同一轮）
+  loadImages: true,       // 合批后由内核统一载入全部消息的图片；关闭时仅首条
 }
 
 /** 合并文本里的发送人前缀：`[昵称(QQ:号)]`（群里分辨谁说的；私聊同格式便于模型对齐） */
@@ -99,7 +93,7 @@ function senderTag(ev) {
   return qq ? `[${name}(QQ:${qq})]` : `[${name}]`
 }
 
-/** 被合并消息的一行正文：后随消息的图只留 `[图片]` 占位（不下载、不进模型） */
+/** 被合并消息的一行正文：正文保留 `[图片]` 占位；图片描述另交内核统一载入。 */
 function mergedLine(ev) {
   const text = String(ev?.text || '').trim()
   const hasImg = (Array.isArray(ev?.images) && ev.images.length > 0)
@@ -196,7 +190,7 @@ function normalize(rawPacing) {
   return {
     reply: {
       ...REPLY_DEFAULTS,
-      ...Object.fromEntries(Object.entries(r).filter(([k]) => !['style', 'weights', 'groups'].includes(k))),
+      ...Object.fromEntries(Object.entries(r).filter(([k]) => !['style', 'weights', 'groups', 'privatePolicy', 'hourlyMax', 'minGapMs', 'coldSilenceMs'].includes(k))),
       style: { ...REPLY_DEFAULTS.style, ...style },
       weights: { ...REPLY_DEFAULTS.weights, ...weights },
       continuation: { ...REPLY_DEFAULTS.continuation, ...(r.continuation && typeof r.continuation === 'object' ? r.continuation : {}) },
@@ -205,8 +199,13 @@ function normalize(rawPacing) {
       privateChats: [...new Set((Array.isArray(r.privateChats) ? r.privateChats : [])
         .filter((id) => /^\d{1,12}$/.test(String(id)) && Number.isSafeInteger(Number(id)) && Number(id) > 0)
         .map((id) => String(Number(id))))],
-      privatePolicy: Object.fromEntries(Object.entries(REPLY_DEFAULTS.privatePolicy).map(([k, fallback]) =>
-        [k, Math.max(0, num(r.privatePolicy?.[k], fallback))])),
+      interval: (() => {
+        const values = Object.fromEntries(Object.entries(REPLY_DEFAULTS.interval).map(([k, fallback]) =>
+          [k, Math.max(1, num(r.interval?.[k], fallback))]))
+        values.maxMs = Math.max(values.minMs, values.maxMs)
+        values.unansweredMaxMs = Math.max(values.unansweredMinMs, values.unansweredMaxMs)
+        return values
+      })(),
     },
     merge: { ...MERGE_DEFAULTS, ...m },
   }
@@ -216,7 +215,8 @@ function normalize(rawPacing) {
  * @param {{log?: object, state: object}} deps
  *   state — ChatState（用它的 map / get()，不新开一套会话状态）
  */
-export function createPacing({ log = console, state, clock = null, privateState = {}, onPrivateStateChange = null }) {
+export function createPacing({ log = console, state, clock = null, random = Math.random,
+  timingState = null, onTimingStateChange = null, privateState = {}, onPrivateStateChange = null }) {
   // clock：自检用（可传函数/对象把"现在"钉住）；运行时一律真实时间
   const nowMs = () => {
     const v = typeof clock === 'function' ? Number(clock()) : (clock && typeof clock.now === 'function' ? Number(clock.now()) : NaN)
@@ -227,36 +227,36 @@ export function createPacing({ log = console, state, clock = null, privateState 
   let timer = null
   let onProactiveTurn = null
   let isBusy = () => false
-  const privateTiming = new Map()
+  const timings = new Map()
   const sentTurns = new WeakSet()
   const sentTurnIds = new Set()
+  const replyTurns = new WeakSet()
+  const replyTurnIds = new Set()
+  const notifyTiming = onTimingStateChange || onPrivateStateChange
   // Only timing metadata crosses the persistence boundary, never ChatState/text/session mappings.
-  for (const [key, saved] of Object.entries(privateState || {})) {
-    if (!/^private:\d{1,12}$/.test(key) || !saved || typeof saved !== 'object') continue
-    privateTiming.set(key, Object.fromEntries(['baselineAt', 'lastInboundAt', 'lastOutboundAt', 'unanswered', 'nextAt']
-      .map((k) => [k, Math.max(0, num(saved[k], 0))])))
+  for (const [key, saved] of Object.entries(timingState || privateState || {})) {
+    if (!/^(private|group):\d{1,12}$/.test(key) || !saved || typeof saved !== 'object') continue
+    timings.set(key, Object.fromEntries(['baselineAt', 'lastInboundAt', 'lastOutboundAt', 'unanswered', 'nextAt']
+      .map((k) => [k, saved[k] === null && k === 'nextAt' ? null : Math.max(0, num(saved[k], 0))])))
   }
 
-  function privateStateSnapshot() {
-    return Object.fromEntries([...privateTiming].map(([key, timing]) => [key, { ...timing }]))
+  function timingStateSnapshot() {
+    return Object.fromEntries([...timings].map(([key, timing]) => [key,
+      Object.fromEntries(['baselineAt', 'lastInboundAt', 'lastOutboundAt', 'unanswered', 'nextAt'].map((field) => [field, timing[field]]))]))
   }
 
-  function privateChanged() {
-    if (typeof onPrivateStateChange !== 'function') return
+  function timingChanged() {
+    if (typeof notifyTiming !== 'function') return
     try {
-      Promise.resolve(onPrivateStateChange(privateStateSnapshot()))
-        .catch((e) => log.error(`[主动接话] 私聊计时保存失败: ${e.message}`))
-    } catch (e) { log.error(`[主动接话] 私聊计时保存失败: ${e.message}`) }
+      Promise.resolve(notifyTiming(timingStateSnapshot()))
+        .catch((e) => log.error(`[主动接话] 计时保存失败: ${e.message}`))
+    } catch (e) { log.error(`[主动接话] 计时保存失败: ${e.message}`) }
   }
 
-  function privateOf(key) {
-    let timing = privateTiming.get(key)
-    if (!timing) {
-      timing = { baselineAt: nowMs(), lastInboundAt: 0, lastOutboundAt: 0, unanswered: 0, nextAt: 0 }
-      privateTiming.set(key, timing)
-      privateChanged()
-    }
-    return timing
+  function timingOf(key) {
+    if (!timings.has(key)) timings.set(key,
+      { baselineAt: nowMs(), lastInboundAt: 0, lastOutboundAt: 0, unanswered: 0, nextAt: 0 })
+    return timings.get(key)
   }
 
   const isPrivate = (key) => /^private:\d+$/.test(key)
@@ -266,7 +266,7 @@ export function createPacing({ log = console, state, clock = null, privateState 
     : allowedGroups().has(key.replace(/^group:/, ''))
   const busy = (key) => slots.has(key) || isBusy(key)
   const privateSilence = (key, now) => {
-    const t = privateOf(key)
+    const t = timingOf(key)
     const st = state.get(key)
     return Math.max(0, now - Math.max(t.baselineAt, t.lastInboundAt, t.lastOutboundAt,
       Number(st.lastInboundAt) || 0, Number(st.lastSendAt) || 0))
@@ -327,34 +327,39 @@ export function createPacing({ log = console, state, clock = null, privateState 
     if (!key) return
     const ts = Number(ev.time) > 0 ? Number(ev.time) : nowMs()
     const st = state.get(key)
-    const humanPrivate = isPrivate(key) && !ev.isGroup && !ev.notice && !ev._scratch?.notice
-      && !['proactive', 'continuation', 'welcome'].includes(ev.wake?.kind) && ev.sender?.qq
-    if (!isPrivate(key) || humanPrivate) st.lastInboundAt = ts
-    if (humanPrivate && (allowed(key) || privateTiming.has(key))) {
-      const t = privateOf(key)
+    const human = !ev.notice && !ev._scratch?.notice
+      && !['proactive', 'continuation', 'welcome'].includes(ev.wake?.kind)
+    if (!human) return
+    st.lastInboundAt = ts
+    if (allowed(key) || timings.has(key)) {
+      const t = timingOf(key)
       t.lastInboundAt = Math.max(t.lastInboundAt, ts)
-      t.unanswered = 0
-      t.nextAt = ts + opportunityGapMs(key)
-      const o = opp.get(key)
-      if (o) { o.dueAt = t.nextAt; o.windowUntil = 0 }
-      privateChanged()
+      if (isPrivate(key) && ev.sender?.qq) { t.unanswered = 0; t.resetAt = ts; schedule(key, ts) }
     }
     remember(ev)
   }
 
   /** 记录一条出站（内核的 afterSend 调；用于"自己发言占比"） */
-  function noteOutbound(target) {
+  function seenTurn(token, objects, ids) {
+    if (!token) return false
+    const object = typeof token === 'object'
+    const set = object ? objects : ids
+    if (set.has(token)) return true
+    set.add(token)
+    if (!object && ids.size > 1000) ids.delete(ids.values().next().value)
+    return false
+  }
+
+  function noteOutbound(target, turnToken = null) {
     const key = String(target ?? '')
     if (!key) return
     pushRing(outbound, key, nowMs())
-    if (isPrivate(key) && (allowed(key) || privateTiming.has(key))) {
-      const t = privateOf(key)
-      t.lastOutboundAt = nowMs()
-      t.nextAt = Math.max(t.nextAt, nowMs() + opportunityGapMs(key))
-      const o = opp.get(key)
-      if (o) o.dueAt = t.nextAt
-      privateChanged()
-    }
+    if (!allowed(key) && !timings.has(key)) return
+    const t = timingOf(key)
+    t.lastOutboundAt = nowMs()
+    const synthetic = ['proactive', 'continuation', 'welcome', 'command', 'system'].includes(turnToken?.wakeKind)
+    if (turnToken?.wakeKind && !synthetic && !seenTurn(turnToken, replyTurns, replyTurnIds)) schedule(key, nowMs())
+    else timingChanged()
   }
 
   /** 主动接话轮里真的发出了一条 → 记在最近事件上（控制台"最近"里显示已接） */
@@ -371,45 +376,62 @@ export function createPacing({ log = console, state, clock = null, privateState 
       }
     }
     event.sent = true
-    if (isPrivate(chatKey)) {
-      const t = privateOf(chatKey)
-      // A human arriving while the candidate was running starts a fresh conversation.
-      if (t.lastInboundAt <= event.at) t.unanswered += 1
-      t.nextAt = Math.max(t.nextAt, nowMs() + opportunityGapMs(chatKey))
-      const o = opp.get(chatKey)
-      if (o) o.dueAt = t.nextAt
-      privateChanged()
-    }
+    const t = timingOf(chatKey)
+    if ((t.resetAt || 0) <= event.at) t.unanswered += 1
+    schedule(chatKey, nowMs())
   }
 
-  function hourIntervalMs() {
-    const n = Math.max(0, num(cfg.reply.hourlyMax, 0))
-    return n > 0 ? HOUR / n : Infinity
+  function sample(min, max) {
+    return Math.round(min + (max - min) * clamp01(random()))
   }
 
-  function opportunityGapMs(chatKey = '') {
-    if (isPrivate(chatKey)) {
-      const policy = cfg.reply.privatePolicy
-      const unanswered = privateOf(chatKey).unanswered
-      const backoff = unanswered > 0
-        ? Math.min(policy.maxBackoffMs, policy.unansweredGapMs * 2 ** Math.min(30, unanswered - 1)) : 0
-      const hourly = hourIntervalMs()
-      return Math.max(policy.minGapMs, backoff, Number.isFinite(hourly) ? hourly : 0)
-    }
-    return Math.max(num(cfg.reply.minGapMs, 900000), hourIntervalMs())
+  function randomGap(key, normal = false) {
+    const interval = cfg.reply.interval
+    const count = normal ? 0 : timingOf(key).unanswered
+    if (!count) return sample(interval.minMs, interval.maxMs)
+    const factor = 2 ** Math.min(30, count - 1)
+    return sample(Math.min(interval.maxBackoffMs / 2, interval.unansweredMinMs * factor),
+      Math.min(interval.maxBackoffMs, interval.unansweredMaxMs * factor))
+  }
+
+  function daytimeTarget(key, target) {
+    const q = quietHoursStatus(cfg.reply.quietHours, target)
+    if (!q.active) return target
+    if (q.start === q.end) return null
+    // Draw once after the quiet boundary. If that draw is nighttime too, project its
+    // offset into the following daylight span instead of drawing forever.
+    const candidate = q.endAt + randomGap(key, true)
+    const next = quietHoursStatus(cfg.reply.quietHours, candidate)
+    if (!next.active) return candidate
+    const [sh, sm] = q.start.split(':').map(Number)
+    const [eh, em] = q.end.split(':').map(Number)
+    const daylightMs = ((sh * 60 + sm - eh * 60 - em + 1440) % 1440) * 60000
+    return next.endAt + Math.min(daylightMs - 1, Math.max(1, (candidate - q.endAt) % daylightMs))
+  }
+
+  function setNext(key, nextAt) {
+    const o = opp.get(key) || { dueAt: null, windowUntil: 0, fired: 0, missed: 0 }
+    o.dueAt = nextAt
+    o.windowUntil = 0
+    opp.set(key, o)
+    timingOf(key).nextAt = nextAt
+    timingChanged()
+    return o
+  }
+
+  function schedule(key, from = nowMs()) {
+    return setNext(key, daytimeTarget(key, from + randomGap(key)))
   }
 
   const isQuietTime = () => quietHoursStatus(cfg.reply.quietHours, nowMs()).active
 
-  /** Night opportunities are discarded, not queued for the morning boundary. */
+  /** Normalize a saved/nighttime target once, never redraw on every tick. */
   function deferQuietOpportunity(key, o, now) {
     const current = quietHoursStatus(cfg.reply.quietHours, now)
-    const due = Number.isFinite(o.dueAt) && o.dueAt <= now ? quietHoursStatus(cfg.reply.quietHours, o.dueAt) : null
-    const quiet = current.active && o.dueAt <= current.endAt ? current : due?.active ? due : null
-    if (quiet) {
-      o.dueAt = quiet.endAt + opportunityGapMs(key)
-      o.windowUntil = 0
-      if (isPrivate(key)) { privateOf(key).nextAt = o.dueAt; privateChanged() }
+    if (o.dueAt !== null) {
+      const target = current.active && o.dueAt <= now ? now : o.dueAt
+      const nextAt = daytimeTarget(key, target)
+      if (nextAt !== o.dueAt) setNext(key, nextAt)
     }
     return current.active
   }
@@ -422,14 +444,8 @@ export function createPacing({ log = console, state, clock = null, privateState 
   function oppOf(chatKey) {
     let o = opp.get(chatKey)
     if (!o) {
-      const gap = opportunityGapMs(chatKey)
-      const wait = Number.isFinite(gap) ? gap * (0.4 + Math.random() * 0.6) : Infinity
-      const timing = isPrivate(chatKey) ? privateOf(chatKey) : null
-      const dueAt = timing ? (timing.nextAt || Math.max(timing.baselineAt, timing.lastInboundAt, timing.lastOutboundAt) + gap)
-        : (Number.isFinite(wait) ? nowMs() + wait : Infinity)
-      o = { dueAt, windowUntil: 0, fired: 0, missed: 0 }
-      opp.set(chatKey, o)
-      if (timing) { timing.nextAt = dueAt; privateChanged() }
+      const t = timingOf(chatKey)
+      o = t.nextAt === null || t.nextAt > 0 ? setNext(chatKey, t.nextAt) : schedule(chatKey)
     }
     deferQuietOpportunity(chatKey, o, nowMs())
     return o
@@ -459,14 +475,12 @@ export function createPacing({ log = console, state, clock = null, privateState 
   /** 到点后进入"窗口"；窗口过期 = 这次机会作废（宁可少说，不硬凑） */
   function ensureWindow(chatKey, now) {
     const o = oppOf(chatKey)
-    if (now < o.dueAt) return null
+    if (o.dueAt === null || now < o.dueAt) return null
     if (!o.windowUntil) o.windowUntil = now + Math.max(60000, num(cfg.reply.topicWindowMs, 600000))
     if (now > o.windowUntil) {
-      o.windowUntil = 0
-      o.dueAt = now + opportunityGapMs(chatKey)
-      if (isPrivate(chatKey)) { privateOf(chatKey).nextAt = o.dueAt; privateChanged() }
+      schedule(chatKey, now)
       o.missed += 1
-      log.info(`[主动接话] ${chatKey} 本次没有合适时机，放弃（下次约 ${Math.round(opportunityGapMs() / 60000)} 分钟后）`)
+      log.info(`[主动接话] ${chatKey} 本次没有合适时机，重新安排随机机会`)
       return null
     }
     return o
@@ -477,13 +491,10 @@ export function createPacing({ log = console, state, clock = null, privateState 
     const o = oppOf(chatKey)
     const now = nowMs()
     if (deferQuietOpportunity(chatKey, o, now)) return
-    o.windowUntil = 0
-    o.dueAt = now + opportunityGapMs(chatKey)
     const privateChat = isPrivate(chatKey)
-    const timing = privateChat ? privateOf(chatKey) : null
-    const silenceMs = privateChat ? privateSilence(chatKey, now) : Math.max(0, now - Number(state.get(chatKey).lastInboundAt || 0))
-    const unanswered = timing?.unanswered || 0
-    if (timing) { timing.nextAt = o.dueAt; privateChanged() }
+    const silenceMs = privateSilence(chatKey, now)
+    const unanswered = timingOf(chatKey).unanswered
+    schedule(chatKey, now)
     o.fired += 1
     const payload = { chatKey, groupId: privateChat ? null : gid, isGroup: !privateChat,
       userId: privateChat ? chatKey.slice(8) : null, reason, score, silenceMs, unanswered }
@@ -504,7 +515,7 @@ export function createPacing({ log = console, state, clock = null, privateState 
    * 内核在管线跑完后调（有 wake 的消息不进来，避免被叫时同时主动插话）。
    */
   function consider(ev) {
-    if (!cfg.reply.enabled || num(cfg.reply.hourlyMax, 0) <= 0) return
+    if (!proactiveEnabled()) return
     if (!ev?.isGroup) return
     const key = String(ev.chatKey ?? '')
     if (!key) return
@@ -549,12 +560,16 @@ export function createPacing({ log = console, state, clock = null, privateState 
   function noteWake(ev) {
     const key = String(ev?.chatKey ?? '')
     if (!key || !ev?.isGroup) return
-    if (!cfg.reply.enabled || !cfg.reply.continuation.enabled) return
+    if (!proactiveEnabled() || ev.notice || ev._scratch?.notice) return
     const kind = String(ev?.wake?.kind ?? '')
     if (!['at', 'quote', 'keyword', 'followup'].includes(kind)) return
     const gid = String(ev.groupId ?? key.replace(/^group:/, ''))
     if (!allowedGroups().has(gid)) return
-    cont.set(key, { gid, armedAt: nowMs(), lastReplyAt: 0, dueAt: 0, chain: 0, lastFireAt: 0 })
+    const t = timingOf(key)
+    t.unanswered = 0
+    t.resetAt = nowMs()
+    schedule(key)
+    if (cfg.reply.continuation.enabled) cont.set(key, { gid, armedAt: nowMs(), lastReplyAt: 0, dueAt: 0, chain: 0, lastFireAt: 0 })
   }
 
   /** 它真的发出了一条回复 → 从这一刻开始计时（主动/续聊/欢迎轮不参与） */
@@ -646,14 +661,13 @@ export function createPacing({ log = console, state, clock = null, privateState 
       return
     }
     const targets = [
-      ...(num(cfg.reply.hourlyMax, 0) > 0 ? [...allowedGroups()].map((id) => [`group:${id}`, id]) : []),
+      ...[...allowedGroups()].map((id) => [`group:${id}`, id]),
       ...allowedPrivateIds().map((id) => [`private:${id}`, id]),
     ]
     for (const [key, id] of targets) {
       const privateChat = isPrivate(key)
-      const silence = privateChat ? privateSilence(key, now) : now - Number(state.get(key).lastInboundAt || 0)
-      const coldMs = privateChat ? cfg.reply.privatePolicy.coldSilenceMs : num(cfg.reply.coldSilenceMs, 300000)
-      if (silence < coldMs) continue
+      if (!privateChat && now - Number(state.get(key).lastInboundAt || 0)
+        < Math.max(60000, num(cfg.reply.topicWindowMs, 600000))) continue
       if (busy(key) || contPending(key)) continue // 等待槽/续聊均先让路
       const o = ensureWindow(key, now)
       if (!o) continue
@@ -764,16 +778,38 @@ export function createPacing({ log = console, state, clock = null, privateState 
     if (!base) return
     if (!base._scratch || typeof base._scratch !== 'object') base._scratch = {}
     if (evs.length > 1) {
-      // 正文 = 唤醒消息 + 后续各条 `[昵称(QQ:号)]: 内容`（后随图只留 `[图片]` 占位）
+      // 正文 = 唤醒消息 + 后续各条 `[昵称(QQ:号)]: 内容`（正文留图占位，附件另收）
       const lines = evs.slice(1).map(mergedLine).filter(Boolean)
       base.text = [String(base.text || '').trim(), ...lines].filter(Boolean).join('\n')
       const hints = []
       for (const e of evs) for (const h of (e.hint || [])) if (!hints.includes(h)) hints.push(h)
       base.hint = hints
-      const parts = evs.flatMap((e) => (Array.isArray(e.imageParts) ? e.imageParts : []))
-      const paths = evs.flatMap((e) => (Array.isArray(e.imagePaths) ? e.imagePaths : []))
-      if (parts.length) base.imageParts = parts
-      if (paths.length) base.imagePaths = [...new Set(paths)]
+      // Snapshot before changing base: never retain a reference back to the event itself.
+      // Loading and final attachment-number/source hints belong to the kernel loader.
+      const selected = cfg.merge.loadImages === false ? [base] : evs
+      const imageEvents = selected.map((e) => ({
+        sender: { qq: e.sender?.qq ?? null, name: e.sender?.name || '', card: e.sender?.card || '' },
+        messageId: e.messageId ?? null,
+        images: (Array.isArray(e.images) ? e.images : []).map((image) => ({ ...image })),
+        imageParts: [...(Array.isArray(e.imageParts) ? e.imageParts : [])],
+        imagePaths: [...(Array.isArray(e.imagePaths) ? e.imagePaths : [])],
+      }))
+      base._scratch.mergedImageEvents = imageEvents
+      base.images = imageEvents.flatMap((e) => e.images)
+      const parts = []
+      const paths = []
+      const seenPaths = new Set()
+      for (const e of imageEvents) {
+        for (let i = 0; i < e.imageParts.length; i += 1) {
+          const imagePath = e.imagePaths[i] || null
+          if (imagePath && seenPaths.has(imagePath)) continue
+          if (imagePath) seenPaths.add(imagePath)
+          parts.push(e.imageParts[i])
+          paths.push(imagePath)
+        }
+      }
+      base.imageParts = parts
+      base.imagePaths = paths
       const quoted = evs.map((e) => e._scratch?.quoteText).find(Boolean)
       if (quoted && !base._scratch.quoteText) base._scratch.quoteText = quoted
       // 混合成员合批不能借某一条主人的身份获得生图冷却豁免。
@@ -789,7 +825,10 @@ export function createPacing({ log = console, state, clock = null, privateState 
 
   // ── 配置 / 状态 ─────────────────────────────────────────────
   function apply(pacingCfg) {
+    const previous = cfg
     cfg = normalize(pacingCfg)
+    const changed = lastLogged && (JSON.stringify(previous.reply.interval) !== JSON.stringify(cfg.reply.interval)
+      || JSON.stringify(previous.reply.quietHours) !== JSON.stringify(cfg.reply.quietHours))
     // 群集合变了：清掉不再允许的群的调度状态（防止旧群继续按旧间隔起念）
     const allow = allowedGroups()
     for (const key of [...opp.keys()]) {
@@ -798,17 +837,9 @@ export function createPacing({ log = console, state, clock = null, privateState 
     for (const key of [...rings.keys()]) {
       if (!allow.has(key.replace(/^group:/, ''))) rings.delete(key)
     }
-    for (const id of allowedPrivateIds()) {
-      const key = `private:${id}`
-      const t = privateOf(key)
-      const o = oppOf(key)
-      const st = state.get(key)
-      const lastActivity = Math.max(t.baselineAt, t.lastInboundAt, t.lastOutboundAt,
-        Number(st.lastInboundAt) || 0, Number(st.lastSendAt) || 0)
-      const lastCandidate = [...fired].reverse().find((e) => e.chatKey === key)?.at || 0
-      const nextAt = Math.max(o.dueAt, lastActivity + cfg.reply.privatePolicy.coldSilenceMs,
-        Math.max(lastActivity, lastCandidate) + opportunityGapMs(key))
-      if (nextAt !== o.dueAt) { o.dueAt = nextAt; t.nextAt = nextAt; privateChanged() }
+    for (const key of [...allowedGroups()].map((id) => `group:${id}`).concat(allowedPrivateIds().map((id) => `private:${id}`))) {
+      if (changed) schedule(key)
+      else oppOf(key)
     }
     deferQuietOpportunities(nowMs())
     // 开关热更新：开了就装调度，关了就连定时器一起停（不空跑）
@@ -820,9 +851,9 @@ export function createPacing({ log = console, state, clock = null, privateState 
     if (stamp === lastLogged) return cfg
     lastLogged = stamp
     try {
-      log.info(`节奏：主动接话=${r.enabled && r.hourlyMax > 0 ? '开' : '关'}`
-        + `（每小时≤${r.hourlyMax}次，间隔≥${Math.round(opportunityGapMs() / 60000)}分钟，`
-        + (silenceOn() ? `冷场≥${Math.round(num(r.coldSilenceMs, 300000) / 60000)}分钟` : '只在群里有新消息时接')
+      log.info(`节奏：主动接话=${r.enabled ? '开' : '关'}`
+        + `（随机${Math.round(r.interval.minMs / 60000)}–${Math.round(r.interval.maxMs / 60000)}分钟，`
+        + (silenceOn() ? '到点可冷场接话' : '只在群里有新消息时接')
         + `，敏感度${Math.round(clamp01(r.sensitivity) * 100)}%，群${Object.keys(r.groups).join('/') || '（无）'}）`
         + ` 合批=${cfg.merge.enabled ? `开（等 ${Math.round(num(cfg.merge.waitMs, 5000) / 1000)} 秒；私聊合并/群聊唤醒独立）` : '关'}`)
     } catch { /* 日志失败不影响配置生效 */ }
@@ -831,7 +862,7 @@ export function createPacing({ log = console, state, clock = null, privateState 
 
   /** 主动接话总开关（控制台/内核用；关掉 = 连"要不要插一句"的念头都不起） */
   function proactiveEnabled() {
-    return cfg.reply.enabled !== false && num(cfg.reply.hourlyMax, 0) > 0
+    return cfg.reply.enabled === true
   }
 
   /** 允许主动接话的群号列表（给内核开机播种"最后一条消息时间"用） */
@@ -851,7 +882,9 @@ export function createPacing({ log = console, state, clock = null, privateState 
       return {
         groupId: gid,
         used: list.length,
-        max: Math.max(0, num(cfg.reply.hourlyMax, 0)),
+        chatKey: key,
+        unanswered: timingOf(key).unanswered,
+        silenceMs: privateSilence(key, now),
         lastAt: last ? last.at : null,
         lastSent: last ? !!last.sent : null,
         lastReason: last ? last.reason : null,
@@ -863,8 +896,7 @@ export function createPacing({ log = console, state, clock = null, privateState 
       ok: true,
       enabled: proactiveEnabled(),
       quietHours: quietHoursStatus(cfg.reply.quietHours, now),
-      hourlyMax: Math.max(0, num(cfg.reply.hourlyMax, 0)),
-      minGapMs: opportunityGapMs(),
+      interval: { ...cfg.reply.interval },
       sensitivity: clamp01(cfg.reply.sensitivity),
       threshold: thresholdForSensitivity(cfg.reply.sensitivity),
       // 连续对话：只在控制台"最近状态"里显示待执行/本小时次数（UI 只暴露 3 个可调项）
@@ -877,11 +909,11 @@ export function createPacing({ log = console, state, clock = null, privateState 
       groups,
       privateChats: allowedPrivateIds().map((userId) => {
         const chatKey = `private:${userId}`
-        const timing = privateOf(chatKey)
+        const timing = timingOf(chatKey)
         const last = [...fired].reverse().find((e) => e.chatKey === chatKey)
         return {
           userId, chatKey, unanswered: timing.unanswered,
-          nextAt: Math.max(opp.get(chatKey)?.dueAt ?? timing.nextAt, now - privateSilence(chatKey, now) + cfg.reply.privatePolicy.coldSilenceMs),
+          nextAt: timing.nextAt,
           silenceMs: privateSilence(chatKey, now), lastAt: last?.at ?? null, lastSent: last ? !!last.sent : null,
           lastReason: last?.reason ?? null, lastScore: last?.score ?? null,
         }
@@ -900,7 +932,8 @@ export function createPacing({ log = console, state, clock = null, privateState 
     submit, collect, flush,
     consider,
     interestFor,
-    proactiveEnabled, isQuietTime, allowedGroupIds, allowedPrivateIds, privateStateSnapshot, stats,
+    proactiveEnabled, isQuietTime, allowedGroupIds, allowedPrivateIds, timingStateSnapshot,
+    privateStateSnapshot: timingStateSnapshot, stats,
     nextOpportunityAt: (chatKey) => {
       const o = opp.get(String(chatKey))
       return o && Number.isFinite(o.dueAt) ? o.dueAt : null

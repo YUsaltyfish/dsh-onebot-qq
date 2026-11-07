@@ -68,11 +68,11 @@ test('collectModules：on 跟随配置；停用插件（plugins[id]=false）仍�
 test('readValue / writeValue：核心项按 scale 换算、插件项原样存；非法键/类型/范围拒绝', async (t) => {
   const h = await boot(t)
   const raw = JSON.parse(JSON.stringify(h.raw))
-  // 核心项：minGapMs 面板单位分钟，scale=60000
-  const w = writeValue(h.kernel, 'pacing.reply.minGapMs', 10, raw)
-  assert.equal(w.value, 10)
-  assert.equal(w.stored, 600000, '面板 10 分钟 → 存 600000ms')
-  assert.equal(readValue(h.kernel, 'pacing.reply.minGapMs', raw), 10)
+  // 核心项：共享随机窗面板单位小时，scale=3600000
+  const w = writeValue(h.kernel, 'pacing.reply.interval.minMs', 2, raw)
+  assert.equal(w.value, 2)
+  assert.equal(w.stored, 7200000, '面板 2 小时 → 存 7200000ms')
+  assert.equal(readValue(h.kernel, 'pacing.reply.interval.minMs', raw), 2)
 
   // 插件项：group-memory.maxBytes 原样存（面板单位 = 存储单位，不乘 scale）
   const w2 = writeValue(h.kernel, 'group-memory.maxBytes', 30000, raw)
@@ -89,15 +89,15 @@ test('createConfigStore.update：落盘（备份 + 原子写）+ kernel.reloadCo
   const store = createConfigStore({ kernel: h.kernel, configPath: h.configPath, dataDir: h.dataDir, log: quiet() })
   const before = store.read()
   const res = await store.update((raw) => {
-    raw.pacing.reply.hourlyMax = 9
+    raw.pacing.reply.maxChars = 90
     raw.pluginConfig['gate-wake'] = { ...(raw.pluginConfig['gate-wake'] || {}), callAck: false }
   }, { what: 'test-update' })
   assert.equal(res.ok, true)
   assert.ok(res.backup, '应生成备份文件')
   const onDisk = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
-  assert.equal(onDisk.pacing.reply.hourlyMax, 9)
-  assert.equal(h.kernel.runtime.pacing.reply.hourlyMax, 9, '热重载后 runtime 已更新')
-  assert.equal(before.pacing.reply.hourlyMax !== 9, true)
+  assert.equal(onDisk.pacing.reply.maxChars, 90)
+  assert.equal(h.kernel.runtime.pacing.reply.maxChars, 90, '热重载后 runtime 已更新')
+  assert.equal(before.pacing.reply.maxChars !== 9, true)
 
   // reload 失败 → 回滚文件内容
   const snapshot = fs.readFileSync(h.configPath, 'utf8')
@@ -105,7 +105,7 @@ test('createConfigStore.update：落盘（备份 + 原子写）+ kernel.reloadCo
     throw new Error('reload boom')
   }
   await assert.rejects(
-    () => store.update((raw) => { raw.pacing.reply.hourlyMax = 11 }, { what: 'rollback-test' }),
+    () => store.update((raw) => { raw.pacing.reply.maxChars = 11 }, { what: 'rollback-test' }),
     /回滚|失败/,
   )
   assert.equal(fs.readFileSync(h.configPath, 'utf8'), snapshot, '回滚后文件恢复原状')
@@ -122,10 +122,10 @@ test('8 端点：schema / status / set / module 正常返回；非法键返回 {
   assert.equal(status.ok, true)
   assert.ok(status.health, 'status 应带 health')
 
-  const set = await endpoints.handle('set', { key: 'pacing.reply.hourlyMax', value: 8 })
+  const set = await endpoints.handle('set', { key: 'pacing.reply.maxChars', value: 80 })
   assert.equal(set.ok, true)
   const onDisk = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
-  assert.equal(onDisk.pacing.reply.hourlyMax, 8)
+  assert.equal(onDisk.pacing.reply.maxChars, 80)
 
   const module = await endpoints.handle('module', { id: 'stickers', on: false })
   assert.equal(module.ok, true)
@@ -222,14 +222,14 @@ test('待配置模式：set 保存成功并热应用其余配置（pending 标�
   assert.equal(st.onboarding.find((o) => o.id === 'adminQq').ok, false)
 
   // 普通设置：成功保存到磁盘；内核 pending reload 会把「除 adminQq 以外」的配置热应用（不自动连接）
-  const set = await endpoints.handle('set', { key: 'pacing.reply.hourlyMax', value: 9 })
+  const set = await endpoints.handle('set', { key: 'pacing.reply.maxChars', value: 90 })
   assert.equal(set.ok, true)
   assert.equal(set.pending, true, '待配置模式的保存应标记 pending')
   assert.match(String(set.message), /待配置模式/)
-  assert.equal(h.kernel.runtime.pacing.reply.hourlyMax, 9, 'pending 模式下其余配置也要热应用（协议端地址同理）')
+  assert.equal(h.kernel.runtime.pacing.reply.maxChars, 90, 'pending 模式下其余配置也要热应用（协议端地址同理）')
   assert.equal(h.kernel.configReady, false, '仍处于待配置模式')
   const onDisk = JSON.parse(fs.readFileSync(h.configPath, 'utf8'))
-  assert.equal(onDisk.pacing.reply.hourlyMax, 9, '磁盘上已经保存')
+  assert.equal(onDisk.pacing.reply.maxChars, 90, '磁盘上已经保存')
 
   // 协议端地址同样要即时进 adapter（否则新手向导「先填地址→测试连接」会连旧地址）
   const reloadCallsBefore = reloadCalls
@@ -256,7 +256,7 @@ test('待配置模式：set 保存成功并热应用其余配置（pending 标�
   assert.equal(ready.pending, false, '填完 adminQq 后不再 pending')
   assert.equal(h.kernel.configReady, true)
   assert.equal(h.kernel.runtime.adminQq, ADMIN_QQ)
-  assert.equal(h.kernel.runtime.pacing.reply.hourlyMax, 9, '之前的待配置保存这次一起热重载')
+  assert.equal(h.kernel.runtime.pacing.reply.maxChars, 90, '之前的待配置保存这次一起热重载')
 })
 
 test('安装即用：kernel 启动自动投递默认人设（文件 + 投递 + activePersona）；persona-init 动作已移除', async (t) => {

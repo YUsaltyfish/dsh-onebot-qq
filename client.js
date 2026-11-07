@@ -290,9 +290,7 @@ window.__ModuleLoader__.load({
 
 		// 各功能页顶部的「跨页指路」：只有会让人找不到开关的地方才写一行，别堆说明。
 		const GROUP_NOTES = {
-			'主动接话': '这里是「没人叫也偶尔接一句」的频率和回话风格；每个群还要在「群聊」页勾「允许主动接话」——两处都开才生效。\n'
-				+ '顶部三个档位按钮只是一键填好下面的数字，之后还能随便细调；进阶项收在下面的「高级」按钮里。\n'
-				+ '最下面「最近状态」能看到本小时用了几次、上一次模型接没接 —— 调参就看那一行。',
+			'主动接话': '群聊、私聊共用小时级随机间隔；群逐群允许，私聊明确名单。最近状态显示各会话下次机会与连续未回复次数。',
 			'其他': '这里是低频 / 高级配置，按来源分组：权限（主人 QQ）、门禁（屏蔽群 / 群内黑名单 / 白名单 / 全局允许用户）、\n'
 				+ '文件（入站落盘目录）、发图（可发图片目录白名单）、头像（缓存目录与时长）。\n'
 				+ '平时不用动；每一项都有详细悬停解释。门禁类在「群聊」页每张群卡片上也有同样的开关，改哪边都一样。',
@@ -765,12 +763,7 @@ window.__ModuleLoader__.load({
 		}
 
 		// ═══════════ 标签页③：主动接话（没人叫时偶尔接一句 + 回话风格；进阶项折叠）═══════════
-		// 给一般用户看的：三档按钮 + 几个概率 + 一行"最近接没接"的状态；语境权重等进阶项收在「高级」按钮里。
-		const REPLY_PRESETS = [
-			{ id: 'quiet', label: '安静', hint: '每小时最多主动接话 1 次；只在特别值得接的时候开口' },
-			{ id: 'semi', label: '适中（推荐）', hint: '每小时最多 3 次；看群里聊得合适才接' },
-			{ id: 'active', label: '活泼', hint: '每小时最多 6 次；更容易在普通聊天里接话' },
-		]
+		// 群聊、私聊只用一套随机窗；语境权重等进阶项折叠。
 		function ReplyModeTab(props) {
 			const { schema, status, busy, run, call } = props
 			const { useState } = react
@@ -798,6 +791,8 @@ window.__ModuleLoader__.load({
 			// 是否处于时段内只信后端调度状态，不在浏览器另算一套时间。
 			const quietHours = reply && reply.quietHours
 			const quietActive = !!(quietHours && quietHours.active)
+			const interval = (reply && reply.interval) || {}
+			const hours = (field, fallback) => Number.isFinite(interval[field]) ? Math.round(interval[field] / 3600) / 1000 : fallback
 			const fmtDateTime = (ts) => {
 				const date = new Date(ts)
 				return ts && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '待安排'
@@ -805,15 +800,11 @@ window.__ModuleLoader__.load({
 			return h('div', null, [
 				h('div', { style: S.msg, key: 'note' },
 					'群聊、私聊共用「允许主动接话」总开关。群聊还要在「群聊」页勾选；'
-					+ '私聊只对下面的 QQ 名单生效，默认不主动找任何人。群聊档位不改变私聊间隔。'),
-				h('div', { style: S.group, key: 'pt' }, '快速档位'),
-				h('div', { style: S.row, key: 'presets' }, REPLY_PRESETS.map((m) => h('button', {
-					key: m.id, style: S.btn, disabled: busy, title: m.hint,
-					onClick: () => run(`主动接话 → ${m.label}`, () => call('action', { id: 'reply-preset', preset: m.id })),
-				}, m.label))),
+					+ '私聊只对下面的 QQ 名单生效，默认不主动找任何人。群聊、私聊共用一套随机间隔。'
+					+ '修改间隔或免打扰策略会重新安排一次，刷新页面不会重抽。下次时间只是最早机会，不保证发送。'),
 				h('div', { style: S.msg, key: 'ph' },
 					reply && reply.enabled
-						? `群聊：每小时最多 ${reply.hourlyMax} 次 · 实际间隔 ≥ ${Math.round((reply.minGapMs || 0) / 60000)} 分钟 · 语境门槛 ${Math.round((reply.threshold || 0) * 100)} 分`
+						? `当前：主动接话已开启；正常 ${hours('minMs', 1)}–${hours('maxMs', 4)} 小时，未回复 ${hours('unansweredMinMs', 4)}–${hours('unansweredMaxMs', 10)} 小时，持续未回复退避上限 ${hours('maxBackoffMs', 24)} 小时。`
 						: '当前：群聊、私聊主动接话都关着（打开「允许主动接话」后再配置名单）'),
 				quietHours ? h('div', { style: S.msg, key: 'quiet-status' },
 					quietActive
@@ -849,9 +840,10 @@ window.__ModuleLoader__.load({
 						? groups.map((g) => h('div', { style: S.row, key: 'sg' + g.groupId }, [
 							h('span', { style: S.label, key: 'l' }, `群 ${g.groupId}`),
 							h('span', { key: 'v', style: S.msg },
-								`本小时 ${g.used}/${g.max} 次`
+								`连续未回复 ${g.unanswered || 0} 次`
+								+ ` ｜ 下次机会 ${!reply.enabled ? '总开关已关闭' : quietActive ? '免打扰中' : fmtDateTime(g.nextAt)}`
 								+ (g.lastAt
-									? ` ｜ 上次 ${fmtTime(g.lastAt)} ${g.lastSent === true ? '已接话' : (g.lastSent === false ? '模型判断没接' : '')}`
+									? ` ｜ 上次 ${fmtDateTime(g.lastAt)} ${g.lastSent === true ? '已接话' : (g.lastSent === false ? '未发送' : '')}`
 									: ' ｜ 还没触发过')),
 						]))
 						: h('div', { style: S.msg, key: 'empty' }, '还没有允许主动接话的群 —— 去「群聊」页勾一下。'),

@@ -19,6 +19,7 @@ import {
   migrateLegacyConfig,
   isLegacyShape,
   validateConfig,
+  validateReplyInterval,
   resolveRuntimePaths,
   applyCredentialEnv,
   loadConfig,
@@ -107,7 +108,8 @@ test('migrateLegacyConfig：旧 bridge 段 → v2（字段名与单位换算）'
   assert.equal(cfg.outbound.longForwardChunkSize, 900)
   assert.equal(cfg.archive.dir, 'logs/qq_chat')
   assert.equal(cfg.pacing.reply.enabled, true)
-  assert.equal(cfg.pacing.reply.hourlyMax, 4)
+  assert.equal(cfg.pacing.reply.hourlyMax, undefined)
+  assert.deepEqual(cfg.pacing.reply.interval, defaultConfig().pacing.reply.interval)
 
   const gw = cfg.pluginConfig['gate-wake']
   assert.ok(gw && typeof gw.keywords === 'string', 'groupKeywords 迁移为 keywords 文本')
@@ -292,6 +294,53 @@ test('examples/config.example.json：合法、能通过校验、无私有值', (
   assert.deepEqual(validateConfig(merged), [], '示例配置填完占位值后应能通过校验')
   assert.equal(merged.credentials.gptImage.protocol, 'openai-images', '示例配置应带生图协议字段')
   assert.equal(exampleConfig().version, CONFIG_VERSION)
+})
+
+test('统一随机窗默认值与配置校验：共享小时区间、反向边界与退避上限拒绝', () => {
+  const interval = defaultConfig().pacing.reply.interval
+  assert.deepEqual(interval, { minMs: 3600000, maxMs: 14400000, unansweredMinMs: 14400000, unansweredMaxMs: 36000000, maxBackoffMs: 86400000 })
+  assert.deepEqual(validateReplyInterval(interval), [])
+  for (const value of [0, -1, Infinity, NaN, '3600000']) {
+    assert.ok(validateReplyInterval({ ...interval, minMs: value }).length)
+  }
+  assert.ok(validateReplyInterval({ ...interval, minMs: 20000000 }).length)
+  assert.ok(validateReplyInterval({ ...interval, unansweredMinMs: 40000000 }).length)
+  assert.ok(validateReplyInterval({ ...interval, maxBackoffMs: 20000000 }).length)
+})
+
+test('旧频率迁移：hourlyMax=0保留关闭，旧时间不继续限制且备份后清理旧键', () => {
+  for (const hourlyMax of [0, 6]) {
+    const dataDir = tmpDir('interval-migration')
+    const file = path.join(dataDir, 'config.json')
+    const raw = { version: 2, adminQq: 10001, pacing: { reply: { enabled: true, hourlyMax,
+      minGapMs: 8000, coldSilenceMs: 2000, privatePolicy: { minGapMs: 999999999 } } } }
+    fs.writeFileSync(file, JSON.stringify(raw))
+    const result = loadConfig({ dataDir })
+    const reply = result.raw.pacing.reply
+    assert.equal(reply.enabled, hourlyMax !== 0)
+    assert.deepEqual(reply.interval, defaultConfig().pacing.reply.interval)
+    for (const key of ['hourlyMax', 'minGapMs', 'coldSilenceMs', 'privatePolicy']) assert.equal(key in reply, false)
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).pacing.reply, reply)
+    assert.ok(fs.readdirSync(dataDir).some((n) => n.startsWith('config.json.bak-prune-')))
+  }
+})
+
+test('saveConfig保留显式共享区间并移除旧键，不污染调用方；只读load只内存迁移', () => {
+  const dataDir = tmpDir('interval-save')
+  const file = path.join(dataDir, 'config.json')
+  const raw = deepMerge(defaultConfig(), { adminQq: 10001, pacing: { reply: { hourlyMax: 0, minGapMs: 1,
+    interval: { minMs: 7200000, maxMs: 10800000 } } } })
+  fs.writeFileSync(file, JSON.stringify(raw))
+  const original = fs.readFileSync(file, 'utf8')
+  const loaded = loadConfig({ dataDir, createIfMissing: false })
+  assert.equal(loaded.raw.pacing.reply.enabled, false)
+  assert.equal(fs.readFileSync(file, 'utf8'), original)
+  saveConfig(file, raw)
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(saved.pacing.reply.interval.minMs, 7200000)
+  assert.equal(saved.pacing.reply.interval.maxMs, 10800000)
+  assert.equal(saved.pacing.reply.hourlyMax, undefined)
+  assert.equal(raw.pacing.reply.hourlyMax, 0)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

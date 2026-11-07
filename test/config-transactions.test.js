@@ -35,12 +35,12 @@ test('updates serialize the read and asynchronous mutation across store instance
   const a = store.update(async (raw) => {
     entered.resolve()
     await release.promise
-    raw.pacing.reply.hourlyMax = 7
+    raw.pacing.reply.maxChars = 7
   })
   await entered.promise
   const b = other.update((raw) => {
     secondStarted = true
-    assert.equal(raw.pacing.reply.hourlyMax, 7)
+    assert.equal(raw.pacing.reply.maxChars, 7)
     raw.outbound.quoteAfterMsgs = 4
   })
   await Promise.resolve()
@@ -48,7 +48,7 @@ test('updates serialize the read and asynchronous mutation across store instance
   release.resolve()
   await Promise.all([a, b])
   const raw = store.read()
-  assert.equal(raw.pacing.reply.hourlyMax, 7)
+  assert.equal(raw.pacing.reply.maxChars, 7)
   assert.equal(raw.outbound.quoteAfterMsgs, 4)
 })
 
@@ -65,11 +65,11 @@ test('a failed reload rolls back before the queued save can report success', asy
       throw new Error('first reload failed')
     }
   }
-  const a = store.update((raw) => { raw.pacing.reply.hourlyMax = 7 })
+  const a = store.update((raw) => { raw.pacing.reply.maxChars = 7 })
   const rejected = assert.rejects(a, /已回滚/)
   await entered.promise
   const next = store.read()
-  next.pacing.reply.hourlyMax = 9
+  next.pacing.reply.maxChars = 9
   let confirmed = false
   const b = createConfigStore({ kernel, configPath, log }).save(next).then((r) => { confirmed = true; return r })
   await Promise.resolve()
@@ -77,14 +77,14 @@ test('a failed reload rolls back before the queued save can report success', asy
   release.resolve()
   await rejected
   assert.equal((await b).ok, true)
-  assert.equal(store.read().pacing.reply.hourlyMax, 9)
+  assert.equal(store.read().pacing.reply.maxChars, 9)
   assert.equal(calls, 3, 'failed apply, rollback apply, then successful apply')
 })
 
 test('queued update reads the rolled-back base, while a different file is not blocked', async (t) => {
   const { store, kernel } = fixture(t)
   const other = fixture(t)
-  const before = store.read().pacing.reply.hourlyMax
+  const before = store.read().pacing.reply.maxChars
   const entered = deferred()
   const release = deferred()
   let calls = 0
@@ -95,19 +95,19 @@ test('queued update reads the rolled-back base, while a different file is not bl
       throw new Error('reload failed')
     }
   }
-  const a = store.update((raw) => { raw.pacing.reply.hourlyMax = 99 })
+  const a = store.update((raw) => { raw.pacing.reply.maxChars = 99 })
   const rejected = assert.rejects(a, /已回滚/)
   await entered.promise
   const b = store.update((raw) => {
-    assert.equal(raw.pacing.reply.hourlyMax, before)
+    assert.equal(raw.pacing.reply.maxChars, before)
     raw.outbound.quoteAfterMsgs = 5
   })
-  await other.store.update((raw) => { raw.pacing.reply.hourlyMax = 8 })
+  await other.store.update((raw) => { raw.pacing.reply.maxChars = 8 })
   assert.equal(calls, 1, 'a different config file progresses independently')
   release.resolve()
   await rejected
   await b
-  assert.equal(store.read().pacing.reply.hourlyMax, before)
+  assert.equal(store.read().pacing.reply.maxChars, before)
   assert.equal(store.read().outbound.quoteAfterMsgs, 5)
 })
 
@@ -117,8 +117,8 @@ test('mutation and validation failures release the queue without changing disk',
   await assert.rejects(store.update(() => { throw new Error('mutation failed') }), /mutation failed/)
   await assert.rejects(store.update((raw) => { raw.adminQq = 0 }), /校验未通过/)
   assert.deepEqual(store.read(), before)
-  await store.update((raw) => { raw.pacing.reply.hourlyMax = 8 })
-  assert.equal(store.read().pacing.reply.hourlyMax, 8)
+  await store.update((raw) => { raw.pacing.reply.maxChars = 8 })
+  assert.equal(store.read().pacing.reply.maxChars, 8)
 })
 
 test('reload is the single runtime apply and save snapshots its input before waiting', async (t) => {
@@ -131,16 +131,16 @@ test('reload is the single runtime apply and save snapshots its input before wai
     await kernel.applyRuntimeConfig()
     if (applies === 1) { entered.resolve(); await release.promise }
   }
-  const a = store.update((raw) => { raw.pacing.reply.hourlyMax = 7 })
+  const a = store.update((raw) => { raw.pacing.reply.maxChars = 7 })
   await entered.promise
   const next = store.read()
-  next.pacing.reply.hourlyMax = 8
+  next.pacing.reply.maxChars = 8
   const b = store.save(next)
-  next.pacing.reply.hourlyMax = 99
+  next.pacing.reply.maxChars = 99
   release.resolve()
   await Promise.all([a, b])
   assert.equal(applies, 2)
-  assert.equal(store.read().pacing.reply.hourlyMax, 8)
+  assert.equal(store.read().pacing.reply.maxChars, 8)
 })
 
 test('all config-writing endpoint kinds read the latest state inside the transaction', async (t) => {
@@ -185,5 +185,5 @@ test('all config-writing endpoint kinds read the latest state inside the transac
   assert.deepEqual(raw.pluginConfig['gate-wake'].ignoreGroups, [123456, 234567])
   assert.equal(raw.pluginConfig['group-memory'].maxBytes, 30000)
   assert.equal(raw.pluginConfig['persona-voice'].activePersona, 'Synthetic')
-  assert.equal(raw.pacing.reply.hourlyMax, 6)
+  assert.equal(raw.pacing.reply.maxChars, 140)
 })

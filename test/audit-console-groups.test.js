@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { bootKernel } from './helpers.mjs'
-import { collectSchema } from '../admin/schema.js'
+import { collectSchema, writeValue, readValue } from '../admin/schema.js'
 
 async function schemaOf(t) {
   const h = await bootKernel({})
@@ -36,17 +36,51 @@ test('主动接话：基础项不带 advanced，14 个进阶项全部带 advance
   assert.ok(adv.every((c) => c.key.startsWith('pacing.reply.')))
 })
 
-test('消息设置：原回话细节 4 项 + 合批 2 项都在同一页（旧 5 个窗口参数已删除）', async (t) => {
+test('消息设置：原回话细节 4 项 + 合批 3 项都在同一页（旧 5 个窗口参数已删除）', async (t) => {
   const schema = await schemaOf(t)
   const keys = schema.controls.filter((c) => c.group === '消息设置').map((c) => c.key)
   for (const k of [
     'outbound.replyMaxLength', 'outbound.longForwardThreshold', 'outbound.longForwardChunkSize', 'outbound.quoteAfterMsgs',
-    'pacing.merge.enabled', 'pacing.merge.waitMs',
+    'pacing.merge.enabled', 'pacing.merge.waitMs', 'pacing.merge.loadImages',
   ]) assert.ok(keys.includes(k), `消息设置应含 ${k}`)
   for (const gone of ['pacing.merge.windowMs', 'pacing.merge.windowActiveMs', 'pacing.merge.activeGapMs',
     'pacing.merge.maxWaitMs', 'pacing.merge.skipIfSlowMs']) {
     assert.equal(keys.includes(gone), false, `旧键 ${gone} 不应再出现`)
   }
+})
+
+test('识别合批内图片默认为开，可按布尔值保存，说明顺序和视觉成本', () => {
+  const key = 'pacing.merge.loadImages'
+  const control = collectSchema({}).controls.find((c) => c.key === key)
+  assert.equal(control.group, '消息设置')
+  assert.equal(control.type, 'bool')
+  assert.equal(control.label, '识别合批内图片')
+  assert.equal(control.value, true)
+  assert.equal(control.default, true)
+  assert.match(control.hint, /顺序.*非唤醒/)
+  assert.match(control.hint, /首条消息.*后续.*占位/)
+  assert.match(control.hint, /视觉输入成本/)
+  const raw = {}
+  for (const value of [false, true]) {
+    assert.equal(writeValue({}, key, value, raw).stored, value)
+    assert.equal(raw.pacing.merge.loadImages, value)
+    assert.equal(readValue({}, key, raw), value)
+  }
+  assert.throws(() => writeValue({}, key, 'false', raw), /布尔值/)
+})
+
+test('合并等待支持0–120秒，毫秒换算和默认值不变，越界拒绝', () => {
+  const key = 'pacing.merge.waitMs'
+  const control = collectSchema({}).controls.find((c) => c.key === key)
+  assert.equal(control.max, 120)
+  assert.equal(control.value, 5)
+  const raw = {}
+  for (const seconds of [0, 15, 30, 120]) {
+    assert.equal(writeValue({}, key, seconds, raw).stored, seconds * 1000)
+    assert.equal(readValue({}, key, raw), seconds)
+  }
+  for (const seconds of [-1, 121]) assert.throws(() => writeValue({}, key, seconds, raw))
+  assert.equal(readValue({}, key, raw), 120)
 })
 
 test('「其他」页：权限 / 门禁 / 文件 / 发图 / 头像 五组的控件统一并进来，且有详细悬停解释', async (t) => {

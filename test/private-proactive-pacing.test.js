@@ -14,7 +14,7 @@ function setup({ reply = {}, privateState = {}, busy = () => false } = {}) {
     if (!states.has(key)) states.set(key, { lastInboundAt: 0, lastSendAt: 0 })
     return states.get(key)
   } }
-  const p = createPacing({ state, log: quiet, clock: () => now, privateState,
+  const p = createPacing({ state, log: quiet, clock: () => now, random: () => 1, privateState,
     onPrivateStateChange: (snapshot) => snapshots.push(snapshot) })
   p.apply({ reply: { enabled: true, quietHours: { enabled: false }, privateChats: [12345], ...reply } })
   p.start({ onProactiveTurn: (event) => calls.push(event), isBusy: busy })
@@ -26,8 +26,8 @@ function setup({ reply = {}, privateState = {}, busy = () => false } = {}) {
 }
 
 test('private defaults and allowlist normalize; no history waits for startup baseline', async () => {
-  assert.deepEqual(REPLY_DEFAULTS.privatePolicy, { coldSilenceMs: 4 * HOUR, minGapMs: 4 * HOUR,
-    unansweredGapMs: 12 * HOUR, maxBackoffMs: 24 * HOUR })
+  assert.deepEqual(REPLY_DEFAULTS.interval, { minMs: HOUR, maxMs: 4 * HOUR,
+    unansweredMinMs: 4 * HOUR, unansweredMaxMs: 10 * HOUR, maxBackoffMs: 24 * HOUR })
   const { p, calls, advance, tick } = setup({ reply: { privateChats: [12345, '12345', '0012345', '1234567890123', 'invalid', -1, null] } })
   assert.deepEqual(p.allowedPrivateIds(), ['12345'])
   await tick()
@@ -44,8 +44,8 @@ test('private defaults and allowlist normalize; no history waits for startup bas
   assert.equal(p.stats().recent[0].chatKey, 'private:12345')
 })
 
-test('total switch, allowlist, hourly limit and silence switch gate private turns', async () => {
-  for (const reply of [{ enabled: false }, { privateChats: [] }, { silenceEnabled: false }, { hourlyMax: 0 }]) {
+test('total switch, allowlist and silence switch gate private turns', async () => {
+  for (const reply of [{ enabled: false }, { privateChats: [] }, { silenceEnabled: false }]) {
     const { calls, advance, tick } = setup({ reply })
     advance(48 * HOUR)
     await tick()
@@ -60,7 +60,7 @@ test('latest real inbound and outbound restart silence, synthetic inbound does n
   advance(3 * HOUR)
   await tick()
   assert.equal(calls.length, 0)
-  p.noteOutbound('private:12345')
+  p.noteOutbound('private:12345', { wakeKind: 'private' })
   advance(3 * HOUR)
   await tick()
   assert.equal(calls.length, 0)
@@ -83,22 +83,22 @@ test('candidate not sent consumes opportunity but not unanswered; split sends co
   assert.equal(calls.length, 1)
   advance(4 * HOUR)
   await tick()
-  const token = {}
-  p.noteOutbound('private:12345')
+  const token = { wakeKind: 'proactive' }
+  p.noteOutbound('private:12345', token)
   p.markProactiveSent('private:12345', token)
-  p.noteOutbound('private:12345')
+  p.noteOutbound('private:12345', token)
   p.markProactiveSent('private:12345', token)
   p.markProactiveSent('private:12345')
   assert.equal(p.stats().privateChats[0].unanswered, 1)
-  assert.equal(p.nextOpportunityAt('private:12345'), 120 * HOUR)
+  assert.equal(p.nextOpportunityAt('private:12345'), 118 * HOUR)
 })
 
-test('unanswered backs off 12h then 24h, stays capped without permanently stopping; real reply resets', async () => {
+test('unanswered backs off 10h/20h/24h and never stops; real reply resets', async () => {
   const { p, advance, tick, calls, inbound } = setup()
   advance(4 * HOUR)
   await tick()
   p.markProactiveSent('private:12345', {})
-  advance(12 * HOUR - 1)
+  advance(10 * HOUR - 1)
   await tick()
   assert.equal(calls.length, 1)
   advance(1)
@@ -106,7 +106,7 @@ test('unanswered backs off 12h then 24h, stays capped without permanently stoppi
   assert.equal(calls[1].unanswered, 1)
   p.markProactiveSent('private:12345', {})
   for (let i = 0; i < 3; i++) {
-    advance(24 * HOUR)
+    advance((i === 0 ? 20 : 24) * HOUR)
     await tick()
     assert.equal(calls.length, 3 + i)
     p.markProactiveSent('private:12345', {})
@@ -139,7 +139,7 @@ test('persisted metadata is detached, content-free, and restores backoff and nex
   const original = setup()
   original.advance(4 * HOUR)
   await original.tick()
-  original.p.noteOutbound('private:12345')
+  original.p.noteOutbound('private:12345', { wakeKind: 'private' })
   original.p.markProactiveSent('private:12345', {})
   const saved = original.p.privateStateSnapshot()
   assert.deepEqual(Object.keys(saved['private:12345']).sort(),
@@ -147,8 +147,8 @@ test('persisted metadata is detached, content-free, and restores backoff and nex
   saved['private:12345'].extraText = 'must not survive'
   const restored = setup({ privateState: saved })
   assert.equal(restored.p.stats().privateChats[0].unanswered, 1)
-  assert.equal(restored.p.nextOpportunityAt('private:12345'), 116 * HOUR)
-  restored.advance(16 * HOUR - 1)
+  assert.equal(restored.p.nextOpportunityAt('private:12345'), 114 * HOUR)
+  restored.advance(14 * HOUR - 1)
   await restored.tick()
   assert.equal(restored.calls.length, 0)
   restored.advance(1)
@@ -161,13 +161,13 @@ test('persisted metadata is detached, content-free, and restores backoff and nex
   assert.ok(original.snapshots.length > 0)
 })
 
-test('hourly gap and hot policy increases apply immediately without persisting unlisted friends', async () => {
-  const { p, advance, tick, calls, inbound } = setup({ reply: { hourlyMax: 0.1 } })
-  assert.equal(p.nextOpportunityAt('private:12345'), 110 * HOUR)
+test('hot interval changes resample once without persisting unlisted friends', async () => {
+  const { p, advance, tick, calls, inbound } = setup()
+  assert.equal(p.nextOpportunityAt('private:12345'), 104 * HOUR)
   inbound({ chatKey: 'private:99999', sender: { qq: 99999 } })
   p.noteOutbound('private:99999')
   assert.equal(p.privateStateSnapshot()['private:99999'], undefined)
-  p.apply({ reply: { enabled: true, quietHours: { enabled: false }, privateChats: [12345], privatePolicy: { coldSilenceMs: 6 * HOUR, minGapMs: 12 * HOUR } } })
+  p.apply({ reply: { enabled: true, quietHours: { enabled: false }, privateChats: [12345], interval: { minMs: 6 * HOUR, maxMs: 12 * HOUR } } })
   assert.equal(p.stats().privateChats[0].nextAt, 112 * HOUR)
   advance(10 * HOUR)
   await tick()
@@ -175,7 +175,7 @@ test('hourly gap and hot policy increases apply immediately without persisting u
   advance(2 * HOUR)
   await tick()
   assert.equal(calls.length, 1)
-  p.apply({ reply: { enabled: true, hourlyMax: 0, privateChats: [12345] } })
+  p.apply({ reply: { enabled: false, quietHours: { enabled: false }, privateChats: [12345] } })
   assert.equal(p.proactiveEnabled(), false)
   assert.ok(Number.isFinite(p.privateStateSnapshot()['private:12345'].nextAt))
   p.stop()
@@ -183,7 +183,7 @@ test('hourly gap and hot policy increases apply immediately without persisting u
 
 test('group cold-silence shares the same fire path and respects waiting slots', async () => {
   const { p, state, advance, tick, calls } = setup({ reply: { groups: [54321], privateChats: [],
-    hourlyMax: 3600, minGapMs: 1000, coldSilenceMs: 1000 } })
+    interval: { minMs: 1000, maxMs: 1000 }, topicWindowMs: 60000 } })
   state.get('group:54321').lastInboundAt = 100 * HOUR
   p.submit({ chatKey: 'group:54321', groupId: '54321', isGroup: true, text: 'queued', wake: { kind: 'at' } }, () => {})
   advance(1000)
@@ -191,7 +191,7 @@ test('group cold-silence shares the same fire path and respects waiting slots', 
   assert.equal(calls.length, 0)
   p.flush('group:54321')
   await tick() // lazy group opportunity initialized here
-  advance(1000)
+  advance(60000)
   await tick()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].isGroup, true)

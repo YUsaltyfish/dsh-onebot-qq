@@ -16,11 +16,11 @@ function setup(local = '2026-11-06T22:00:00', reply = {}) {
     if (!map.has(key)) map.set(key, { lastInboundAt: now - 24 * HOUR, lastSendAt: 0 })
     return map.get(key)
   } }
-  const p = createPacing({ state, log: quiet, clock: () => now,
+  const p = createPacing({ state, log: quiet, clock: () => now, random: () => 0,
     privateState: { 'private:12345': { baselineAt: now - 24 * HOUR, nextAt: now - HOUR } },
     onPrivateStateChange: (snapshot) => snapshots.push(snapshot) })
-  const config = { enabled: true, groups: [54321], privateChats: [12345], minGapMs: HOUR,
-    hourlyMax: 6, coldSilenceMs: 0, topicMinMsgs: 1, weights: { intercept: 100 }, ...reply }
+  const config = { enabled: true, groups: [54321], privateChats: [12345],
+    interval: { minMs: HOUR, maxMs: HOUR }, topicMinMsgs: 1, weights: { intercept: 100 }, ...reply }
   p.apply({ reply: config })
   p.start({ onProactiveTurn: (event) => calls.push(event) })
   p.stop()
@@ -66,27 +66,24 @@ test('night group/private cold opportunities defer beyond morning by their own g
   assert.equal(p.isQuietTime(), true)
   assert.equal(calls.length, 0)
   assert.equal(p.nextOpportunityAt('group:54321'), at('2026-11-07T09:00:00'))
-  assert.equal(p.nextOpportunityAt('private:12345'), at('2026-11-07T12:00:00'))
-  assert.equal(p.privateStateSnapshot()['private:12345'].nextAt, at('2026-11-07T12:00:00'))
+  assert.equal(p.nextOpportunityAt('private:12345'), at('2026-11-07T09:00:00'))
+  assert.equal(p.privateStateSnapshot()['private:12345'].nextAt, at('2026-11-07T09:00:00'))
   assert.equal(p.stats().quietHours.active, true)
   set('2026-11-07T08:00:00')
   await tick()
   assert.equal(calls.length, 0)
   set('2026-11-07T09:00:00')
   await tick()
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].isGroup, true)
-  set('2026-11-07T12:00:00')
-  await tick()
+  assert.equal(calls.length, 2)
   assert.equal(calls.filter((call) => !call.isGroup).length, 1)
 })
 
 test('overdue opportunity from a skipped night tick is not replayed at 08:00', async () => {
-  const { p, set, tick, calls, config } = setup('2026-11-06T22:00:00', { privatePolicy: { minGapMs: HOUR } })
+  const { p, set, tick, calls, config } = setup('2026-11-06T22:00:00')
   // A regular reply at 22:30 schedules a private opportunity at 23:30.
   set('2026-11-06T22:30:00')
-  p.noteOutbound('private:12345')
-  p.apply({ reply: { ...config, privatePolicy: { minGapMs: HOUR, coldSilenceMs: 0 } } })
+  p.noteOutbound('private:12345', { wakeKind: 'private' })
+  p.apply({ reply: config })
   set('2026-11-07T08:00:00')
   await tick()
   assert.equal(calls.filter((call) => !call.isGroup).length, 0)

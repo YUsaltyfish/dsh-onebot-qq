@@ -30,7 +30,7 @@ import path from 'node:path'
 import { resolveDataDir, resolveDataPath } from '../platform/paths.js'
 import { readJsonFile, writeJsonFileSync, backupFileSync, atomicWriteFileSync } from '../platform/atomic.js'
 
-import { REPLY_DEFAULTS } from './pacing.js'
+import { REPLY_DEFAULTS, MERGE_DEFAULTS } from './pacing.js'
 
 export const CONFIG_VERSION = 2
 
@@ -72,12 +72,11 @@ export function defaultConfig() {
       merge: {
         enabled: true,
         waitMs: 5000,   // 唤醒后等多久再入站；等待期内到达的消息并进同一轮
+        loadImages: MERGE_DEFAULTS.loadImages,
       },
       reply: {
         enabled: false,
-        hourlyMax: 6,
-        minGapMs: 480000,
-        coldSilenceMs: 180000,
+        interval: { ...REPLY_DEFAULTS.interval },
         silenceEnabled: true,     // 冷场找话（关掉 = 只在有群消息时接话）
         topicWindowMs: 600000,
         topicMinMsgs: 3,
@@ -85,7 +84,6 @@ export function defaultConfig() {
         maxChars: 140,
         groups: [],
         privateChats: [],
-        privatePolicy: { ...REPLY_DEFAULTS.privatePolicy },
         quietHours: { ...REPLY_DEFAULTS.quietHours },
         // 连续对话（只暴露 3 个可调项，其余是内部闸门；见 kernel/pacing.js 的同名默认值）
         continuation: {
@@ -276,12 +274,30 @@ export function migrateLegacyConfig(old = {}) {
   }
 
   cfg.pluginConfig = pluginConfig
+  migrateReplyInterval(cfg)
+  pruneObsoleteConfig(cfg)
   return cfg
 }
 
 /** 是否是老格式（含 bridge 段且没有 version 2 标记）。 */
 export function isLegacyShape(raw) {
   return isPlainObject(raw) && raw.version !== CONFIG_VERSION && isPlainObject(raw.bridge)
+}
+
+/** 配置文件与控制台共用的共享随机窗校验；入参使用毫秒。 */
+export function validateReplyInterval(interval = {}) {
+  const values = { ...REPLY_DEFAULTS.interval, ...interval }
+  const errors = []
+  for (const [key, value] of Object.entries(values)) {
+    if (!Object.hasOwn(REPLY_DEFAULTS.interval, key)) continue
+    if (!Number.isFinite(value) || value <= 0) errors.push(`pacing.reply.interval.${key} 必须是大于 0 的有限毫秒数`)
+  }
+  if (values.minMs > values.maxMs) errors.push('普通随机窗最小值不能大于最大值')
+  if (values.unansweredMinMs > values.unansweredMaxMs) errors.push('未回复随机窗最小值不能大于最大值')
+  if (values.maxBackoffMs < Math.max(values.maxMs, values.unansweredMaxMs)) {
+    errors.push('退避上限不能小于普通或未回复随机窗最大值；请先调大退避上限再增大随机窗')
+  }
+  return errors
 }
 
 /** 校验（返回错误数组；空数组 = 通过）。 */
@@ -299,6 +315,10 @@ export function validateConfig(cfg) {
     ['archive.dir', cfg?.archive?.dir],
   ]) {
     if (typeof value !== 'string' || !value.trim()) errors.push(`${label} 必须是字符串路径`)
+  }
+  if (cfg?.pacing?.reply?.interval !== undefined) {
+    if (!isPlainObject(cfg.pacing.reply.interval)) errors.push('pacing.reply.interval 必须是对象')
+    else errors.push(...validateReplyInterval(cfg.pacing.reply.interval))
   }
   const protocol = String(cfg?.credentials?.gptImage?.protocol || '').trim()
   if (protocol && !['openai-images', 'openai-chat'].includes(protocol)) {
@@ -353,6 +373,10 @@ export function applyCredentialEnv(cfg, env = process.env) {
  * ⚠️ **只删这里列出的键**：其它未知键一律保留（用户手写注释、新版本才有、未来扩展）。
  */
 const OBSOLETE_CONFIG_KEYS = [
+  ['pacing', 'reply', 'hourlyMax'],
+  ['pacing', 'reply', 'minGapMs'],
+  ['pacing', 'reply', 'coldSilenceMs'],
+  ['pacing', 'reply', 'privatePolicy'],
   ['pacing', 'merge', 'windowMs'],
   ['pacing', 'merge', 'windowActiveMs'],
   ['pacing', 'merge', 'activeGapMs'],
@@ -360,6 +384,17 @@ const OBSOLETE_CONFIG_KEYS = [
   ['pacing', 'merge', 'skipIfSlowMs'],
   ['pluginConfig', 'gate-wake', 'groupFollowUpMs'],
 ]
+
+/** 旧频率只有“0=关闭”保留语义；其它旧时间不再限制共享小时随机窗。 */
+function migrateReplyInterval(cfg) {
+  const reply = cfg?.pacing?.reply
+  if (!isPlainObject(reply)) return false
+  const legacy = ['hourlyMax', 'minGapMs', 'coldSilenceMs', 'privatePolicy'].some((key) => Object.hasOwn(reply, key))
+  if (Object.hasOwn(reply, 'hourlyMax') && Number(reply.hourlyMax) === 0) reply.enabled = false
+  if (!isPlainObject(reply.interval)) reply.interval = { ...REPLY_DEFAULTS.interval }
+  else reply.interval = { ...REPLY_DEFAULTS.interval, ...reply.interval }
+  return legacy
+}
 
 /** 按清单剔除废弃键；返回是否真的删掉了东西 */
 function pruneObsoleteConfig(cfg) {
@@ -417,7 +452,8 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
   const merged = migrated ? migrateLegacyConfig(raw) : deepMerge(defaultConfig(), raw)
   merged.version = CONFIG_VERSION
   // 废弃键清理：内存里先剔掉，能写就顺手写回（备份 bak-prune），下次启动文件也干净
-  const pruned = pruneObsoleteConfig(merged)
+  const intervalMigrated = migrateReplyInterval(merged)
+  const pruned = pruneObsoleteConfig(merged) || intervalMigrated
   // 迁移态 / 清理态落盘：否则控制台读的是旧结构、写回后又被迁移逻辑覆盖（用户会误以为"改了不生效"）
   if ((migrated || pruned) && createIfMissing) {
     try {
@@ -433,7 +469,10 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
 export function saveConfig(configPath, raw, { backup = true } = {}) {
   const file = path.resolve(String(configPath))
   const backupFile = backup ? backupFileSync(file, 'bak-console') : ''
-  atomicWriteFileSync(file, `${JSON.stringify(raw, null, 4)}\n`, { mode: 0o600 })
+  const next = structuredClone(raw)
+  migrateReplyInterval(next)
+  pruneObsoleteConfig(next)
+  atomicWriteFileSync(file, `${JSON.stringify(next, null, 4)}\n`, { mode: 0o600 })
   return { ok: true, file, backup: backupFile ? path.basename(backupFile) : '' }
 }
 

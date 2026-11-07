@@ -30,17 +30,25 @@
     "pacing": {
         "merge": {
             "enabled": true,
-            "windowMs": 2000,
-            "maxWaitMs": 6000,
-            "skipIfSlowMs": 30000,
-            "windowActiveMs": 4000,
-            "activeGapMs": 15000
+            "waitMs": 5000
         },
         "reply": {
             "enabled": false,
-            "hourlyMax": 6,
-            "minGapMs": 480000,
-            "coldSilenceMs": 180000,
+            "silenceEnabled": true,
+            "interval": {
+                "minMs": 3600000,
+                "maxMs": 14400000,
+                "unansweredMinMs": 14400000,
+                "unansweredMaxMs": 36000000,
+                "maxBackoffMs": 86400000
+            },
+            "quietHours": {
+                "enabled": true,
+                "start": "23:00",
+                "end": "08:00",
+                "timeZone": "Asia/Shanghai"
+            },
+            "privateChats": [],
             "topicWindowMs": 600000,
             "topicMinMsgs": 3,
             "sensitivity": 0.45,

@@ -103,7 +103,7 @@ test('关闭合批：唤醒立即入站', () => {
   pacing.stop()
 })
 
-test('并入的消息里图片只留 [图片] 占位（不下载）', () => {
+test('默认收集合批原始图片但不下载，正文保留 [图片] 占位', () => {
   const pacing = pacingWith({ enabled: true, waitMs: 5000 })
   let merged
   pacing.submit(ev({ messageId: 1, text: '看图' }), (v) => { merged = v })
@@ -112,7 +112,72 @@ test('并入的消息里图片只留 [图片] 占位（不下载）', () => {
   pacing.flush('private:213445357')
   assert.match(merged.text, /\[图片\]$/m)
   assert.match(merged.text, /这张 \[图片\]/)
-  assert.equal(merged.imageParts?.length ?? 0, 0, '后随消息的图不进模型')
+  assert.equal(merged.imageParts?.length ?? 0, 0, 'pacing不下载图片，留给内核统一载入')
+  assert.equal(pacing.config.merge.loadImages, true)
+  assert.deepEqual(merged.images, [{ file: 'x.jpg' }, { file: 'y.jpg' }])
+  assert.deepEqual(merged._scratch.mergedImageEvents.map((item) => item.messageId), [1, 2, 3])
+  assert.doesNotThrow(() => JSON.stringify(merged), '图片快照不回指base形成循环')
+  pacing.stop()
+})
+
+test('开启读图按事件顺序快照来源并复用预载图片，仅同路径去重', () => {
+  const pacing = pacingWith({ enabled: true, waitMs: 5000, loadImages: true })
+  let merged
+  const first = { type: 'image', data: 'first' }
+  const second = { type: 'image', data: 'second' }
+  const third = { type: 'image', data: 'third' }
+  const head = ev({ messageId: 11, images: [{ file: 'same-placeholder' }], imageParts: [first], imagePaths: ['/loaded/first.png'] })
+  pacing.submit(head, (value) => { merged = value })
+  pacing.submit(ev({ messageId: 12, sender: { qq: 40002, name: '旁人', isMaster: false },
+    images: [{ file: 'same-placeholder' }], imageParts: [second, first, third],
+    imagePaths: ['/loaded/second.png', '/loaded/first.png'] }), (value) => { merged = value })
+  pacing.flush(head.chatKey)
+  assert.deepEqual(merged.images, [{ file: 'same-placeholder' }, { file: 'same-placeholder' }], 'raw描述相同也不猜测是同一图')
+  assert.deepEqual(merged.imageParts, [first, second, third])
+  assert.deepEqual(merged.imagePaths, ['/loaded/first.png', '/loaded/second.png', null])
+  const snapshots = merged._scratch.mergedImageEvents
+  assert.deepEqual(snapshots.map((item) => [item.sender.qq, item.messageId]), [[213445357, 11], [40002, 12]])
+  assert.equal(snapshots[0].images.length, 1, '首条快照不受扁平聚合影响')
+  assert.deepEqual(snapshots[1].imageParts, [second, first, third])
+  assert.equal(merged._scratch.mergedIsMaster, false, '合并成员身份规则保持不变')
+  assert.doesNotThrow(() => JSON.stringify(merged))
+  pacing.stop()
+})
+
+test('关闭读图仅首条图片，tail原始与已下载图片均不带入', () => {
+  const pacing = pacingWith({ enabled: true, waitMs: 5000, loadImages: false })
+  let merged
+  const first = { type: 'image', data: 'head' }
+  pacing.submit(ev({ messageId: 21, images: [{ file: 'head.jpg' }], imageParts: [first], imagePaths: ['/loaded/head.jpg'] }),
+    (value) => { merged = value })
+  pacing.collect(ev({ messageId: 22, wake: null, text: '后图', images: [{ file: 'tail.jpg' }],
+    imageParts: [{ type: 'image', data: 'tail' }], imagePaths: ['/loaded/tail.jpg'] }))
+  pacing.flush('private:213445357')
+  assert.deepEqual(merged.images, [{ file: 'head.jpg' }])
+  assert.deepEqual(merged.imageParts, [first])
+  assert.deepEqual(merged.imagePaths, ['/loaded/head.jpg'])
+  assert.deepEqual(merged._scratch.mergedImageEvents.map((item) => item.messageId), [21])
+  assert.match(merged.text, /后图 \[图片\]/)
+  pacing.stop()
+})
+
+test('群普通图片只并入已有唤醒槽，无槽不独立成轮或触发下载', () => {
+  const pacing = pacingWith({ enabled: true, waitMs: 5000, loadImages: true })
+  let runs = 0
+  let merged
+  const group = { chatKey: `group:${GROUP_ID}`, isGroup: true, groupId: GROUP_ID }
+  const picture = ev({ ...group, wake: null, messageId: 32, images: [{ file: 'group.jpg' }] })
+  assert.equal(pacing.collect(picture), false)
+  assert.equal(runs, 0)
+  pacing.submit(ev({ ...group, wake: { kind: 'at' }, messageId: 31 }), (value) => { runs += 1; merged = value })
+  assert.equal(pacing.collect(picture), true)
+  assert.equal(runs, 0)
+  pacing.flush(group.chatKey)
+  assert.equal(runs, 1)
+  assert.deepEqual(merged.images, [{ file: 'group.jpg' }])
+  assert.deepEqual(merged._scratch.mergedImageEvents.map((item) => item.messageId), [31, 32])
+  assert.equal(pacing.collect(ev({ ...picture, messageId: 33 })), false)
+  assert.equal(runs, 1)
   pacing.stop()
 })
 

@@ -27,6 +27,8 @@
 /** 秘密值的占位符：读 schema 时回显它而不是真值；把它原样写回来 = 不修改。 */
 export const SECRET_MASK = '••••••••'
 
+import { validateReplyInterval } from '../kernel/config-store.js'
+
 const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
 
 /** 点路径读取（`a.b.c` 或数组）。 */
@@ -155,13 +157,18 @@ export const CORE_CONTROLS = [
   },
   {
     key: 'pacing.merge.waitMs', group: '消息设置', type: 'int', label: '合并等待时间', unit: '秒', scale: 1000,
-    min: 0, max: 10, step: 1, default: 5000,
-    hint: '被叫后等几秒再进模型（按秒填）。私聊：安静这么久才答，期间的新消息并进来；'
+    min: 0, max: 120, step: 1, default: 5000,
+    hint: '被叫后等几秒再进模型（0–120 秒）。私聊：安静这么久才答，期间的新消息并进来；'
       + '群聊：唤醒消息等这么久，期间非唤醒消息并入当前轮。机器人正在回答时新唤醒直接排队、不等待。',
   },
 
+  {
+    key: 'pacing.merge.loadImages', group: '消息设置', type: 'bool', label: '识别合批内图片', default: true,
+    hint: '开启：按本轮各消息及各自图片的顺序加载图片，包含群里并入本轮的非唤醒消息；关闭：只加载首条消息的图片，后续图片保留占位。增加图片会增加视觉输入成本；单图失败不影响其余图片，引用图仍按各事件原有处理。不改变唤醒、等待或排队规则。',
+  },
+
   // ── 主动接话：没人叫也偶尔接一句（高级项默认折叠）─────────────
-  // 频率口径只有一种：实际间隔 = max(最小间隔, 60 分钟 ÷ 每小时次数)。
+  // 群聊、私聊共用小时级随机窗；连续对话保留独立限制。
   {
     key: 'pacing.reply.enabled', group: '主动接话', type: 'bool', label: '允许主动接话（没人叫也偶尔接一句）', default: false,
     hint: '群聊和私聊共用总开关，关掉后只在被叫时回话。群聊还要在「群聊」页勾「允许主动接话」；私聊只对下面明确填写的 QQ 生效，名单默认空。',
@@ -188,44 +195,34 @@ export const CORE_CONTROLS = [
     hint: '输入一个 QQ 后点＋或按回车添加，点标签×移除；名单为空就不主动发私聊，不会自动加入主人或所有好友。加删后保存，已有名单保持不变。',
   },
   {
-    key: 'pacing.reply.privatePolicy.coldSilenceMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '私聊安静多久再找话', unit: '小时',
-    scale: 3600000, min: 1, max: 168, step: 1, default: 14400000,
-    hint: '私聊安静这么久后才考虑主动找话，默认 4 小时；仍受总开关、私聊名单和最小间隔限制。',
+    key: 'pacing.reply.interval.minMs', group: '主动接话', type: 'float', label: '正常间隔最短', unit: '小时',
+    scale: 3600000, min: 0.5, max: 720, step: 0.5, default: 3600000,
+    hint: '群聊、私聊共用随机窗：默认在 1–4 小时之间抽下一次机会。最短不能大于最长；要提高最短，请先提高最长。改参数重新抽一次，刷新页面不抽。',
   },
   {
-    key: 'pacing.reply.privatePolicy.minGapMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '两次私聊找话至少间隔', unit: '小时',
-    scale: 3600000, min: 1, max: 168, step: 1, default: 14400000,
-    hint: '每个私聊的主动机会之间至少隔这么久，默认 4 小时；还共用「每小时最多主动接话」带来的 60÷次数 间隔下限，该次数设为 0 时群聊、私聊都关闭。',
+    key: 'pacing.reply.interval.maxMs', group: '主动接话', type: 'float', label: '正常间隔最长', unit: '小时',
+    scale: 3600000, min: 0.5, max: 720, step: 0.5, default: 14400000,
+    hint: '群聊、私聊使用同一个正常随机窗，默认最长 4 小时。最长不能小于最短；机会到期仍由语境与门禁决定是否发送。',
   },
   {
-    key: 'pacing.reply.privatePolicy.unansweredGapMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '对方没回时至少等多久', unit: '小时',
-    scale: 3600000, min: 1, max: 168, step: 1, default: 43200000,
-    hint: '主动发出后对方一直没回，下次至少等这么久（默认 12 小时）；连续没回复会继续拉长间隔，避免催促。',
+    key: 'pacing.reply.interval.unansweredMinMs', group: '主动接话', type: 'float', label: '未回复间隔最短', unit: '小时',
+    scale: 3600000, min: 0.5, max: 720, step: 0.5, default: 14400000,
+    hint: '主动发出后没有真人回复，改用未回复随机窗，默认 4–10 小时；最短不能大于最长，要提高最短请先提高最长。',
   },
   {
-    key: 'pacing.reply.privatePolicy.maxBackoffMs', group: '主动接话', section: '私聊间隔', type: 'float', label: '没回复时最长退避间隔', unit: '小时',
-    scale: 3600000, min: 1, max: 720, step: 1, default: 86400000,
-    hint: '连续没回复时逐步放慢主动找话，退避间隔最多拉长到本值（默认 24 小时）；对方重新说话后恢复普通节奏。',
+    key: 'pacing.reply.interval.unansweredMaxMs', group: '主动接话', type: 'float', label: '未回复间隔最长', unit: '小时',
+    scale: 3600000, min: 0.5, max: 720, step: 0.5, default: 36000000,
+    hint: '未回复时随机等待的上界，默认 10 小时；持续未回复继续退避至下面的上限，真人回话后恢复正常窗。',
   },
   {
-    key: 'pacing.reply.hourlyMax', group: '主动接话', type: 'int', label: '每小时最多主动接话', unit: '次',
-    min: 0, max: 10, step: 1, default: 6,
-    hint: '硬上限（不是每条消息的概率）。群聊、私聊共用 60÷次数 的间隔下限，私聊还受小时级间隔限制；0 = 群聊、私聊主动接话都关闭。',
-  },
-  {
-    key: 'pacing.reply.minGapMs', group: '主动接话', type: 'int', label: '两次机会至少间隔', unit: '分钟',
-    scale: 60000, min: 1, max: 120, step: 1, default: 480000,
-    hint: '两次“可以考虑开口”之间至少隔这么久；实际间隔 = max(本值, 60÷每小时次数)。',
+    key: 'pacing.reply.interval.maxBackoffMs', group: '主动接话', type: 'float', label: '持续未回复退避上限', unit: '小时',
+    scale: 3600000, min: 0.5, max: 720, step: 0.5, default: 86400000,
+    hint: '群聊、私聊持续未回复时逐步拉长等待，最多 24 小时（默认）；不是永久停聊，也不是固定签到。',
   },
   {
     key: 'pacing.reply.silenceEnabled', group: '主动接话', type: 'bool', label: '群聊、私聊冷场时也主动找话', default: true,
-    hint: '群聊、私聊共用冷场开关，各自按冷场时间判定。开 = 长时间没人说话也可主动找话；'
+    hint: '群聊、私聊共用冷场开关和随机间隔。开 = 到机会时即使没人说话也可主动找话；'
       + '关 = 私聊主动找话暂停，群聊不再定时找话，但群里出现新消息、且语境合适时仍可能接一句。',
-  },
-  {
-    key: 'pacing.reply.coldSilenceMs', group: '主动接话', type: 'int', label: '群里安静多久算冷场', unit: '分钟',
-    scale: 60000, min: 1, max: 120, step: 1, default: 180000,
-    hint: '群里没人说话超过这么久、又到了机会点 → 可能主动起个话头。',
   },
   {
     key: 'pacing.reply.sensitivity', group: '主动接话', type: 'int', label: '语境敏感度（越高越挑时机）', unit: '%',
@@ -690,6 +687,11 @@ export function writeValue(kernel, key, value, rawConfig = {}) {
   }
   const panel = coercePanel(entry, value)
   const stored = storedOf(entry, panel)
+  if (key.startsWith('pacing.reply.interval.')) {
+    const interval = { ...(getPath(rawConfig, 'pacing.reply.interval') || {}), [entry.configPath.at(-1)]: stored }
+    const errors = validateReplyInterval(interval)
+    if (errors.length) throw new Error(errors.join('；') + '；提高最短请先提高最长，降低最长请先降低最短')
+  }
   if (isPlainObject(rawConfig)) setPath(rawConfig, entry.configPath, stored)
   return { key, value: panel, stored, configPath: entry.configPath }
 }

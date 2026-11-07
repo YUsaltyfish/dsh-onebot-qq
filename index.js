@@ -33,6 +33,7 @@ import {
 import { OneBotAdapter } from './kernel/onebot-adapter.js'
 import { ChatState, Pipeline, createDeliver, turnStore } from './kernel/state-pipeline.js'
 import { createPacing } from './kernel/pacing.js'
+import { readLocalBytes, fetchBytes } from './kernel/media-bytes.js'
 import { createDshDriver } from './kernel/dsh-driver.js'
 import { createMaintenance } from './ops/maintenance.js'
 import { startCompatServer } from './kernel/compat-server.js'
@@ -390,16 +391,32 @@ export async function apply(ctx, bundleConfig = {}) {
   const state = new ChatState({ log })
   const pipeline = new Pipeline({ log })
   // pacing.apply() 可立即播种并保存基线；闭包不能引用稍后才初始化的 kernel/dsh。
-  const privateStateFile = path.join(dataDir, 'state', 'private-proactive.json')
-  let privateState = {}
-  try { privateState = readJsonFile(privateStateFile) } catch (e) {
-    if (e?.code !== 'ENOENT') log.warn(`私聊主动计时读取失败（按首次运行处理）: ${e.message}`)
+  const timingStateFile = path.join(dataDir, 'state', 'proactive.json')
+  let timingState = {}
+  let migrateTiming = false
+  try { timingState = readJsonFile(timingStateFile) } catch (e) {
+    if (e?.code === 'ENOENT') {
+      // 只迁本实例旧计时文件，不读会话映射或聊天历史；新文件坏了也不能回退覆盖。
+      try {
+        const legacyTiming = readJsonFile(path.join(dataDir, 'state', 'private-proactive.json'))
+        timingState = Object.fromEntries(Object.entries(legacyTiming || {})
+          .filter(([key, value]) => /^private:\d+$/.test(key) && value && typeof value === 'object')
+          .map(([key, value]) => [key, { ...value, nextAt: 0 }]))
+        migrateTiming = true
+      } catch (oldError) {
+        if (oldError?.code !== 'ENOENT') log.warn(`旧主动计时读取失败: ${oldError.message}`)
+      }
+    } else log.warn(`主动计时读取失败（按首次运行处理）: ${e.message}`)
   }
   const pacing = createPacing({
-    log: logFor('pacing'), state, privateState,
-    onPrivateStateChange: (snapshot) => writeJsonFileSync(privateStateFile, snapshot, { mode: 0o600 }),
+    log: logFor('pacing'), state, timingState,
+    onTimingStateChange: (snapshot) => writeJsonFileSync(timingStateFile, snapshot, { mode: 0o600 }),
   })
   pacing.apply(runtime.pacing)
+  if (migrateTiming) {
+    try { writeJsonFileSync(timingStateFile, pacing.timingStateSnapshot(), { mode: 0o600 }) }
+    catch (e) { log.warn(`迁移主动计时保存失败: ${e.message}`) }
+  }
   const archiveCfg = { ...runtime.archive }
   const archive = makeArchiver(archiveCfg, log)
   const greetedSessions = new Set() // sessionId 集合：首轮带 [QQ会话 chatKey｜...]，后续轮只带 [本条消息ID ...]
@@ -499,7 +516,7 @@ export async function apply(ctx, bundleConfig = {}) {
     outboundHooks,
     onAfterSend: (rec) => {
       state.markSent(rec.target)
-      pacing.noteOutbound(rec.target)
+      pacing.noteOutbound(rec.target, rec.turnCtx)
       // 主动接话的统计只认"这一轮真的发了"（普通回话不参合）
       if (rec.turnCtx?.wakeKind === 'proactive') pacing.markProactiveSent(rec.target, rec.turnCtx)
       // 连续对话：普通回话真的发出去了，才从这一刻开始算"隔多久再检查"
@@ -892,43 +909,70 @@ export async function apply(ctx, bundleConfig = {}) {
       if (parts.length) ev.hint.push(`[合并转发内容（原文，按条分隔）]\n${parts.join('\n---\n')}`)
     }
 
-    // 3. 入站图片（含被引图）三级溯源下载 → sharp 缩图(≤8000px) → 填 ev.imageParts & ev.imagePaths
-    if (Array.isArray(ev.images) && ev.images.length && !ev.imageParts.length) {
-      for (const im of ev.images) {
+    // 图片描述（含被引图）已齐；实际读图延后到合批完成后的 runTurn，避免下载未成轮/被排除的尾图。
+  }, { order: 50, pluginId: 'kernel:context' })
+
+  /** 合批完成后唯一读图入口：每个消息快照独立处理，已加载消息不会挡住未加载尾图。 */
+  async function loadEventImages(ev) {
+    const sources = Array.isArray(ev._scratch?.mergedImageEvents) ? ev._scratch.mergedImageEvents : [ev]
+    const parts = []
+    const paths = []
+    const seenPaths = new Set()
+    const attribution = []
+    const append = (part, imagePath, source) => {
+      if (!part?.data || !part?.mediaType) return
+      const local = imagePath ? path.resolve(String(imagePath)) : ''
+      if (local && seenPaths.has(local)) return
+      if (local) seenPaths.add(local)
+      parts.push(part)
+      paths.push(imagePath ? String(imagePath) : null)
+      const sender = source.sender || {}
+      attribution.push(`图片${parts.length} 对应消息发送者 ${senderNameOf(sender, sender.qq) || '未知发送者'}(QQ:${sender.qq ?? '?'})，消息ID:${source.messageId ?? '-'}（含引用图时不代表原作者）`)
+    }
+    // 有界读图共用 media-bytes：单张最多20MiB，网络15秒；失败只跳过该图。
+    const limits = { maxBytes: 20 * 1024 * 1024, timeoutMs: 15000 }
+    for (const source of sources) {
+      if (disposed) return
+      if (Array.isArray(source.imageParts) && source.imageParts.length) {
+        source.imageParts.forEach((part, i) => append(part, source.imagePaths?.[i], source))
+        continue
+      }
+      for (const im of Array.isArray(source.images) ? source.images : []) {
+        if (disposed) return
         const file = String(im?.file || '')
         const url = String(im?.url || '')
         if (!file && !url) continue
         try {
           let buf = null
           if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
-            buf = fs.readFileSync(file)
+            buf = await readLocalBytes(file, limits)
           } else if (file && typeof onebot.getFile === 'function') {
-            const info = await onebot.getFile(file)
-            if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) {
-              buf = fs.readFileSync(info.file)
-            } else if (info?.url && /^https?:\/\//.test(info.url)) {
-              const r = await fetch(info.url, { signal: AbortSignal.timeout(15000) })
-              if (r.ok) buf = Buffer.from(await r.arrayBuffer())
-            }
+            try {
+              const info = await onebot.getFile(file)
+              if (disposed) return
+              if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) {
+                buf = await readLocalBytes(info.file, limits)
+              } else if (info?.url && /^https?:\/\//.test(info.url)) buf = await fetchBytes(info.url, limits)
+            } catch (e) { log.debug(`图片协议溯源失败，尝试原始URL: ${e.message}`) }
           }
-          if (!buf && /^https?:\/\//.test(url)) {
-            const r = await fetch(url, { signal: AbortSignal.timeout(15000) })
-            if (r.ok) buf = Buffer.from(await r.arrayBuffer())
-          }
-          if (!buf || !buf.length) continue
+          if (!buf && /^https?:\/\//.test(url)) buf = await fetchBytes(url, limits)
+          if (disposed) return
+          if (!buf?.length) continue
           buf = await shrinkImageForModel(buf)
+          if (disposed) return
           const mediaType = detectImageMediaType(buf)
-          ev.imageParts.push({ mediaType, data: buf.toString('base64'), name: 'qq-image' })
           const ext = mediaType === 'image/png' ? 'png' : mediaType === 'image/gif' ? 'gif' : mediaType === 'image/webp' ? 'webp' : 'jpg'
           const tmpPath = tmp.file('incoming', `.${ext}`)
           fs.writeFileSync(tmpPath, buf)
-          ev.imagePaths.push(tmpPath)
-        } catch (e) {
-          log.warn(`入站图片处理失败: ${e.message}`)
-        }
+          append({ mediaType, data: buf.toString('base64'), name: 'qq-image' }, tmpPath, source)
+        } catch (e) { log.warn(`入站图片处理失败: ${e.message}`) }
       }
     }
-  }, { order: 50, pluginId: 'kernel:context' })
+    if (disposed) return
+    ev.imageParts = parts
+    ev.imagePaths = paths
+    if (sources.length > 1 && attribution.length) ev.hint.push(`[合批图片对应：${attribution.join('；')}]`)
+  }
 
   // ── 原生工具注册：必须 inject 后再注册（受限 ctx 的坑，见文件头纪律 3） ──
   // 后台任务（群记忆积累）允许调用的工具白名单：只有「提交结果」型的 memory_append。
@@ -1092,6 +1136,8 @@ export async function apply(ctx, bundleConfig = {}) {
 
     let sessionId = ''
     try {
+      await loadEventImages(ev)
+      if (disposed) return
       sessionId = await dsh.ensureSession(ev.chatKey, ev.sender?.name || '')
       const makePrompt = (sid) => buildPromptText(ev, {
         greeted: greetedSessions.has(sid),

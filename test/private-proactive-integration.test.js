@@ -15,7 +15,7 @@ async function fixture(t, { qq = ADMIN_QQ, gate = {}, saved = true } = {}) {
   const fake = createFakeOneBot()
   await fake.start()
   const dataDir = tmpDir('private-proactive')
-  const stateFile = path.join(dataDir, 'state', 'private-proactive.json')
+  const stateFile = path.join(dataDir, 'state', 'proactive.json')
   const key = `private:${qq}`
   if (saved) writeJsonFileSync(stateFile, { [key]: { baselineAt: 1, lastInboundAt: 0, lastOutboundAt: 0, unanswered: 2, nextAt: 1 } })
   fs.mkdirSync(path.join(dataDir, 'qq-memory', 'private'), { recursive: true })
@@ -26,8 +26,8 @@ async function fixture(t, { qq = ADMIN_QQ, gate = {}, saved = true } = {}) {
   writeInstanceConfig(dataDir, {
     onebot: fake.url,
     pacing: { merge: { enabled: false }, reply: {
-      enabled: true, hourlyMax: 3600, minGapMs: 1, privateChats: [qq], quietHours: { enabled: false },
-      privatePolicy: { coldSilenceMs: 1, minGapMs: 1, unansweredGapMs: 1, maxBackoffMs: 1 },
+      enabled: true, privateChats: [qq], quietHours: { enabled: false },
+      interval: { minMs: 1000, maxMs: 1000, unansweredMinMs: 1000, unansweredMaxMs: 1000, maxBackoffMs: 1000 },
       style: { splitEnabled: false, stickerProbability: 1 },
     } },
     pluginConfig: { 'gate-wake': gate, 'group-memory': { accumulateEnabled: false }, stickers: { offerCooldownMs: 0 } },
@@ -207,7 +207,7 @@ test('私聊计时重启恢复，不重置unanswered或已保留的未来机会'
   await apply(ctx, { dataDir: h.dataDir, autoConnect: false })
   t.after(() => { for (const fn of ctx._effects) fn() })
   const kernel = ctx.get('qqBot').kernel
-  assert.deepEqual(kernel.pacing.privateStateSnapshot()[h.key], before)
+  assert.deepEqual(kernel.pacing.timingStateSnapshot()[h.key], before)
   kernel.pacing.tickNow()
   await settle(); await settle()
   assert.equal(ctx._prompts.length, 0)
@@ -282,7 +282,7 @@ test('群主动/续聊候选跨入免打扰：异步历史完成后不再提交'
   let quiet = false
   h.kernel.pacing.isQuietTime = () => quiet
   const cfg = h.kernel.pacing.config
-  h.kernel.pacing.apply({ ...cfg, reply: { ...cfg.reply, groups: [20001], privateChats: [], quietHours: { enabled: false }, coldSilenceMs: 1 } })
+  h.kernel.pacing.apply({ ...cfg, reply: { ...cfg.reply, groups: [20001], privateChats: [], quietHours: { enabled: false } } })
   h.kernel.pacing.stop()
   // 用真实机会时间配合Date.now推进，不修改调度实现。
   let resume
@@ -348,6 +348,74 @@ test('最终beforeSend在异步装饰后和forward失败各分段前复查，媒
   deliver.onDecorate(async () => { await settle(); quiet = true })
   await assert.rejects(deliver('group:20001', '普通短句'), /quiet guard/)
   assert.equal(sends, 1)
+})
+
+test('统一计时重启恢复群/私聊，不从session映射或群历史重排既有机会', async (t) => {
+  const h = await fixture(t)
+  for (const fn of h.ctx._effects) fn()
+  const baselineAt = Date.now() - 3600000
+  const expected = {
+    [h.key]: { baselineAt, lastInboundAt: 0, lastOutboundAt: 0, unanswered: 2, nextAt: Date.now() + 20000 },
+    'group:20001': { baselineAt, lastInboundAt: 0, lastOutboundAt: 0, unanswered: 3, nextAt: Date.now() + 30000 },
+  }
+  writeJsonFileSync(h.stateFile, expected)
+  const config = readJsonFile(path.join(h.dataDir, 'config.json'))
+  config.pacing.reply.groups = [20001]
+  writeJsonFileSync(path.join(h.dataDir, 'config.json'), config)
+  const ctx = createMockCtx({ workspacePath: path.join(h.dataDir, 'workspace') })
+  await apply(ctx, { dataDir: h.dataDir, autoConnect: false })
+  t.after(() => { for (const fn of ctx._effects) fn() })
+  const kernel = ctx.get('qqBot').kernel
+  assert.deepEqual(kernel.pacing.timingStateSnapshot(), expected)
+  kernel.onebot.groupHistory = async () => [{ time: Math.floor(Date.now() / 1000) }]
+  await kernel.seedProactiveBaseline()
+  assert.deepEqual(kernel.pacing.timingStateSnapshot(), expected)
+  assert.deepEqual(readJsonFile(h.stateFile), expected)
+})
+
+test('旧私聊计时仅新文件不存在时迁移并重抽统一窗；保留未回次数不触碰旧文件', async (t) => {
+  const h = await fixture(t, { saved: false })
+  for (const fn of h.ctx._effects) fn()
+  const oldFile = path.join(h.dataDir, 'state', 'private-proactive.json')
+  const old = { [h.key]: { baselineAt: 1, lastInboundAt: 0, lastOutboundAt: 0, unanswered: 4, nextAt: 1 } }
+  writeJsonFileSync(oldFile, old)
+  // 固定且已核对的测试fixture文件，不删除任何用户数据。
+  assert.equal(path.resolve(h.stateFile), path.join(h.dataDir, 'state', 'proactive.json'))
+  fs.unlinkSync(h.stateFile)
+  async function restart() {
+    const ctx = createMockCtx({ workspacePath: path.join(h.dataDir, 'workspace') })
+    await apply(ctx, { dataDir: h.dataDir, autoConnect: false })
+    t.after(() => { for (const fn of ctx._effects) fn() })
+    return ctx.get('qqBot').kernel
+  }
+  const kernel = await restart()
+  const saved = kernel.pacing.timingStateSnapshot()[h.key]
+  assert.equal(saved.unanswered, 4)
+  assert.ok(saved.nextAt > Date.now())
+  assert.deepEqual(readJsonFile(h.stateFile)[h.key], saved)
+  assert.deepEqual(readJsonFile(oldFile), old)
+  writeJsonFileSync(oldFile, { [h.key]: { ...old[h.key], unanswered: 99 } })
+  const second = await restart()
+  assert.deepEqual(second.pacing.timingStateSnapshot()[h.key], saved, '新文件优先，不重新抽取或再次加载旧文件')
+})
+
+test('普通轮多条回复与媒体携同一turnCtx，只重排一次共享机会且不增加未回次数', async (t) => {
+  const h = await fixture(t)
+  const calls = []
+  const noteOutbound = h.kernel.pacing.noteOutbound
+  h.kernel.pacing.noteOutbound = (target, turnCtx) => { calls.push(turnCtx); return noteOutbound(target, turnCtx) }
+  h.fake.pushEvent(h.fake.privateMessage({ text: '聊聊今天的事情' }))
+  await waitFor(() => h.ctx._prompts.length)
+  const { exec, turn } = started(h)
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  await send.execute({ target: h.key, text: '先说第一句' }, exec)
+  const nextAt = readJsonFile(h.stateFile)[h.key].nextAt
+  await send.execute({ target: h.key, text: '再补第二句' }, exec)
+  await turnStore.run(turn, () => h.kernel.sendMedia(h.key, '[CQ:image,file=fake.png]'))
+  assert.equal(readJsonFile(h.stateFile)[h.key].nextAt, nextAt)
+  assert.equal(readJsonFile(h.stateFile)[h.key].unanswered, 0)
+  assert.equal(calls.length, 3)
+  assert.ok(calls.every((ctx) => ctx === turn))
 })
 
 test('Pipeline系统门禁检查不执行任何其他入站阶段', async () => {
