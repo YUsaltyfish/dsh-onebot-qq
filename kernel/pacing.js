@@ -780,6 +780,10 @@ export function createPacing({ log = console, state, clock = null, random = Math
     if (evs.length > 1) {
       // 正文 = 唤醒消息 + 后续各条 `[昵称(QQ:号)]: 内容`（正文留图占位，附件另收）
       const lines = evs.slice(1).map(mergedLine).filter(Boolean)
+      base._scratch.turnExtras = {
+        ...(base._scratch.turnExtras || {}),
+        interactionMessageIds: [...new Set(evs.map((e) => e.messageId).filter((id) => id != null))],
+      }
       base.text = [String(base.text || '').trim(), ...lines].filter(Boolean).join('\n')
       const hints = []
       for (const e of evs) for (const h of (e.hint || [])) if (!hints.includes(h)) hints.push(h)

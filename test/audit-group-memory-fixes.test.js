@@ -24,7 +24,7 @@ function makeBot({ dataDir, archiveDir, cfg = {}, runner }) {
   const tools = new Map()
   const bot = {
     id: 'group-memory',
-    cfg: { dir: path.join(dataDir, 'qq-memory'), enabled: true, ...cfg },
+    cfg: { dir: path.join(dataDir, 'qq-memory'), enabled: true, accumulateSchedule: 'interval', ...cfg },
     log: quiet,
     core: { dataDir, archive: { dir: archiveDir } },
     state: { get: () => undefined },

@@ -272,21 +272,25 @@ test('WAKE-POKE 被戳：回戳；戳别人不理会', async (t) => {
   assert.equal(pokes.length, 1, '戳别人不回戳')
 })
 
-test('WAKE-RECALL 引用 + 「撤回」：单条撤回成功即回执，且同一条只试一次', async (t) => {
+test('WAKE-RECALL 引用本机消息 + 「撤回」：单条撤回成功即回执，且同一条只试一次', async (t) => {
   const h = await boot(t)
   const recalled = []
   h.kernel.onebot.recall = async (id) => {
     recalled.push(Number(id))
     return { ok: true }
   }
-  const recallEvent = (id) => ({
+  // 被引消息必须是本机自己发的：selfId 由 stubNapcat 设成 999999
+  h.kernel.onebot.msgById = async (id) => ({
+    message_id: Number(id), sender: { user_id: h.kernel.onebot.selfId, nickname: '测试机器人' }, message: '我上一条',
+  })
+  const recallEvent = (id, text = '撤回这条') => ({
     post_type: 'message',
     message_type: 'group',
     group_id: GROUP_ID,
     user_id: MEMBER_QQ,
     message_id: id,
     sender: { user_id: MEMBER_QQ, nickname: '群友' },
-    message: [{ type: 'reply', data: { id: '777' } }, { type: 'text', data: { text: '撤回这条' } }],
+    message: [{ type: 'reply', data: { id: '777' } }, { type: 'text', data: { text } }],
   })
   await emitRaw(h.kernel, recallEvent(20))
   await waitFor(() => recalled.length === 1, { label: '撤回一次' })
@@ -295,6 +299,42 @@ test('WAKE-RECALL 引用 + 「撤回」：单条撤回成功即回执，且同�
   await emitRaw(h.kernel, recallEvent(21))
   await sleep(40)
   assert.deepEqual(recalled, [777], '同一条只试一次（批量重试会刷爆群）')
+})
+
+test('WAKE-RECALL 只撤本机自己的话，且只认「撤回」：引用别人的 / 说「撤销工具」都不动', async (t) => {
+  const h = await boot(t)
+  const recalled = []
+  h.kernel.onebot.recall = async (id) => {
+    recalled.push(Number(id))
+    return { ok: true }
+  }
+  const reply = (id, text) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: GROUP_ID,
+    user_id: MEMBER_QQ,
+    message_id: id,
+    sender: { user_id: MEMBER_QQ, nickname: '群友' },
+    message: [{ type: 'reply', data: { id: '888' } }, { type: 'text', data: { text } }],
+  })
+
+  // ① 引用的不是本机消息（2026-11-09 线上事故原样复现：技术描述里带「撤销」也不算）
+  h.kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: OTHER_QQ, nickname: '别人' }, message: '别人上一条' })
+  await emitRaw(h.kernel, reply(30, '检查失败 → 撤销工具 → 再次触发 assemble() → 无限循环'))
+  await emitRaw(h.kernel, reply(31, '撤回这条'))
+  await sleep(60)
+  assert.deepEqual(recalled, [], '引用别人的消息，说撤回也不撤')
+
+  // ② 引用的是本机消息，但只说了「撤销」→ 关键词闸拦下
+  h.kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: h.kernel.onebot.selfId }, message: '我上一条' })
+  await emitRaw(h.kernel, reply(32, '这个撤销工具的逻辑有问题'))
+  await sleep(60)
+  assert.deepEqual(recalled, [], '没明确说「撤回」就不撤')
+
+  // ③ 引用本机消息 + 明确说「撤回」→ 正常撤（单测里「撤回」子串也算明确要求）
+  await emitRaw(h.kernel, reply(33, '这条撤回一下'))
+  await waitFor(() => recalled.length === 1, { label: '本机消息撤回一次' })
+  assert.deepEqual(recalled, [888])
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,6 +596,8 @@ test('FILE-10 策略改成「过门禁都下」→ 没叫它也落盘（passive-
 
 test('WAKE-RECALL 撤回失败：不把 协议端原始报错回显到群里（2026-10-23 事故回归）', async (t) => {
   const h = await boot(t)
+  // 撤回只对本机自己发的消息生效，得先让被引消息是「本机说的」
+  h.kernel.onebot.msgById = async (id) => ({ message_id: Number(id), sender: { user_id: h.kernel.onebot.selfId }, message: '我上一条' })
   h.kernel.onebot.recall = async () => ({
     ok: false,
     raw: 'Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/recallMsg ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:\n{"result":7,"errMsg":"decode failed!"}',

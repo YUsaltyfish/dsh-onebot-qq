@@ -25,7 +25,7 @@ function fixture(t, { state, cfg = {}, runner } = {}) {
       for (const match of req.prompt.matchAll(/【群 (\d+)】/g)) accumulator.submit({ group_id: match[1], points: '（无新增）' })
       return { text: '' }
     } } },
-    cfg: { accumulateMinNewMsgs: 1, accumulateKeepDays: 0, ...cfg }, log: quiet,
+    cfg: { accumulateSchedule: 'interval', accumulateMinNewMsgs: 1, accumulateKeepDays: 0, ...cfg }, log: quiet,
     dataDirOf: () => dataDir, memoryDirOf: () => memoryDir,
     readMemoryOf: () => null, invalidateMemoryOf() {},
   })
@@ -89,9 +89,10 @@ test('rotation duplicate IDs and ID-less records deduplicate without merging dis
   assert.equal((h.prompts[0].match(/duplicate-id/g) || []).length, 1)
   assert.equal((h.prompts[0].match(/legacy-no-id/g) || []).length, 1)
   assert.match(h.prompts[0], /outgoing-record/)
-  assert.match(h.prompts[0], /another-group/)
+  assert.doesNotMatch(h.prompts[0], /another-group/)
+  assert.match(h.prompts[1], /another-group/)
   await h.run()
-  assert.equal(h.prompts.length, 1)
+  assert.equal(h.prompts.length, 2)
 })
 
 test('failed model output does not commit deduplication state', async (t) => {
@@ -172,7 +173,7 @@ test('real normalize -> kernel archive -> accumulate preserves sender name and c
   let prompt
   const accumulator = createAccumulator({
     bot: { core: { archive: { dir: archiveDir } }, dsh: { async runIsolatedTask(req) { prompt = req.prompt; return { text: '（无新增）' } } } },
-    cfg: { accumulateMinNewMsgs: 1, accumulateKeepDays: 0 }, log: quiet,
+    cfg: { accumulateSchedule: 'interval', accumulateMinNewMsgs: 1, accumulateKeepDays: 0 }, log: quiet,
     dataDirOf: () => h.dataDir, memoryDirOf: () => path.join(h.dataDir, 'test-memory'),
     readMemoryOf: () => null, invalidateMemoryOf() {},
   })

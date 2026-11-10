@@ -28,7 +28,7 @@ function makeBot({ dataDir, archiveDir, cfg = {}, runner }) {
   const stages = []
   const bot = {
     id: 'group-memory',
-    cfg: { dir: path.join(dataDir, 'qq-memory'), enabled: true, ...cfg },
+    cfg: { dir: path.join(dataDir, 'qq-memory'), enabled: true, accumulateSchedule: 'interval', ...cfg },
     log: quiet,
     core: { dataDir, archive: { dir: archiveDir } },
     state: { get: () => undefined },
@@ -229,7 +229,7 @@ test('群记忆积累：开关关闭 / 模型输出无效 → 不写盘', async 
   }
 })
 
-test('群记忆积累：digest 两个群只调一次模型（批量 + 标记解析 + 水位）', async () => {
+test('群记忆积累：digest 两个群分别隔离调用（标记解析 + 水位）', async () => {
   const dataDir = tmp()
   const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
   const G2 = '2233445566'
@@ -249,15 +249,15 @@ test('群记忆积累：digest 两个群只调一次模型（批量 + 标记解�
   plugin.setup(bot)
   const r = await shared.memoryAccumulateSync({ confirm: true })
   assert.equal(r.ok, true)
-  assert.equal(called, 1, '两个群应合成一次调用')
-  assert.equal(r.calls, 1)
+  assert.equal(called, 2, '两个群必须隔离调用')
+  assert.equal(r.calls, 2)
   assert.deepEqual([...r.updated].sort(), [GROUP, G2].sort())
   assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`), 'utf8'), /甲\(111\)/)
   assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
 
   // 第二轮：同一批消息不应再喂模型（消化水位）
   const r2 = await shared.memoryAccumulateSync({ confirm: true })
-  assert.equal(called, 1, '没有新消息时不应再调用模型')
+  assert.equal(called, 2, '没有新消息时不应再调用模型')
   assert.equal(r2.calls, 0)
 })
 
@@ -296,8 +296,8 @@ test('群记忆积累：digest 用 memory_append 工具提交（不走文本标�
     called += 1
     assert.match(prompt, /memory_append/, '批量 digest 提示词应要求用工具提交')
     // 模拟模型在回合内逐群调工具；正文完全不含 <<<GROUP>>> 标记
-    submit({ group_id: GROUP, points: '- **甲(111)**：爱开玩笑\n- 风格：语气轻松' })
-    submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' })
+    if (prompt.includes(`【群 ${GROUP}】`)) submit({ group_id: GROUP, points: '- **甲(111)**：爱开玩笑\n- 风格：语气轻松' })
+    else submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' })
     return { ok: true, text: '已提交' }
   }
   const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
@@ -305,7 +305,7 @@ test('群记忆积累：digest 用 memory_append 工具提交（不走文本标�
   plugin.setup(bot)
   const r = await shared.memoryAccumulateSync({ confirm: true })
   assert.equal(r.ok, true)
-  assert.equal(called, 1, '仍然是两个群一次调用')
+  assert.equal(called, 2, '每群独立调用')
   assert.equal(r.failed.length, 0, '工具提交不应再出现格式失败')
   assert.deepEqual([...r.updated].sort(), [GROUP, G2].sort())
   assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${GROUP}.md`), 'utf8'), /甲\(111\)/)
@@ -326,7 +326,7 @@ test('群记忆积累：工具漏提交的群记失败、不推水位（下轮�
   const runner = async () => {
     round += 1
     if (round === 1) submit({ group_id: GROUP, points: '- **甲(111)**：爱开玩笑' }) // 故意漏 G2
-    else { submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' }) }
+    else if (round > 2) { submit({ group_id: G2, points: '- **乙(222)**：话少但会接根' }) }
     return { ok: true, text: '' }
   }
   const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
@@ -337,7 +337,7 @@ test('群记忆积累：工具漏提交的群记失败、不推水位（下轮�
   assert.equal(r1.failed[0].gid, G2)
   // G2 没推水位 → 第二轮仍会喂它，提交后成功
   const r2 = await shared.memoryAccumulateSync({ confirm: true })
-  assert.equal(round, 2)
+  assert.equal(round, 3)
   assert.deepEqual(r2.updated, [G2])
   assert.match(fs.readFileSync(path.join(dataDir, 'qq-memory', `${G2}.md`), 'utf8'), /乙\(222\)/)
 })

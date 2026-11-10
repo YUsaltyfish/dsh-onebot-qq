@@ -27,6 +27,9 @@
  * 代价与保护：单飞锁、单群失败隔离、单轮群数上限 + 轮转游标（不饿死大号段群）、
  *             首启 5 分钟缓冲、少于门槛跳过、批量漏群时最多兜底 3 个群。
  */
+import { createDailyAccumulator } from './daily.js'
+import { memoryModelSelection } from './model.js'
+import { pruneMemoryRevisions, writeMemoryDocument } from './storage.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -58,6 +61,7 @@ const MAX_BATCH_FALLBACK = 3
  * @returns {{status:Function, trigger:Function, manual:Function, sync:Function, start:Function, stop:Function, submit:Function}}
  */
 export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, memoryDirOf, readMemoryOf, invalidateMemoryOf, maxBytesOf, mutedOf = null }) {
+  if (cfg.accumulateSchedule !== 'interval') return createDailyAccumulator({ bot, cfg, log, dataDirOf, memoryDirOf, readMemoryOf, invalidateMemoryOf, maxBytesOf, mutedOf })
   const maxBytesOfSafe = () => Math.max(1000, Number(maxBytesOf?.()) || 24000)
   const num = (v, d, min, max) => {
     const n = Number(v)
@@ -778,18 +782,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
 
   /** 只保留某会话最近 keep 份历史版本（按 mtime；同秒序号不影响判定）。返回删了几份。 */
   function pruneRevisionsFor(key, keep) {
-    const revDir = path.join(memoryDirOf(), REVISIONS)
-    let names = []
-    try { names = fs.readdirSync(revDir) } catch { return 0 }
-    const re = revisionReOf(key)
-    const entries = names.filter((n) => re.test(n))
-      .map((n) => ({ n, at: (() => { try { return fs.statSync(path.join(revDir, n)).mtimeMs } catch { return 0 } })() }))
-      .sort((a, b) => a.at - b.at || a.n.localeCompare(b.n))
-    let removed = 0
-    for (const e of entries.slice(0, Math.max(0, entries.length - keep))) {
-      try { fs.unlinkSync(path.join(revDir, e.n)); removed += 1 } catch { /* ignore */ }
-    }
-    return removed
+    return pruneMemoryRevisions(memoryDirOf(), key, keep)
   }
 
   /** 每轮顺手把所有群的历史版本按当前 retainRevisions 收一遍（死群多余版本也会清）。 */
@@ -816,30 +809,10 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
   function writeMemory(gid, text) {
     const body = String(text || '').trim()
     if (!body) return false
-    const file = fileOf(gid)
-    ensureDir(path.dirname(file))
-    const old = readMemoryOf(gid)
-    if (old && old.text.trim() === body) return false // 内容没变：不写、不留冗余版本
-    const keep = retainRevisions()
-    if (old && keep > 0) {
-      try {
-        const revDir = path.join(memoryDirOf(), REVISIONS)
-        ensureDir(revDir)
-        const iso = new Date().toISOString().replace(/[-:T.]/g, '')
-        const stamp = `${iso.slice(0, 8)}-${iso.slice(8, 14)}`
-        // 同一秒内多次积累：加序号避免覆盖（旧版本绝不互相顶掉）
-        const base = revBaseOf(gid)
-        let revFile = path.join(revDir, `${base}-${stamp}.md`)
-        for (let i = 1; fs.existsSync(revFile) && i < 100; i += 1) {
-          revFile = path.join(revDir, `${base}-${stamp}-${i}.md`)
-        }
-        atomicWriteFileSync(revFile, old.text + '\n')
-        pruneRevisionsFor(gid, keep) // 只保留最近 N 份（包括控制台手改留下的 -manual 备份）
-      } catch (e) { log.warn(`[群记忆] 历史版本备份失败 (${gid}): ${e.message}`) }
-    }
-    atomicWriteFileSync(file, body.endsWith('\n') ? body : `${body}\n`, { mode: 0o600 })
-    invalidateMemoryOf(gid) // 让读取侧下次重新读盘
-    return true
+    return writeMemoryDocument({
+      dir: memoryDirOf(), key: gid, file: fileOf(gid), original: readMemoryOf(gid)?.text || '',
+      text: body, keep: retainRevisions(), onInvalidate: invalidateMemoryOf,
+    })
   }
 
   /** 把模型输出校验后落盘（批量 / 逐群共用）。 */
@@ -946,6 +919,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       prompt: mode === 'digest' ? buildDigestPrompt([item]) : buildPrompt(item),
       cwd: dataDirOf(),
       timeoutMs: 10 * 60 * 1000,
+      modelSelection: memoryModelSelection(cfg),
     })
     if (mode === 'digest') {
       const parsed = parseBatchOutput(res?.text, [gid])
@@ -984,11 +958,11 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
       const lastFedTs = tr.included.length ? (Number(tr.included[tr.included.length - 1].ts) || 0) : 0
       const sampled = Math.max(0, Number(d.total || d.rows.length) - tr.included.length)
       const size = (old?.text || '').length + tr.text.length + 400
-      if (cur.length && curLen + size > batchMaxCharsOf()) { chunks.push(cur); cur = []; curLen = 0 }
+      if (cur.length && curLen + size > batchMaxCharsOf()) { chunks.push(...cur.map((item) => [item])); cur = []; curLen = 0 }
       cur.push({ key: d.gid, rows: d.rows, oldText: old?.text || '', transcript: tr.text, lastFedTs, sampled, checkpoint: d.checkpoint })
       curLen += size
     }
-    if (cur.length) chunks.push(cur)
+    if (cur.length) chunks.push(...cur.map((item) => [item]))
 
     for (const chunk of chunks) {
       const items = chunk.map((it) => ({
@@ -1017,6 +991,7 @@ export function createAccumulator({ bot, cfg = {}, log = console, dataDirOf, mem
           prompt: mode === 'digest' ? buildDigestPrompt(items, { submitTool: true }) : buildBatchPrompt(items),
           cwd: dataDirOf(),
           timeoutMs: 15 * 60 * 1000,
+          modelSelection: memoryModelSelection(cfg),
         })
       } catch (e) {
         // 超时/中断：已工具提交的群保留它们的结果，只把没提交的记失败

@@ -521,7 +521,13 @@ export async function apply(ctx, bundleConfig = {}) {
       if (rec.turnCtx?.wakeKind === 'proactive') pacing.markProactiveSent(rec.target, rec.turnCtx)
       // 连续对话：普通回话真的发出去了，才从这一刻开始算"隔多久再检查"
       pacing.noteReplySent(rec.target, rec.turnCtx)
-      archive(rec.target, { dir: 'out', ts: Date.now(), messageId: rec.messageId ?? null, text: rec.text, mode: rec.mode })
+      archive(rec.target, {
+        dir: 'out', ts: Date.now(), messageId: rec.messageId ?? null, text: rec.text, mode: rec.mode,
+        replyTo: rec.replyTo ?? null,
+        triggerMsgId: rec.turnCtx?.triggerMsgId ?? null,
+        interactionMessageIds: rec.turnCtx?.interactionMessageIds ?? [],
+        wakeKind: rec.turnCtx?.wakeKind ?? null,
+      })
     },
   })
   kernel.deliver = deliver
@@ -827,7 +833,7 @@ export async function apply(ctx, bundleConfig = {}) {
 
   // ── 内置管线钩子 0：入站留档（passive-tap 阶段，跑在 pre-gate 黑名单之后！） ──
   pipeline.use('passive-tap', (ev) => {
-    archive(ev.chatKey, { dir: 'in', ts: ev.time, sender: ev.sender, messageId: ev.messageId, text: ev.text })
+    archive(ev.chatKey, { dir: 'in', ts: ev.time, sender: ev.sender, messageId: ev.messageId, text: ev.text, replyTo: ev.replyToId ?? null })
   }, { order: 0, pluginId: 'kernel:archive' })
 
   // ── 内置管线钩子 1：斜杠命令分发（intercept 阶段，order 5 最先跑） ──

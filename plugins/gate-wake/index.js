@@ -336,11 +336,24 @@ function recallFailureNote(res) {
 }
 
 /**
- * "引用一条消息 + 说撤回" → 撤那一条。返回 true = 已处理（调用方直接 return）。
+ * 只有「明确要求撤回」才算：**只认「撤回」**。
+ * 2026-11-09 线上误撤：W 报 bug 的正文里写了「撤销工具」，引用的却是风雪的消息 → 撤错了人。
+ * 所以「撤销 / 回收 / 删除 / 撤掉」这类技术讨论里的高频词一律不算。
+ */
+const RECALL_ASK = /撤回/
+
+/**
+ * "引用**本机**的消息 + 说撤回" → 撤那一条。返回 true = 已处理（调用方直接 return）。
+ * ⚠️ 条件缺一不可：① 有引用 ② 正文明确说「撤回」③ 被引者就是本机。
+ *    引用别人的消息一律不管（静默跳过，交给正常对话），绝不替别人撤别人的话。
  * ⚠️ 同一条只试一次：以前批量撤回时对同一条反复重试, 每条都超时, 把群刷爆了。
  */
 async function tryRecall(bot, ev) {
-  if (!ev.replyToId || !/撤回|撤掉|撤销|回收|删除这条|把它撤了|撤了这/i.test(String(ev.text || ''))) return false
+  if (!ev.replyToId || !RECALL_ASK.test(String(ev.text || ''))) return false
+  if (!(await isQuotingSelf(bot, ev))) {
+    bot.log.debug(`[撤回] ${ev.chatKey} rid=${ev.replyToId} 被引的不是本机消息 → 不管`)
+    return false
+  }
   const scratch = scratchOf(bot, ev.chatKey)
   const tried = (scratch.recallTried ||= new Set())
   const key = String(ev.replyToId)

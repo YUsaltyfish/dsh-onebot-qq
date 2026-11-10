@@ -1242,11 +1242,11 @@ window.__ModuleLoader__.load({
 
 		// ═══════════ 标签页⑤：群记忆（每群一篇 Markdown，可预览可编辑） ═══════════
 		// 数据来自 RPC 端点 memory 的 list / read / save / refresh。
-		// 自动积累由插件自带的定时器负责（配置在下面「工具配置」里：开关 / 间隔 / 每群条数…）；
+		// 自动积累由插件自带的定时器负责；每日时间/时区在主面板，预算与旧间隔参数折叠。
 		// 这个页面用来「看」「人工干预」和「立刻积累一轮」—— 保存/积累都会先备份旧版到 .revisions/。
 		const SM = {
 			layout: { display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' },
-			list: { flex: '0 0 230px', maxHeight: 440, overflow: 'auto' },
+			list: { flex: '1 1 100%', minWidth: 0, maxHeight: 440, overflow: 'auto' },
 			item: (on) => ({
 				padding: '6px 9px', borderRadius: 8, cursor: 'pointer', fontSize: 13, marginBottom: 4,
 				border: '1px solid ' + (on ? '#d0d5dd' : 'transparent'),
@@ -1345,6 +1345,8 @@ window.__ModuleLoader__.load({
 						setMsg(`${label} ✓`)
 						const rr = await call('config')
 						setCfg(rr.controls || [])
+						const d = await call('list')
+						if (d && d.ok !== false) setData(d)
 					} catch (e) { setMsg(`${label} ✗ ${e.message}`) } finally { setBusy(false) }
 				},
 				call(op, payload) {
@@ -1354,7 +1356,10 @@ window.__ModuleLoader__.load({
 				},
 			}
 
-			useEffect(() => { load() }, [])   // 只在挂载时拉一次
+			useEffect(() => {
+				load()
+				call('config').then((r) => setCfg(r.controls || [])).catch((e) => setMsg('读配置失败：' + e.message))
+			}, [])   // 只在挂载时拉一次；每日调度控件直接显示
 			// 挂着页时如果积累在跑，自动跟随状态（跑完显示 lastResult / 失败原因）
 			useEffect(() => {
 				if (data && data.accumulate && data.accumulate.running) pollStatus()
@@ -1439,6 +1444,20 @@ window.__ModuleLoader__.load({
 
 			const groups = data.groups || []
 			const kb = (n) => n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB'
+			const acc = data.accumulate || {}
+			const schedule = (cfg || []).find((c) => c.key === 'group-memory.accumulateSchedule')
+			const daily = (schedule ? schedule.value : acc.schedule) === 'daily'
+			const modelKeys = ['accumulateModelProvider', 'accumulateModel']
+			const basicKeys = ['enabled', 'accumulateEnabled', 'accumulateSchedule', 'accumulateDailyTime', 'accumulateTimezone', ...modelKeys]
+			const intervalKeys = ['accumulateIntervalHours', 'accumulateMode', 'accumulateLookbackHours', 'accumulateMinNewMsgs', 'accumulateSectionMaxItems', 'accumulateKeepDays', 'accumulateKeepRows']
+			const keyOf = (c) => c.key.replace(/^group-memory\./, '')
+			const visibleControl = (c) => daily ? !intervalKeys.includes(keyOf(c)) : !['accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays'].includes(keyOf(c))
+			const stamp = (n) => {
+				if (!n) return '—'
+				try { return new Date(n).toLocaleString('zh-CN', { timeZone: acc.timezone || 'Asia/Shanghai' }) }
+				catch { return new Date(n).toISOString() } // 无效时区不应挡住配置纠错与错误状态
+			}
+			const result = acc.lastResult
 
 			return h('div', { style: S.card }, [
 				h('div', { style: S.title, key: 't' }, '群记忆 · 每群 / 每私聊一篇'),
@@ -1450,14 +1469,14 @@ window.__ModuleLoader__.load({
 						onClick: async () => { if (await load()) setMsg('已刷新 ✓') },
 					}, '刷新'),
 					h('button', {
-						key: 'acc', style: S.btn, disabled: busy,
-						title: '立刻跑一轮积累：读各群最近聊天 → 交给模型更新这几篇文件',
+						key: 'acc', style: S.btn, disabled: busy || !!acc.running,
+						title: '处理待办互动；关闭自动处理后仍可手动执行，不向 QQ 发消息',
 						onClick: () => setConfirmBox({
-							title: '⚠️ 立刻积累一轮？',
+							title: '⚠️ 立即处理记忆？',
 							lines: [
-								'会调用大模型：默认把本轮所有「有新消息的群」合在一次调用里（群太多或聊天太长才自动拆批）。',
-								'跑在独立的临时后台会话里，后台执行、不占页面，也不会碰群里的对话。',
-								'只处理上次消化之后有新消息的群；消息太少会跳过。跑完点「刷新」看结果；节奏和开关在下面「工具配置」里改。',
+								'会调用大模型，在独立后台会话执行，不向 QQ 发消息。',
+								daily ? '仅整理本机器人实际参与的待办互动，逐会话更新人物、关系、群规与近期事件；闲聊旁观记录不当成互动。' : '旧间隔模式：处理回看窗口内的新聊天，保留原有阈值与采样设置。',
+								daily ? '预算不足的部分保留待办，不采样丢弃；已关闭记忆的会话会跳过。关闭自动处理不影响本次手动执行。' : '已关闭记忆的会话会跳过；可在高级配置中调整旧参数。',
 							],
 							okLabel: '开始积累',
 							onOk: async () => {
@@ -1470,7 +1489,7 @@ window.__ModuleLoader__.load({
 								} catch (e) { setMsg(`积累 ✗ ${e.message}`) } finally { setBusy(false) }
 							},
 						}),
-					}, '⚡ 立刻积累一轮'),
+					}, '⚡ 立即处理'),
 					h('span', { key: 'd', style: SM.dim }, '目录 ' + (data.dir || '')),
 					h('span', {
 						key: 'sch', style: SM.dim,
@@ -1479,34 +1498,55 @@ window.__ModuleLoader__.load({
 							: '',
 					}, '自动积累：' + (String(data.schedule || '') || '—')
 						+ (data.accumulate && data.accumulate.running ? '（正在积累…）' : '')),
-					data.estimate ? h('span', { key: 'est', style: SM.dim },
+					!daily && data.estimate ? h('span', { key: 'est', style: SM.dim },
 						`一轮约 ${data.estimate.approxInputTokens} token（${data.estimate.groups} 群 × ${data.estimate.msgPerGroup} 条，按当前设置估）`) : null,
 				]),
 
 				h('div', { style: SM.dim, key: 'hint' },
-					'每个群 / 每个私聊一篇 Markdown：记「唤醒与对话风格」和「群里的人 / 对方与提到的人」。' +
-					'群聊时内核只给模型一行「有这份记忆」的指针，它需要时再自己调 read_memory 读（整篇不往对话正文里贴）；' +
-					'内容由插件自带的积累器定时更新' +
-					'（节奏见上面那行「自动积累」），' +
-					'这里可以手改（保存会先把旧版备份到 .revisions/）。'),
+					'每群 / 每私聊一篇 Markdown。每日模式只整理本机器人实际参与的互动，不总结旁观闲聊；' +
+					'启动前的旧聊天不自动回灌。长期事实与近期事件分开维护，近期事件到期清理。' +
+					'模型通过 read_memory 读取本会话；这里仍可手改，保存前备份旧版到 .revisions/。'),
+
+				h('div', { key: 'schedule' }, (cfg || []).filter((c) => basicKeys.includes(keyOf(c)) && !modelKeys.includes(keyOf(c)) && visibleControl(c)).map((c) => ctrlRow(c, cfgApi))),
+				h('div', { key: 'model' }, [
+					h('div', { key: 'title', style: S.pgroup }, '记忆整理专用模型（后台任务）'),
+					...(cfg || []).filter((c) => modelKeys.includes(keyOf(c))).map((c) => ctrlRow(c, cfgApi)),
+					h('div', { key: 'hint', style: SM.dim }, '仅影响记忆整理，不改变 QQ 聊天模型。提供商与模型 ID 必须成对填写；同时留空则继承后台任务默认模型。配置不完整、模型不可用或调用失败会报错，不会静默换用其他模型；填写时先完成两项，再手动处理。'),
+				]),
+				h('div', { key: 'status', style: { fontSize: 12, lineHeight: 1.8 }, 'aria-live': 'polite' }, [
+					h('div', { key: 'next' }, `自动处理：${acc.enabled ? '开启' : '关闭（可手动处理）'}　下次：${stamp(acc.nextDueAt)}（${acc.timezone || 'Asia/Shanghai'}）`),
+					acc.pendingCount !== undefined ? h('div', { key: 'pending' }, `上轮待办：${acc.pendingCount} 个会话（不含尚未扫描的新互动）`) : null,
+					h('div', { key: 'last' }, `上次：${stamp(acc.lastRunAt)}　` + (result ? (result.message || `更新 ${(result.updated || []).length} / 跳过 ${(result.skipped || []).length} / 失败 ${(result.failed || []).length} / 模型调用 ${result.calls || 0}`) : '尚无结果')),
+					acc.lastError ? h('div', { key: 'err', role: 'alert' }, '最近错误：' + acc.lastError) : null,
+					result && Array.isArray(result.updated) && result.updated.length ? h('div', { key: 'updated' }, '最近更新会话：' + result.updated.join('、')) : null,
+					result && Array.isArray(result.failed) && result.failed.length ? h('details', { key: 'failures' }, [
+						h('summary', { key: 'title' }, '处理失败详情'),
+						...result.failed.map((f, i) => h('div', { key: i }, `${f.gid}：${f.detail || '失败，将重试'}`)),
+					]) : null,
+					Array.isArray(acc.pending) && acc.pending.length ? h('details', { key: 'pendingList' }, [
+						h('summary', { key: 'title' }, '待办原因'),
+						...acc.pending.map((p, i) => h('div', { key: i }, `${p.chat || p.gid}：${p.reason || '待处理'}（${p.rows || 0} 条 / ${p.chars || 0} 字符）`)),
+					]) : null,
+				]),
 
 				// ⚙ 工具配置（折叠）：改的是 config.json 的 pluginConfig['group-memory'] 段
 				h('div', { key: 'cfg' }, [
 					h('button', { style: S.btn, disabled: busy, onClick: toggleCfg },
-						(cfgOpen ? '▾ 收起工具配置' : '▸ 工具配置') + (cfg ? `（${cfg.length} 项）` : '')),
+						(cfgOpen ? '▾ 收起高级配置' : '▸ 高级配置（预算 / 保留 / 历史版本）')),
 					cfgOpen && cfg ? h('div', { key: 'body', style: { marginTop: 6 } }, (() => {
+						const advanced = cfg.filter((c) => !basicKeys.includes(keyOf(c)) && visibleControl(c))
 						const gs = []
-						for (const c of cfg) if (!gs.includes(c.group)) gs.push(c.group)
+						for (const c of advanced) if (!gs.includes(c.group)) gs.push(c.group)
 						return gs.map((gname) => h('div', { key: 'g' + gname }, [
 							h('div', { style: S.pgroup, key: 't' }, gname),
-							cfg.filter((c) => c.group === gname).map((c) => ctrlRow(c, cfgApi)),
+							advanced.filter((c) => c.group === gname).map((c) => ctrlRow(c, cfgApi)),
 						]))
 					})()) : null,
 					cfgOpen ? h('div', { style: SM.dim, key: 'doc' },
 						'💡 换算口径：1 汉字 ≈ 3.2 字节，1 token ≈ 1.4 汉字（即 1000 字节 ≈ 310 字 ≈ 220 token）。　' +
 						'鼠标停在任意一行（或那个 ⓘ）上会显示用途和影响。　' +
 						'改完立刻落盘（写入前备份 config.json）并热重载：读取侧马上生效，积累器下一轮按新值跑。　' +
-						'积累方式「增量要点」只追加新条目（按 QQ / 文本去重），每节超上限从最早的开始丢；想要模型整篇重写就切「重写全文」。') : null,
+						(daily ? '每日模式超出预算保留待办，不采样丢弃；会话超限需上调预算后重试，不会自动截短。近期事件保留天数与历史版本数量在此设置。' : '旧间隔模式保留原有采样、阈值与积累方式；每日模式不使用这些阈值。')) : null,
 				]),
 
 				h('div', { style: SM.layout, key: 'body' }, [

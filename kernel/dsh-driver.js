@@ -15,7 +15,8 @@
  *   ④ GUI 侧栏工作区挂载：`create()` 给 workspaceId 时会 `workspace.attachSession()`。
  *      绕过它 = 在 GUI 侧栏里看不到 QQ 线的会话，排障只能翻文件。
  * 一句话：followup() 只是「往 agent 收件箱塞一条消息」这个最底层动作，它上面的准入、
- * 归属、恢复一律没有。所以本文件里**没有任何** `agent.*()` 直调，全部经服务层。
+ * 归属、恢复一律没有。创建/提交全部经服务层；唯一宿主例外是新建后台任务在准入前
+ * 调 `agent.model.select()`：现有 selectModel 会改部署默认值，不能用于后台专用模型。
  *
  * 本文件的边界：只负责「会话生命周期 + 提交 prompt + 提问拦截 + 群上文增量注入」。
  * 出站一律走内核 deliver()，这里没有裸发；人设/标题取名/工具实现都不在这里。
@@ -256,8 +257,15 @@ export function createDshDriver(opts) {
   /** 读某个会话最后一条 assistant 消息的纯文本（后台任务取返回值用）。 */
   async function readLastAssistantText(sessionId) {
     try {
-      const ins = await ctx.sessionController.inspect(sessionId)
-      const events = Array.isArray(ins?.events) ? ins.events : []
+      let events
+      if (typeof ctx.sessionController.events === 'function') {
+        const page = await ctx.sessionController.events({ address: { kind: 'session', sessionId }, maxMessages: 20 }, new AbortController().signal)
+        events = Array.isArray(page?.records) ? page.records.filter((record) => record?.type === 'event').map((record) => record.event) : []
+      } else {
+        // Older hosts/fixtures exposed inspect; installed DSH uses addressed events.
+        const ins = await ctx.sessionController.inspect(sessionId)
+        events = Array.isArray(ins?.events) ? ins.events : []
+      }
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const ev = events[i]
         if (ev?.type !== 'assistant/message') continue
@@ -284,13 +292,18 @@ export function createDshDriver(opts) {
    *   · 用当前 QQ preset（工具面已裁剪），并且内核会在工具入口拒绝「后台任务会话」调用工具
    *     （`kernel.maintSessionIds`）—— 双保险，绝不会把积累结果发到群里；
    *   · 超时/卸载会请求取消；只有确认结束或准入失败才撤销隔离并归档。
-   * @param {{name?:string, prompt:string, timeoutMs?:number}} opts
+   * @param {{name?:string, prompt:string, timeoutMs?:number, modelSelection?:{provider:string,model:string}}} opts
    * @returns {Promise<{ok:boolean, sessionId:string, text:string, reason:string}>}
    */
-  async function runIsolatedTask({ name = '后台任务', prompt: taskPrompt, timeoutMs = 10 * 60000, cwd = '' } = {}) {
+  async function runIsolatedTask({ name = '后台任务', prompt: taskPrompt, timeoutMs = 10 * 60000, cwd = '', modelSelection } = {}) {
     const text = String(taskPrompt ?? '').trim()
     if (!text) throw new Error('runIsolatedTask 需要 prompt')
     if (closed) throw new Error('会话驱动已关闭')
+    let selection
+    if (modelSelection !== undefined) {
+      if (!modelSelection || typeof modelSelection.provider !== 'string' || typeof modelSelection.model !== 'string' || !modelSelection.provider.trim() || !modelSelection.model.trim()) throw new Error('后台任务 modelSelection 需要非空 provider 和 model')
+      selection = { provider: modelSelection.provider.trim(), model: modelSelection.model.trim() }
+    }
     if (typeof ctx.sessionController?.create !== 'function') throw new Error('sessionController 服务不可用，无法执行后台任务')
     const created = await ctx.sessionController.create({
       cwd: String(cwd || settings.workspacePath || '').trim() || undefined,
@@ -331,7 +344,8 @@ export function createDshDriver(opts) {
     }
     const off = onTurnEnd(sessionId, (event) => {
       ended = true
-      reason = String(event?.reason || '')
+      const endReason = event?.data?.reason ?? event?.reason ?? ''
+      reason = typeof endReason === 'string' ? endReason : JSON.stringify(endReason)
       resolveFinished({})
       void cleanup()
     })
@@ -348,6 +362,15 @@ export function createDshDriver(opts) {
         return { error: stopped }
       }
       try {
+        if (selection) {
+          await selectIsolatedModel(sessionId, selection)
+          // Selection validation may await provider catalog/auth resolution. Close or
+          // timeout while it was pending must never admit a default-route prompt.
+          if (closed || stopped) {
+            await cleanup()
+            return { error: stopped || new Error('会话驱动已关闭') }
+          }
+        }
         await prompt(sessionId, text)
         admitted = true
         if (stopped && !ended) void cancel(sessionId)
@@ -364,6 +387,31 @@ export function createDshDriver(opts) {
     await cleanup()
     const out = await readLastAssistantText(sessionId)
     return { ok: Boolean(out), sessionId, text: out, reason }
+  }
+
+  /**
+   * Installed DSH 0.2.2 sessionController.create accepts no initial model route;
+   * selectModel also persists the deployment default (SessionCommandController).
+   * Use that controller's same host AgentModel.select primitive on this fresh,
+   * unprompted task only. Never call selectModel/saveSelection or change defaults.
+   * Fail closed if any required host capability or exact catalog route is absent; dispatch reports credential failures.
+   */
+  async function selectIsolatedModel(sessionId, selection) {
+    const { provider, model } = selection
+    if (typeof ctx.sessionController.modelCatalog !== 'function') throw new Error('后台任务专用模型不可用：modelCatalog 服务不可用')
+    const catalog = await ctx.sessionController.modelCatalog()
+    const group = catalog?.groups?.find((entry) => entry.id === provider)
+    if (!group?.models?.some((entry) => entry.id === model)) throw new Error(`后台任务专用模型不可用：${provider}/${model}`)
+    const llm = ctx.get('llm')
+    const agents = ctx.get('agents')
+    if (typeof llm?.resolveCallConfig !== 'function' || typeof agents?.get !== 'function') throw new Error('后台任务专用模型不可用：缺少宿主 llm/agents 服务')
+    await llm.resolveCallConfig(selection)
+    if (closed) throw new Error('会话驱动已关闭')
+    const agent = agents.get(sessionId)
+    if (typeof agent?.model?.select !== 'function' || typeof agent?.model?.current !== 'function') throw new Error('后台任务专用模型不可用：缺少会话级模型选择能力')
+    await agent.model.select(selection)
+    const actual = agent.model.current()
+    if (actual?.provider !== provider || actual?.model !== model) throw new Error('后台任务专用模型选择未生效；拒绝回落默认模型')
   }
 
   /** 统一入口：失败先丢图重发纯文本的降级策略，底层提交走 sessionController。 */

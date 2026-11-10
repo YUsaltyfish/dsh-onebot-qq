@@ -46,8 +46,33 @@ export default {
 
     // ── 自动积累（本插件自带定时器，不需要外部 cron）──────────────────
     accumulateEnabled: {
-      type: 'bool', default: true, group: '群记忆', label: '自动积累群记忆',
-      hint: '开：按下面的间隔，把各群最近的聊天交给模型，自动更新记忆文件；关：完全不跑（仍可手动「立刻积累一轮」）。',
+      type: 'bool', default: true, group: '群记忆', label: '自动处理记忆',
+      hint: '按所选调度整理本机器人参与的互动；关后仍可手动立即处理待办。',
+    },
+    accumulateModelProvider: {
+      type: 'str', default: '', group: '群记忆', label: '记忆分析模型提供商',
+      hint: '后台记忆分析专用的 DSH provider 标识，与模型 ID 成对填写；两项留空沿用默认模型，不改变 QQ 聊天模型。',
+    },
+    accumulateModel: {
+      type: 'str', default: '', group: '群记忆', label: '记忆分析模型 ID',
+      hint: '填写 DSH 模型目录中的内部 ID，不是显示名。指定模型不可用时保留待办并报错，不自动换模型。',
+    },
+    accumulateSchedule: {
+      type: 'enum', default: 'daily', group: '群记忆', label: '积累调度',
+      options: [{ value: 'daily', label: '每日整理互动（推荐）' }, { value: 'interval', label: '旧版间隔积累（兼容）' }],
+      hint: '每日模式逐会话整理与本机器人的互动，支持修正与移除条目；间隔模式保留旧版增量/重写行为。',
+    },
+    accumulateDailyTime: {
+      type: 'str', default: '04:00', group: '群记忆', label: '每日执行时间',
+      hint: '24 小时制 HH:mm；按下方时区执行。停机错过后恢复补跑一次。',
+    },
+    accumulateTimezone: {
+      type: 'str', default: 'Asia/Shanghai', group: '群记忆', label: '执行时区',
+      hint: 'IANA 时区，例如 Asia/Shanghai；无效时间或时区会停止调度并显示错误。',
+    },
+    accumulateRecentDays: {
+      type: 'int', default: 14, min: 1, max: 90, group: '群记忆', label: '近期经历保留天数',
+      hint: '仅近期经历自动到期；稳定记忆与未完成约定不按此时间自动删除。',
     },
     accumulateIntervalHours: {
       type: 'int', default: 8, min: 1, max: 24, step: 1, group: '群记忆', label: '积累间隔', unit: '小时',
@@ -64,7 +89,7 @@ export default {
     },
     accumulateBatchMaxChars: {
       type: 'int', default: 200000, min: 20000, max: 600000, step: 10000, group: '群记忆', label: '单次提示词上限', unit: '字',
-      hint: '一轮里所有群（聊天正文）加起来超过这个上限就自动拆成多次调用；越大越省调用次数，但单次更慢。',
+      hint: '每日模式：单会话完整提示词预算，超出保留待办，不截断。旧间隔模式：控制批次输入预算。',
     },
     accumulateLookbackHours: {
       type: 'int', default: 72, min: 1, max: 240, step: 1, group: '群记忆', label: '回看最近多少小时', unit: '小时',
@@ -84,11 +109,11 @@ export default {
     },
     accumulateMsgPerGroup: {
       type: 'int', default: 200, min: 20, max: 1000, step: 20, group: '群记忆', label: '每群最多取多少条',
-      hint: '从最近的消息往前取；条数越多越准，token 也越多。',
+      hint: '每日模式：单会话互动消息预算，超出保留待办，不采样；旧间隔模式：从最近消息往前取。',
     },
     accumulateMaxChars: {
       type: 'int', default: 8000, min: 1000, max: 30000, step: 500, group: '群记忆', label: '每群正文上限', unit: '字',
-      hint: '喂给模型的聊天正文最多多少字符（超出从最早的消息开始丢）。',
+      hint: '每日模式：单会话互动正文预算，超出保留待办；旧间隔模式：超出从最早消息开始丢。',
     },
     accumulateMinNewMsgs: {
       type: 'int', default: 20, min: 0, max: 500, step: 5, group: '群记忆', label: '少于多少条就跳过',
@@ -100,7 +125,7 @@ export default {
     },
     accumulateMaxGroupsPerRound: {
       type: 'int', default: 12, min: 1, max: 200, step: 1, group: '群记忆', label: '单轮最多处理多少个群',
-      hint: '群很多时一轮只处理这么多个群，其余下轮轮转处理（不会永远饿死大号段群）。调大 = 单轮更久、可能拆批。',
+      hint: '群与私聊合计的单轮会话预算，其余下轮轮转处理；调大将延长单轮处理时间。',
     },
   },
 
@@ -192,8 +217,7 @@ export default {
       if (hit && hit.stamp === stamp) return hit
       let text
       try { text = stripBom(fs.readFileSync(file, 'utf8')) } catch { return null }
-      // 剥掉条目尾部的记账注释（`<!-- n=3 ... -->`）：机器人不该看到记账信息，也省 token
-      text = text.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
+      // 原文保留条目 ID / 来源等元数据，积累器据此安全更新；只在聊天读取时剥除。
       const rec = { stamp, text, bytes: Buffer.byteLength(text, 'utf8') }
       rawCache.set(file, rec)
       return rec
@@ -209,8 +233,9 @@ export default {
     function readMemory(key) {
       const r = loadRaw(key)
       if (!r) return null
-      const text = clip(r.text).trim()
-      return { text, stamp: r.stamp, clipped: text.length < r.text.trim().length, bytes: r.bytes }
+      const visible = r.text.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
+      const text = clip(visible).trim()
+      return { text, stamp: r.stamp, clipped: text.length < visible.trim().length, bytes: r.bytes }
     }
 
     // ── 入口 ①：before-turn 只推一行指针（首次 / 有更新；未变化 0 字符） ──────────
@@ -232,7 +257,7 @@ export default {
         ev.hint.push(priv
           ? '[本私聊记忆: 调工具 read_memory 可看对方的偏好、称呼与回话约定；'
             + '第一次在这里回话前建议先读一次。**认人只看 QQ 号**]'
-          : '[本群记忆: 调工具 read_memory 可看本群的说话风格与群友画像；'
+          : '[本群记忆: 调工具 read_memory 可看本群的共同经历、相处约定与待办；'
             + '第一次在本群回话前建议先读一次。**认人只看 QQ 号**（群友常换昵称，同一人换了名字仍是同一人）]')
         log.debug(`[群记忆] ${key} 本会话首次 → 只给指针（${mem.text.length} 字不再贴正文）`)
       } else if (prev !== mem.stamp) {
@@ -247,7 +272,7 @@ export default {
     // ── 入口 ②：工具 read_memory（只读本群那一篇；群里没有文件权限，这是唯一的"翻记忆"路） ──
     bot.registerTool('read_memory', {
       description:
-        '读本会话（本群或本私聊）的长期记忆：怎么被叫起来、该怎么回话（语气/长度/称呼/忌讳），以及这里的人的特点。\n'
+        '读本会话（本群或本私聊）的记忆：共同经历、明确偏好与边界、相处约定和未完成事项。仅在相关时自然使用；旧记忆不覆盖当前明确纠正，记忆缺失不代表从未发生。\n'
         + '这份记忆与人设解耦：里面提到机器人自己一律用「我」，不写人设。'
         + '**认人只看 QQ 号**：条目形如 `- **昵称(QQ)**：…`，人常换昵称，同一个 QQ 换了名字仍是同一个人'
         + '（按 QQ 对上他，别当成新面孔）。第一次在本会话回话前建议先读一次；同一会话读一次就够，'
@@ -282,12 +307,13 @@ export default {
     // 内核的工具守卫只允许「群记忆积累后台会话」调用它；普通 QQ 会话调会被拒。
     bot.registerTool('memory_append', {
       description:
-        '记忆积累**后台任务专用**：把从最近聊天里提炼出的「新增要点」按会话提交，插件会去重后合并进该会话的记忆文件'
-        + '（普通聊天会话调不到、也不需要它）。每个会话调一次：target = group:群号 或 private:QQ号；'
-        + 'points = 新增要点 Markdown 列表行；没有值得记的写「（无新增）」。调用成功后不要再重复提交同一个会话。',
+        '记忆积累后台任务专用，普通聊天不可调用。每日模式通过 operations JSON 数组提交本会话的新增、修改、移除；无变更为 []。'
+        + '旧版间隔模式通过 points 提交 Markdown 新增要点，无新增为（无新增）。只可提交当前任务允许的会话，成功后不要重复提交。',
       parameters: {
         target: { type: 'string', required: true, description: '会话目标：群写 group:群号，私聊写 private:QQ号（prompt 里【群 …】/【私聊 …】的号码，原样抄）' },
-        points: { type: 'string', required: true, description: '本会话新增要点：Markdown 列表行（- **昵称(QQ)**：… / - 风格：… / - 其它：…）；没有新增写「（无新增）」' },
+        points: { type: 'string', description: '仅旧版间隔模式：新增要点 Markdown 列表行；没有新增写「（无新增）」' },
+        operations: { type: 'string', description: '每日模式：JSON 操作数组，op 为 add/update/remove；条目包含 id、section(stable/recent/promises)、text、sourceIds；无变更传 []。严格遵守当前后台任务提示。' },
+        batchId: { type: 'string', description: '每日模式必填：原样复制当前任务的 batchId，仅可提交该批次。' },
       },
       execute(args, exec) {
         const submit = bot.shared.memoryAccumulateSubmit
