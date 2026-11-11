@@ -35,9 +35,8 @@ window.__ModuleLoader__.load({
 
 		// ═══════════ 页内标签页（2026-10-18 起：一项功能一页）═══════════
 		// 固定页：总览 / 运维 / 群聊 / 子插件 / 群记忆；
-		// 功能页：后端 CONTROLS 的每个 group 自动成一页（顺序 = 后端首次出现的顺序）——
-		//   现在 = OneBot 连接 / 消息设置 / 主动接话 / 回话 / 生图 / 表情包 / 链接解析。
-		//   ⇒ 以后加一组开关：group 写新名字就自动多一页，前端不用改。
+		// 功能页由后端最终可见控件的 group 生成；已隐藏的兼容字段不会产生页面。
+		// OneBot 连接、主动接话等专用页单独挂载，其余使用通用分组页。
 		// PERSONA_GROUPS（默认空）：如有分组要跟着「人设」显示在总览页，由 schema.personaGroups 指定。
 		// 数据（schema / status / msg / busy / confirmBox）由**外壳统一持有**再往下传：
 		// ① 避免每个标签页各拉一遍 status（共享同一份健康状态与配置快照）；
@@ -277,7 +276,7 @@ window.__ModuleLoader__.load({
 			])
 		}
 
-		/** 某一组开关（后端 group 相同的一行行开关；群聊 / 回话 / 生图… 各功能页共用） */
+		/** 某一组开关（后端 group 相同的一行行开关；群聊 / 消息设置 / 生图… 各功能页共用） */
 		function SwitchGroup(props) {
 			const { schema, group, ...api } = props
 			const list = (schema.controls || []).filter((c) => c.group === group)
@@ -296,7 +295,7 @@ window.__ModuleLoader__.load({
 				+ '平时不用动；每一项都有详细悬停解释。门禁类在「群聊」页每张群卡片上也有同样的开关，改哪边都一样。',
 		}
 
-		/** 单个功能分组页（消息设置 / 回话 / 生图 / 表情包 / 链接解析…） */
+		/** 单个功能分组页（消息设置 / 生图 / 表情包 / 链接解析…） */
 		function GroupTab(props) {
 			const { group, ...api } = props
 			return h('div', null, [
@@ -473,7 +472,8 @@ window.__ModuleLoader__.load({
 		// ═══════════ 标签页②：OneBot 连接（状态 + 连接测试 + 连接配置；登录/扫码交给协议端自带 WebUI）═══════════
 		// 状态与总览**同一来源**（ConsoleShell 的 status，5 秒轮询）。
 		function OneBotTab(props) {
-			const { call, refresh, status, busy } = props
+			const { call, refresh, status, busy, setBusy } = props
+			const callModel = react.useCallback((op, payload) => call('memory', { op, ...payload }), [call])
 			const { useState } = react
 			const [note, setNote] = useState('')
 			const [busyLocal, setBusyLocal] = useState(false)
@@ -517,6 +517,7 @@ window.__ModuleLoader__.load({
 							: `QQ 未登录/已掉线${loginErr ? `：${loginErr}` : ''}。请用协议端自带的 WebUI 扫码 / 密码登录（端口见各实现文档，本机在用的 SnowLuma 默认 http://127.0.0.1:5099）；登录后本页与总览会自动更新。`),
 				note ? h('div', { key: 'note', style: S.msg }, note) : null,
 				h(SwitchGroup, Object.assign({}, props, { key: 'sw', group: 'OneBot 连接' })),
+				h(MemoryModelPicker, { key: 'model', scope: 'chat', call: callModel, busy, setBusy }),
 			])
 		}
 
@@ -1262,6 +1263,113 @@ window.__ModuleLoader__.load({
 			dim: { opacity: .55, fontSize: 12 },
 		}
 
+		function MemoryModelPicker({ call, busy, setBusy, scope }) {
+			const { useState, useEffect } = react
+			const chat = scope === 'chat'
+			const routeScope = chat ? { scope } : {}
+			const [catalog, setCatalog] = useState(null)
+			const [draft, setDraft] = useState({ provider: '', model: '' })
+			const [query, setQuery] = useState('')
+			const [loadError, setLoadError] = useState('')
+			const [note, setNote] = useState('')
+
+			const load = async () => {
+				setLoadError('')
+				try {
+					const r = await call('model-catalog', routeScope)
+					if (!r?.ok) throw new Error(r?.error || 'RPC 调用失败')
+					setCatalog(r)
+					setDraft(r.selection)
+				} catch (e) { setLoadError('读取模型目录失败：' + e.message) }
+			}
+			useEffect(() => { load() }, [call, scope])
+
+			const routeKey = ({ provider, model }) => provider || model ? JSON.stringify([provider, model]) : ''
+			const manual = catalog?.available === false
+			const pair = manual ? { provider: draft.provider.trim(), model: draft.model.trim() } : draft
+			const key = routeKey(pair)
+			const savedKey = catalog ? routeKey(catalog.selection) : ''
+			const edit = (selection) => { setDraft(selection); setNote('') }
+			const canSave = !!catalog && !busy && key !== savedKey && !!pair.provider === !!pair.model
+			const save = async () => {
+				if (!canSave) return
+				setBusy(true); setNote('')
+				try {
+					const r = await call('model-select', { ...routeScope, ...pair, ...(manual && key ? { manual: true } : {}) })
+					if (!r?.ok) throw new Error(r?.error || 'RPC 调用失败')
+					setCatalog({ ...catalog, selection: r.selection })
+					setDraft(r.selection)
+					setNote(r.pending ? '已保存 ✓ 实例待配置' : '已保存 ✓')
+				} catch (e) { setNote('保存模型失败：' + e.message) } finally { setBusy(false) }
+			}
+
+			const inputStyle = { ...S.input, width: 190, maxWidth: '100%' }
+			let fields
+			if (!catalog) {
+				fields = loadError ? h('div', { style: S.row, role: 'alert' }, loadError,
+					h('button', { type: 'button', style: S.btn, disabled: busy, onClick: load }, '重试'))
+					: h('div', { role: 'status' }, '正在读取模型目录…')
+			} else if (manual) {
+				fields = [
+					h('div', { key: 'fallback', style: SM.dim }, '宿主未提供模型目录，可手动成对填写 ID；同时留空则继承默认模型。'),
+					...Object.entries({ provider: '提供商 ID', model: '模型 ID' }).map(([field, label]) => h('input', {
+						key: field, style: inputStyle, 'aria-label': label, placeholder: label, disabled: busy,
+						value: draft[field], onChange: (e) => edit({ ...draft, [field]: e.target.value }),
+					})),
+					h('button', { key: 'inherit', type: 'button', style: S.btn, disabled: busy || !key,
+						onClick: () => edit({ provider: '', model: '' }) }, '改为继承默认模型'),
+				]
+			} else {
+				const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+				const label = ({ id, name }) => name && name !== id ? `${name}（${id}）` : id
+				const options = new Map([['', { provider: '', model: '' }]])
+				let selectedOutsideSearch = ''
+				const groups = catalog.groups.map((group) => {
+					const models = group.models.map((model) => {
+						const selection = { provider: group.id, model: model.id }
+						const value = routeKey(selection)
+						options.set(value, selection)
+						const text = `${group.id} ${group.name || ''} ${model.id} ${model.name || ''}`.toLowerCase()
+						if (!terms.every((term) => text.includes(term))) {
+							if (value === key) selectedOutsideSearch = `${label(group)} / ${label(model)}`
+							return null
+						}
+						return h('option', { key: value, value }, label(model))
+					}).filter(Boolean)
+					return models.length ? h('optgroup', { key: group.id, label: label(group) }, models) : null
+				}).filter(Boolean)
+				const unavailable = savedKey && !options.has(savedKey)
+				if (unavailable) options.set(savedKey, catalog.selection)
+				fields = [
+					h('input', { key: 'search', type: 'search', style: inputStyle, 'aria-label': chat ? '搜索 QQ 回话模型' : '搜索记忆模型',
+						placeholder: '搜索提供商或模型', value: query, disabled: busy, onChange: (e) => setQuery(e.target.value) }),
+					h('select', { key: 'select', style: inputStyle, 'aria-label': chat ? 'QQ 新会话模型' : '记忆整理模型', value: key, disabled: busy,
+						onChange: (e) => { const selection = options.get(e.target.value); if (selection) edit(selection) } }, [
+						h('option', { key: 'inherit', value: '' }, chat ? '继承 DSH 默认模型' : '继承后台任务默认模型'),
+						unavailable ? h('option', { key: savedKey, value: savedKey },
+							`当前配置不可用：${catalog.selection.provider || '（未填写）'} / ${catalog.selection.model || '（未填写）'}`) : null,
+						selectedOutsideSearch ? h('option', { key, value: key }, selectedOutsideSearch) : null,
+						...groups,
+					]),
+					!groups.length ? h('span', { key: 'empty', style: SM.dim }, terms.length ? '无匹配模型' : '目录没有可选模型') : null,
+				]
+			}
+
+			const fallback = chat && catalog?.fallback
+			return h('div', null, [
+				h('div', { key: 'title', style: S.pgroup }, chat ? 'QQ 新会话模型' : '记忆整理专用模型（后台任务）'),
+				h('div', { key: 'fields', style: S.row }, fields, catalog ? h('button', {
+					key: 'save', type: 'button', style: S.btn, disabled: !canSave, onClick: save,
+				}, chat ? '保存 QQ 新会话模型' : '保存记忆模型') : null),
+				h('div', { key: 'hint', style: SM.dim }, chat
+					? '仅影响新建的 QQ 群聊和私聊会话，已有会话、网页会话和记忆整理模型不变。'
+					: '仅影响记忆整理，不改变 QQ 聊天模型。模型不可用或调用失败会报错，不会静默换用其他模型。'),
+				fallback ? h('div', { key: 'chat-fallback', style: S.row, role: 'status' },
+					`⚠ 最近一次模型回退（${new Date(fallback.at).toLocaleString('zh-CN')}）：配置的 ${fallback.provider} / ${fallback.model} 不可用，新会话改用 DSH 默认模型。`) : null,
+				note ? h('div', { key: 'note', style: S.msg, role: 'status' }, note) : null,
+			])
+		}
+
 		function GroupMemory(props) {
 			const { ctx } = props
 			const { useState, useEffect, useCallback } = react
@@ -1448,7 +1556,7 @@ window.__ModuleLoader__.load({
 			const schedule = (cfg || []).find((c) => c.key === 'group-memory.accumulateSchedule')
 			const daily = (schedule ? schedule.value : acc.schedule) === 'daily'
 			const modelKeys = ['accumulateModelProvider', 'accumulateModel']
-			const basicKeys = ['enabled', 'accumulateEnabled', 'accumulateSchedule', 'accumulateDailyTime', 'accumulateTimezone', ...modelKeys]
+			const basicKeys = ['enabled', 'accumulateEnabled', 'accumulateSchedule', 'accumulateDailyTime', 'accumulateTimezone']
 			const intervalKeys = ['accumulateIntervalHours', 'accumulateMode', 'accumulateLookbackHours', 'accumulateMinNewMsgs', 'accumulateSectionMaxItems', 'accumulateKeepDays', 'accumulateKeepRows']
 			const keyOf = (c) => c.key.replace(/^group-memory\./, '')
 			const visibleControl = (c) => daily ? !intervalKeys.includes(keyOf(c)) : !['accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays'].includes(keyOf(c))
@@ -1507,12 +1615,8 @@ window.__ModuleLoader__.load({
 					'启动前的旧聊天不自动回灌。长期事实与近期事件分开维护，近期事件到期清理。' +
 					'模型通过 read_memory 读取本会话；这里仍可手改，保存前备份旧版到 .revisions/。'),
 
-				h('div', { key: 'schedule' }, (cfg || []).filter((c) => basicKeys.includes(keyOf(c)) && !modelKeys.includes(keyOf(c)) && visibleControl(c)).map((c) => ctrlRow(c, cfgApi))),
-				h('div', { key: 'model' }, [
-					h('div', { key: 'title', style: S.pgroup }, '记忆整理专用模型（后台任务）'),
-					...(cfg || []).filter((c) => modelKeys.includes(keyOf(c))).map((c) => ctrlRow(c, cfgApi)),
-					h('div', { key: 'hint', style: SM.dim }, '仅影响记忆整理，不改变 QQ 聊天模型。提供商与模型 ID 必须成对填写；同时留空则继承后台任务默认模型。配置不完整、模型不可用或调用失败会报错，不会静默换用其他模型；填写时先完成两项，再手动处理。'),
-				]),
+				h('div', { key: 'schedule' }, (cfg || []).filter((c) => basicKeys.includes(keyOf(c)) && visibleControl(c)).map((c) => ctrlRow(c, cfgApi))),
+				h(MemoryModelPicker, { key: 'model', call, busy, setBusy }),
 				h('div', { key: 'status', style: { fontSize: 12, lineHeight: 1.8 }, 'aria-live': 'polite' }, [
 					h('div', { key: 'next' }, `自动处理：${acc.enabled ? '开启' : '关闭（可手动处理）'}　下次：${stamp(acc.nextDueAt)}（${acc.timezone || 'Asia/Shanghai'}）`),
 					acc.pendingCount !== undefined ? h('div', { key: 'pending' }, `上轮待办：${acc.pendingCount} 个会话（不含尚未扫描的新互动）`) : null,
@@ -1534,7 +1638,7 @@ window.__ModuleLoader__.load({
 					h('button', { style: S.btn, disabled: busy, onClick: toggleCfg },
 						(cfgOpen ? '▾ 收起高级配置' : '▸ 高级配置（预算 / 保留 / 历史版本）')),
 					cfgOpen && cfg ? h('div', { key: 'body', style: { marginTop: 6 } }, (() => {
-						const advanced = cfg.filter((c) => !basicKeys.includes(keyOf(c)) && visibleControl(c))
+						const advanced = cfg.filter((c) => !basicKeys.includes(keyOf(c)) && !modelKeys.includes(keyOf(c)) && visibleControl(c))
 						const gs = []
 						for (const c of advanced) if (!gs.includes(c.group)) gs.push(c.group)
 						return gs.map((gname) => h('div', { key: 'g' + gname }, [

@@ -816,6 +816,53 @@ async function memoryHarness(t, cfg = {}) {
   return { h, endpoints, memDir }
 }
 
+test('群记忆模型目录仅暴露显示字段，成对保存、拒绝失效路线，并支持继承和兼容手填', async (t) => {
+  const { h, endpoints } = await memoryHarness(t, { accumulateModelProvider: 'old', accumulateModel: 'gone' })
+  h.kernel.dsh.modelCatalog = async () => ({ groups: [
+    { id: 'p', name: '渠道 P', secret: 'hidden', models: [{ id: 'same', name: '同名', internal: 'hidden' }] },
+    { id: 'q', models: [{ id: 'same', name: '同名' }] },
+  ] })
+  const rpc = (op, payload) => endpoints.handle('memory', { op, ...payload })
+  const readPair = () => {
+    const cfg = JSON.parse(fs.readFileSync(h.configPath, 'utf8')).pluginConfig['group-memory']
+    return [cfg.accumulateModelProvider, cfg.accumulateModel]
+  }
+  const catalog = await rpc('model-catalog')
+  assert.equal(catalog.available, true)
+  assert.deepEqual(catalog.selection, { provider: 'old', model: 'gone' })
+  assert.deepEqual(catalog.groups[0], { id: 'p', name: '渠道 P', models: [{ id: 'same', name: '同名' }] })
+  assert.equal((await rpc('model-select', { provider: 'q', model: '' })).ok, false)
+  assert.equal((await rpc('model-select', { provider: 'missing', model: 'same', manual: true })).ok, false)
+  assert.deepEqual(readPair(), ['old', 'gone'])
+  const reload = h.kernel.reloadConfig
+  let writes = 0
+  h.kernel.reloadConfig = async () => { writes++; assert.deepEqual(readPair(), ['q', 'same']); return reload() }
+  assert.equal((await rpc('model-select', { provider: 'q', model: 'same' })).ok, true)
+  assert.equal(writes, 1)
+  h.kernel.reloadConfig = reload
+  h.kernel.dsh.modelCatalog = async () => ({ groups: [] })
+  assert.equal((await rpc('model-catalog')).available, true)
+  assert.equal((await rpc('model-select', { provider: 'p', model: 'same', manual: true })).ok, false)
+  assert.deepEqual(readPair(), ['q', 'same'])
+  h.kernel.dsh.modelCatalog = async () => { throw new Error('internal detail') }
+  const unavailable = await rpc('model-catalog')
+  assert.equal(unavailable.available, false)
+  assert.doesNotMatch(JSON.stringify(unavailable), /internal detail/)
+  assert.equal((await rpc('model-select', { provider: 'p', model: 'same' })).ok, false)
+  assert.equal((await rpc('model-select', { provider: 'p', model: 'same', manual: true })).ok, true)
+  assert.equal((await rpc('model-select', { provider: '', model: '' })).ok, true)
+  assert.deepEqual(readPair(), ['', ''])
+  h.kernel.dsh.modelCatalog = async () => ({ groups: [{ id: 'p', models: [{ id: 'same' }] }] })
+  h.kernel.dsh.chatModelFallback = () => ({ provider: 'old', model: 'gone', at: 123 })
+  assert.deepEqual((await rpc('model-catalog', { scope: 'chat' })).fallback, { provider: 'old', model: 'gone', at: 123 })
+  assert.equal((await rpc('model-catalog')).fallback, undefined)
+  assert.equal((await rpc('model-select', { scope: 'other', provider: 'p', model: 'same' })).ok, false)
+  assert.equal((await rpc('model-select', { scope: 'chat', provider: 'p', model: 'same' })).ok, true)
+  assert.deepEqual(h.kernel.runtime.dsh.chatModelSelection, { provider: 'p', model: 'same' })
+  assert.deepEqual((await rpc('model-catalog', { scope: 'chat' })).selection, { provider: 'p', model: 'same' })
+  assert.deepEqual(readPair(), ['', ''])
+})
+
 test('群记忆控制台：save 带 ifMtime 时拒绝陈旧覆盖（积累器刚写过）', async (t) => {
   const { h, endpoints, memDir } = await memoryHarness(t)
   const file = path.join(memDir, `${GROUP_ID}.md`)

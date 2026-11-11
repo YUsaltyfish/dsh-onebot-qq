@@ -20,7 +20,9 @@ test('分组命名：消息设置 / 主动接话；旧页名不再出现', async
   const groups = schema.groups.map((g) => g.name)
   assert.ok(groups.includes('消息设置'), '应有「消息设置」页')
   assert.ok(groups.includes('主动接话'), '应有「主动接话」页')
-  for (const old of ['回话细节', '回话模式', '回话模式·高级']) {
+  assert.ok(groups.includes('OneBot 连接'), '模型入口所在专用页必须真实存在')
+  assert.equal(schema.controls.some((c) => c.key.startsWith('persona-voice.splitReply')), false, '旧拆条字段不能再生成重复控件')
+  for (const old of ['回话', '回话细节', '回话模式', '回话模式·高级']) {
     assert.equal(groups.includes(old), false, `旧分组名不应再出现：${old}`)
   }
 })
@@ -141,7 +143,6 @@ test('引用拦截开关在「句池」页（persona-voice 一对一），标签
   assert.equal(q.group, '句池', '应归到句池页（persona-voice 一对一）')
   assert.match(String(q.label), /不引用/, '标签应说明「不引用刚触发回复的那条消息」')
   assert.ok(String(q.hint).includes('引用门槛'), '解释里应带「引用门槛」这个上下游关系')
-  assert.equal(schema.groups.some((g) => g.name === '回话'), false, '「回话」页应已并入消息设置')
 })
 
 test('文件与图片页：行为类开关都在同一页；目录 / 白名单在「其他」页', async (t) => {

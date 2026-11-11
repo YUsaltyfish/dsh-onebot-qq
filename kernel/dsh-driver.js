@@ -61,6 +61,13 @@ export function createDshDriver(opts) {
     workspacePath: String(opts.workspacePath || ''),
     workspaceId: String(opts.workspaceId || ''),
     agentPreset: String(opts.agentPreset || ''),
+    chatModelSelection: opts.chatModelSelection,
+  }
+  let chatModelFallback = null
+
+  function configuredChatModel() {
+    const { provider = '', model = '' } = settings.chatModelSelection || {}
+    return { provider: String(provider).trim(), model: String(model).trim() }
   }
 
   const sessions = new Map()      // chatKey -> sessionId
@@ -186,7 +193,27 @@ export function createDshDriver(opts) {
     const inflight = creating.get(chatKey)
     if (inflight) return inflight      // 同一条线两条消息同秒进来时，别建出两条会话
     const task = (async () => {
-      const sessionId = await ipCreateSession()
+      const selection = configuredChatModel()
+      let sessionId = await ipCreateSession()
+      if (!closed && (selection.provider || selection.model)) {
+        let attempted = false
+        try {
+          if (!selection.provider || !selection.model) throw new Error('模型提供商与模型 ID 必须成对填写')
+          await selectSessionModel(sessionId, selection, () => { attempted = true })
+        } catch (error) {
+          if (!closed) {
+            // A failed selection can have already changed the session; never prompt that session as a fallback.
+            if (attempted) {
+              await archive(sessionId).catch(() => {})
+              if (!closed) sessionId = await ipCreateSession()
+            }
+            if (!closed) {
+              chatModelFallback = { ...selection, at: Date.now() }
+              log.warn(`新建 QQ 会话无法应用指定模型，沿用 DSH 默认：${error.message}`)
+            }
+          }
+        }
+      }
       if (closed) {
         try { await archive(sessionId) } catch (e) { log.debug(`归档未提交会话失败 (${sessionId}): ${e.message}`) }
         throw new Error('会话驱动已关闭')
@@ -363,7 +390,7 @@ export function createDshDriver(opts) {
       }
       try {
         if (selection) {
-          await selectIsolatedModel(sessionId, selection)
+          await selectSessionModel(sessionId, selection)
           // Selection validation may await provider catalog/auth resolution. Close or
           // timeout while it was pending must never admit a default-route prompt.
           if (closed || stopped) {
@@ -389,17 +416,18 @@ export function createDshDriver(opts) {
     return { ok: Boolean(out), sessionId, text: out, reason }
   }
 
-  /**
-   * Installed DSH 0.2.2 sessionController.create accepts no initial model route;
-   * selectModel also persists the deployment default (SessionCommandController).
-   * Use that controller's same host AgentModel.select primitive on this fresh,
-   * unprompted task only. Never call selectModel/saveSelection or change defaults.
-   * Fail closed if any required host capability or exact catalog route is absent; dispatch reports credential failures.
-   */
-  async function selectIsolatedModel(sessionId, selection) {
-    const { provider, model } = selection
-    if (typeof ctx.sessionController.modelCatalog !== 'function') throw new Error('后台任务专用模型不可用：modelCatalog 服务不可用')
+  async function modelCatalog() {
+    if (typeof ctx.sessionController?.modelCatalog !== 'function') throw new Error('modelCatalog 服务不可用')
     const catalog = await ctx.sessionController.modelCatalog()
+    if (!Array.isArray(catalog?.groups)) throw new Error('modelCatalog 返回格式不受支持')
+    return catalog
+  }
+
+  // DSH create does not accept a route; controller.selectModel also saves the global default.
+  // Select only on the fresh, unprompted session. The caller decides whether to fall back.
+  async function selectSessionModel(sessionId, selection, beforeSelect) {
+    const { provider, model } = selection
+    const catalog = await modelCatalog()
     const group = catalog?.groups?.find((entry) => entry.id === provider)
     if (!group?.models?.some((entry) => entry.id === model)) throw new Error(`后台任务专用模型不可用：${provider}/${model}`)
     const llm = ctx.get('llm')
@@ -409,6 +437,7 @@ export function createDshDriver(opts) {
     if (closed) throw new Error('会话驱动已关闭')
     const agent = agents.get(sessionId)
     if (typeof agent?.model?.select !== 'function' || typeof agent?.model?.current !== 'function') throw new Error('后台任务专用模型不可用：缺少会话级模型选择能力')
+    beforeSelect?.()
     await agent.model.select(selection)
     const actual = agent.model.current()
     if (actual?.provider !== provider || actual?.model !== model) throw new Error('后台任务专用模型选择未生效；拒绝回落默认模型')
@@ -708,7 +737,7 @@ export function createDshDriver(opts) {
    *  · workspacePath / agentPreset 对**后续新建会话**生效（已建会话保持原绑定）。
    * @returns {Promise<{sessionsReloaded:boolean}>}
    */
-  async function applyConfig({ sessionsFile, workspacePath, workspaceId, agentPreset } = {}) {
+  async function applyConfig({ sessionsFile, workspacePath, workspaceId, agentPreset, chatModelSelection } = {}) {
     let sessionsReloaded = false
     if (typeof sessionsFile === 'string' && sessionsFile.trim() && sessionsFile !== settings.sessionsFile) {
       settings.sessionsFile = sessionsFile
@@ -722,6 +751,7 @@ export function createDshDriver(opts) {
     if (typeof workspacePath === 'string' && workspacePath.trim()) settings.workspacePath = workspacePath
     if (typeof workspaceId === 'string' && workspaceId.trim()) settings.workspaceId = workspaceId
     if (typeof agentPreset === 'string') settings.agentPreset = agentPreset
+    if (chatModelSelection !== undefined) settings.chatModelSelection = chatModelSelection
     return { sessionsReloaded }
   }
 
@@ -766,6 +796,8 @@ export function createDshDriver(opts) {
     findChatKeyBySession,
     forgetSession,
     runIsolatedTask,
+    modelCatalog,
+    chatModelFallback: () => chatModelFallback && { ...chatModelFallback },
     onTurnStart,
     onTurnEnd,
     fetchGroupContext,

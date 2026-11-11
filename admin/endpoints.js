@@ -1038,6 +1038,48 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const op = toStr(payload.op) || 'list'
     const raw = store.read()
 
+    if (op === 'model-catalog' || op === 'model-select') {
+      if (payload.scope !== undefined && !['chat', 'memory'].includes(payload.scope)) throw new Error('未知模型设置范围')
+      const chat = payload.scope === 'chat'
+      const cfg = pluginCfg(raw, 'group-memory')
+      const current = chat ? raw.dsh?.chatModelSelection : { provider: cfg.accumulateModelProvider, model: cfg.accumulateModel }
+      const selection = { provider: toStr(current?.provider).trim(), model: toStr(current?.model).trim() }
+      const selecting = op === 'model-select'
+      if (selecting && (typeof payload.provider !== 'string' || typeof payload.model !== 'string')) throw new Error('请同时提交模型提供商与模型 ID')
+      const provider = selecting ? payload.provider.trim() : ''
+      const model = selecting ? payload.model.trim() : ''
+      if (selecting && Boolean(provider) !== Boolean(model)) throw new Error('模型提供商与模型 ID 必须成对填写或同时留空')
+      let groups = []
+      let available = false
+      if (!selecting || provider) {
+        try {
+          const catalog = await kernel.dsh?.modelCatalog?.()
+          available = Array.isArray(catalog?.groups)
+          if (available) groups = catalog.groups.filter((g) => typeof g?.id === 'string' && g.id && Array.isArray(g.models)).map((g) => ({
+            id: g.id, name: toStr(g.name) || g.id,
+            models: g.models.filter((m) => typeof m?.id === 'string' && m.id).map((m) => ({ id: m.id, name: toStr(m.name) || m.id })),
+          }))
+        } catch { /* 目录读取失败不回显提供商内部错误 */ }
+      }
+      if (!selecting) {
+        const fallback = chat ? kernel.dsh?.chatModelFallback?.() : null
+        return { ok: true, op, available, groups, selection, ...(fallback ? { fallback } : {}) }
+      }
+      if (provider && (available
+        ? !groups.some((g) => g.id === provider && g.models.some((m) => m.id === model))
+        : payload.manual !== true)) throw new Error('该模型不在当前可用目录中，或目录暂不可读取；请刷新后重试')
+      const saved = await store.update((next) => {
+        if (chat) {
+          next.dsh ||= {}
+          next.dsh.chatModelSelection = { provider, model }
+        } else {
+          writeValue(kernel, 'group-memory.accumulateModelProvider', provider, next)
+          writeValue(kernel, 'group-memory.accumulateModel', model, next)
+        }
+      }, { what: chat ? '更新新建 QQ 会话默认模型' : '更新记忆分析模型', allowPending: true })
+      return { ok: true, op, selection: { provider, model }, pending: Boolean(saved.pending) }
+    }
+
     if (op === 'list') {
       const accumulate = memoryAccumulateStatus()
       const schedule = memorySchedule(accumulate)

@@ -588,6 +588,7 @@ export async function apply(ctx, bundleConfig = {}) {
     workspacePath: runtime.dsh.qqWorkspacePath,
     workspaceId: kernel.qqWorkspace?.id || '',
     agentPreset: runtime.dsh.agentPreset,
+    chatModelSelection: runtime.dsh.chatModelSelection ?? null,
     state,
     onebot,
     maintSessionIds: kernel.maintSessionIds,
@@ -1426,6 +1427,7 @@ export async function apply(ctx, bundleConfig = {}) {
       workspacePath: runtime.dsh.qqWorkspacePath,
       workspaceId: wsInfo?.id || kernel.qqWorkspace?.id || '',
       agentPreset: runtime.dsh.agentPreset,
+      chatModelSelection: runtime.dsh.chatModelSelection ?? null,
     })
     // 路径快照同步（人设目录可能被控制台改过；其余项随 dataDir/配置派生）
     kernel.paths = {

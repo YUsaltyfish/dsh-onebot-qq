@@ -47,6 +47,51 @@ test('dedicated isolated route selected through host model primitive before prom
  assert.equal(h.maint.size, 0)
 })
 
+test('QQ route applies only to new sessions, once per concurrent creation, independently of maintenance', async (t) => {
+  const h = fixture(t)
+  const existing = await h.driver.ensureSession('group:123456')
+  await h.driver.applyConfig({ chatModelSelection: route })
+  const [fresh, same] = await Promise.all([h.driver.ensureSession('private:123456'), h.driver.ensureSession('private:123456')])
+  assert.equal(fresh, same)
+  assert.equal(await h.driver.ensureSession('group:123456'), existing)
+  assert.deepEqual(h.sessions.get(existing).model.current(), h.default)
+  await h.driver.prompt(fresh, 'synthetic')
+  assert.deepEqual(h.calls.prompt[0].selected, route)
+  await h.driver.runIsolatedTask({ prompt: 'synthetic maintenance' })
+  assert.deepEqual(h.calls.prompt[1].selected, h.default)
+  await h.driver.applyConfig({ chatModelSelection: null })
+  const inherited = await h.driver.ensureSession('group:234567')
+  assert.deepEqual(h.sessions.get(inherited).model.current(), h.default)
+  assert.deepEqual(h.calls.select, [[fresh, route]])
+  assert.equal(h.driver.chatModelFallback(), null)
+})
+
+for (const changed of [false, true]) test(`QQ new session inherits default after route failure (selection attempted: ${changed})`, async (t) => {
+  const h = fixture(t)
+  await h.driver.applyConfig({ chatModelSelection: route })
+  if (!changed) h.controller.modelCatalog = async () => ({ groups: [] })
+  else {
+    const create = h.controller.create
+    h.controller.create = async (req) => {
+      const r = await create(req)
+      if (h.calls.create.length === 1) {
+        const model = h.sessions.get(r.sessionId).model
+        const select = model.select
+        model.select = (value) => { select(value); throw new Error('selection partly applied') }
+      }
+      return r
+    }
+  }
+  const id = await h.driver.ensureSession('group:123456')
+  await h.driver.prompt(id, 'synthetic')
+  assert.deepEqual(h.calls.prompt[0].selected, h.default)
+  assert.deepEqual(h.calls.archived, changed ? ['fixture-1'] : [])
+  assert.equal(h.calls.create.length, changed ? 2 : 1)
+  const { at, ...failed } = h.driver.chatModelFallback()
+  assert.ok(at > 0)
+  assert.deepEqual(failed, route)
+})
+
 for (const scenario of ['catalog unavailable', 'route missing', 'auth resolution failed', 'host capability absent', 'selection failed', 'selection ignored']) {
  test(`dedicated route fails closed and archives unprompted session: ${scenario}`, async (t) => {
   const h = fixture(t)

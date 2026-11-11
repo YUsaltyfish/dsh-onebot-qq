@@ -124,12 +124,13 @@ export default {
       type: 'str', default: '', group: '句池', label: '当前人设',
       hint: '留空 = 按 qq-lines 工作区的指针/软链自动解析（换人设不用改这里）',
     },
-    splitReplyEnabled: { type: 'bool', default: true, group: '回话', label: '拆条' },
-    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 1, max: 100, group: '回话', label: '拆条概率' },
-    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '回话', label: '拆条最小长度' },
-    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '回话', label: '拆条间隔' },
+    // 兼容旧配置与插件独立使用的 fallback；正式控制台隐藏这些字段，由 pacing.reply.style 接管。
+    splitReplyEnabled: { type: 'bool', default: true, group: '主动接话', label: '拆条' },
+    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 1, max: 100, group: '主动接话', label: '拆条概率' },
+    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '主动接话', label: '拆条最小长度' },
+    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '主动接话', label: '拆条间隔' },
     splitReplyMaxParts: {
-      type: 'int', default: 3, min: 2, max: 4, group: '回话', label: '最多拆几条',
+      type: 'int', default: 3, min: 2, max: 4, group: '主动接话', label: '最多拆几条',
       hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不拦腰砍句；\n'
         + '句子不够就按实际句数发（2 条就够时不会硬凑）。拆出来的每条之间隔「拆条间隔」秒。',
     },
