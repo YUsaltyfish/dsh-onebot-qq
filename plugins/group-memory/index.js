@@ -174,7 +174,7 @@ export default {
     const isPrivateLine = (key) => String(key).startsWith('private:')
 
     /**
-     * 控制台「关闭记忆的会话」：逗号/空白分隔，形如 group:123456 / private:213445357。
+     * 控制台「关闭记忆的会话」：逗号/空白分隔，形如 group:123456 / private:10001。
      * 每次现读 bot.cfg（热改立即生效）；非法项直接忽略，不让一处脏数据把整页/积累打挂。
      */
     function mutedKeys() {
@@ -279,12 +279,12 @@ export default {
         + '之后收到「记忆已更新」提示时再重读。只能读本轮会话那一篇，读不到别的群/私聊。',
       // DSH `defineTool` 的 parameters 是**扁平**的「属性名 → 值 schema」映射；required 写在属性上。
       parameters: {
-        target: { type: 'string', required: true, description: '会话目标，形如 group:123456 或 private:213445357（通常填本轮会话，见开头 [QQ会话 …]）' },
+        target: { type: 'string', required: true, description: '会话目标，形如 group:123456 或 private:10001（通常填本轮会话，见开头 [QQ会话 …]）' },
       },
       execute(args) {
         const target = String(args?.target || '')
         const m = /^(group|private):(\d{4,12})$/.exec(target) // 4–12 位纯数字：顺手挡路径穿越，也挡住唤醒词表里的 "*"
-        if (!m) throw new Error('read_memory 的 target 形如 group:123456 或 private:213445357')
+        if (!m) throw new Error('read_memory 的 target 形如 group:123456 或 private:10001')
         if (cfg.enabled === false) throw new Error('记忆读取已关闭')
         if (isMuted(target)) throw new Error('这个会话的记忆已关闭（控制台「群记忆」页把它的开关打开即可）')
         // 只读本轮会话：别的群/私聊不可能是本轮 → 拒绝，别让这条路变成读别处的记忆

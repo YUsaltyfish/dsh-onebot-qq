@@ -15,8 +15,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function ev(over = {}) {
   const e = {
-    chatKey: 'private:213445357', isGroup: false, groupId: null, messageId: 1,
-    sender: { qq: 213445357, name: '主人', isMaster: true },
+    chatKey: 'private:10001', isGroup: false, groupId: null, messageId: 1,
+    sender: { qq: 10001, name: '主人', isMaster: true },
     text: '一句话', wake: { kind: 'private' }, _scratch: {}, hint: [], images: [], ...over,
   }
   e.turnCtx = createTurnContext(e)
@@ -42,7 +42,7 @@ test('私聊合批：等待期内新消息并入并刷新计时，安静后只�
   const merged = runs[0]
   assert.equal(merged._scratch.mergedCount, 2)
   assert.match(merged.text, /第一句/)
-  assert.match(merged.text, /\[主人\(QQ:213445357\)\]: 第二句/, '后随消息带昵称+QQ')
+  assert.match(merged.text, /\[主人\(QQ:10001\)\]: 第二句/, '后随消息带昵称+QQ')
   pacing.stop()
 })
 
@@ -109,7 +109,7 @@ test('默认收集合批原始图片但不下载，正文保留 [图片] 占位'
   pacing.submit(ev({ messageId: 1, text: '看图' }), (v) => { merged = v })
   pacing.collect(ev({ messageId: 2, text: '', images: [{ file: 'x.jpg' }], wake: null }))
   pacing.collect(ev({ messageId: 3, text: '这张', images: [{ file: 'y.jpg' }], wake: null }))
-  pacing.flush('private:213445357')
+  pacing.flush('private:10001')
   assert.match(merged.text, /\[图片\]$/m)
   assert.match(merged.text, /这张 \[图片\]/)
   assert.equal(merged.imageParts?.length ?? 0, 0, 'pacing不下载图片，留给内核统一载入')
@@ -136,7 +136,7 @@ test('开启读图按事件顺序快照来源并复用预载图片，仅同路�
   assert.deepEqual(merged.imageParts, [first, second, third])
   assert.deepEqual(merged.imagePaths, ['/loaded/first.png', '/loaded/second.png', null])
   const snapshots = merged._scratch.mergedImageEvents
-  assert.deepEqual(snapshots.map((item) => [item.sender.qq, item.messageId]), [[213445357, 11], [40002, 12]])
+  assert.deepEqual(snapshots.map((item) => [item.sender.qq, item.messageId]), [[10001, 11], [40002, 12]])
   assert.equal(snapshots[0].images.length, 1, '首条快照不受扁平聚合影响')
   assert.deepEqual(snapshots[1].imageParts, [second, first, third])
   assert.equal(merged._scratch.mergedIsMaster, false, '合并成员身份规则保持不变')
@@ -152,7 +152,7 @@ test('关闭读图仅首条图片，tail原始与已下载图片均不带入', (
     (value) => { merged = value })
   pacing.collect(ev({ messageId: 22, wake: null, text: '后图', images: [{ file: 'tail.jpg' }],
     imageParts: [{ type: 'image', data: 'tail' }], imagePaths: ['/loaded/tail.jpg'] }))
-  pacing.flush('private:213445357')
+  pacing.flush('private:10001')
   assert.deepEqual(merged.images, [{ file: 'head.jpg' }])
   assert.deepEqual(merged.imageParts, [first])
   assert.deepEqual(merged.imagePaths, ['/loaded/head.jpg'])

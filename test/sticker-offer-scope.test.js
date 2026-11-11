@@ -38,19 +38,19 @@ const ev = (chatKey, isGroup) => ({
 
 test('表情主动想起：私聊与群聊都掷骰提醒（2026-11-04 起私聊不再被跳过）', (t) => {
   const h = boot(t)
-  const dm = ev('private:213445357', false)
+  const dm = ev('private:10001', false)
   h.hooks['before-turn'](dm)
   assert.ok(dm.hint.some((x) => x.includes('[表情:')), `私聊应提示可发表情，实际 hint=${JSON.stringify(dm.hint)}`)
   assert.ok(dm._scratch.turnExtras?.stickerOffer, '私聊应记进本轮上下文')
 
-  const grp = ev('group:1127808570', true)
+  const grp = ev('group:20001', true)
   h.hooks['before-turn'](grp)
   assert.ok(grp.hint.some((x) => x.includes('[表情:')), '群聊照旧提醒')
 })
 
 test('表情主动想起：概率 0 时群聊私聊都不提醒', (t) => {
   const h = boot(t, { offerPercent: 0 })
-  for (const [key, isGroup] of [['private:213445357', false], ['group:1127808570', true]]) {
+  for (const [key, isGroup] of [['private:10001', false], ['group:20001', true]]) {
     const e = ev(key, isGroup)
     h.hooks['before-turn'](e)
     assert.equal(e.hint.length, 0, `${key} 概率 0 不应提醒`)
@@ -60,7 +60,7 @@ test('表情主动想起：概率 0 时群聊私聊都不提醒', (t) => {
 test('表情主动想起：库为空时私聊也不提醒（不为空库白跑一趟）', (t) => {
   const h = boot(t)
   fs.writeFileSync(path.join(h.dir, 'index.json'), JSON.stringify({ items: [], nextId: 1 }))
-  const dm = ev('private:213445357', false)
+  const dm = ev('private:10001', false)
   h.hooks['before-turn'](dm)
   assert.equal(dm.hint.length, 0)
 })

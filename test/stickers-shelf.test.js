@@ -1,7 +1,7 @@
 /**
  * test/stickers-shelf.test.js — 表情库清单（shelf.catalog）。
  *
- * 2026-10-28 事故：清单按 lastUsed/入库顺序排，默认只列 30 行 → 新收的 54 张「赫萝」形象图
+ * 2026-10-28 事故：清单按 lastUsed/入库顺序排，默认只列 30 行 → 新收的 54 张特定角色形象图
  * 长期排在第 195 行之后，模型一次都没见过，于是断言"库里没有角色标签"。
  * 主人定（2026-10-29）：不搞排序，整个文件夹随便挑 —— 清单改成从全库随机抽。
  */
@@ -19,7 +19,7 @@ test('表情清单：整个库随机抽，任何位置（含"最新那批"）的
   for (let id = 1; id <= 40; id++) {
     const file = `${id}.jpg`
     fs.writeFileSync(path.join(dir, file), 'x')
-    items.push({ id, hash: 'h' + id, file, tags: ['赫萝'], tagged: true, blocked: false, uses: 0, lastUsed: 0, ts: id * 1000 })
+    items.push({ id, hash: 'h' + id, file, tags: ['角色'], tagged: true, blocked: false, uses: 0, lastUsed: 0, ts: id * 1000 })
   }
   fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ items, nextId: 41 }))
 

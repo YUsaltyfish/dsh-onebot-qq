@@ -909,7 +909,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     let chat = toStr(payload.chat)
     if (!chat && payload.group_id != null) chat = `group:${toStr(payload.group_id)}`
     const m = /^(group|private):(\d{4,12})$/.exec(chat)
-    if (!m) throw new Error(`会话不合法：${JSON.stringify(payload.chat || payload.group_id)}（形如 group:123456 / private:213445357）`)
+    if (!m) throw new Error(`会话不合法：${JSON.stringify(payload.chat || payload.group_id)}（形如 group:123456 / private:10001）`)
     const kind = m[1]
     const id = m[2]
     const file = kind === 'private'

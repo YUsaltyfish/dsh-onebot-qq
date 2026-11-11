@@ -90,7 +90,7 @@ test('群记忆积累：会话记忆关闭（mutedChats）→ 自动/手动都�
 test('私聊记忆积累：读 private_*.jsonl → 写 private/<QQ>.md（工具提交 target=private:…）', async () => {
   const dataDir = tmp()
   const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
-  const QQ = '213445357'
+  const QQ = '10001'
   const now = Date.now()
   const rows = [
     { ts: now - 60_000, dir: 'in', chat: `private:${QQ}`, sender: { qq: QQ, nickname: '主人' }, text: '以后叫我老板', messageId: now - 60_000 },
@@ -102,7 +102,7 @@ test('私聊记忆积累：读 private_*.jsonl → 写 private/<QQ>.md（工具�
   let submit = null
   const runner = async ({ prompt: p }) => {
     prompt = p
-    submit({ target: `private:${QQ}`, points: '- **主人(213445357)**：要求叫「老板」' })
+    submit({ target: `private:${QQ}`, points: '- **主人(10001)**：要求叫「老板」' })
     return { ok: true, text: '已提交' }
   }
   const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
@@ -125,7 +125,7 @@ test('群记忆积累：消息够 → 调后台任务 → 写回 + 保留历史�
   const archiveDir = path.join(dataDir, 'logs', 'qq_chat')
   const now = Date.now()
   writeArchive(archiveDir, [
-    msg(now - 60_000, 111, '甲', '赫萝今天好安静'),
+    msg(now - 60_000, 111, '甲', '角色今天好安静'),
     msg(now - 50_000, 222, '乙', '她可能在忙吧'),
     msg(now - 40_000, 111, '甲', '问她个问题试试'),
   ])
@@ -133,7 +133,7 @@ test('群记忆积累：消息够 → 调后台任务 → 写回 + 保留历史�
   const runner = async ({ prompt }) => {
     called += 1
     assert.match(prompt, /甲\(111\)/)
-    return { ok: true, text: '# 群记忆\n\n## 说话风格\n- 群友喜欢逗机器人，语气轻松\n- 常用 `赫萝` 称呼它\n\n## 群里的人\n- **甲(111)**：爱开玩笑，常在晚上出现\n- **乙(222)**：话少但会接梗' }
+    return { ok: true, text: '# 群记忆\n\n## 说话风格\n- 群友喜欢逗机器人，语气轻松\n- 常用 `角色` 称呼它\n\n## 群里的人\n- **甲(111)**：爱开玩笑，常在晚上出现\n- **乙(222)**：话少但会接梗' }
   }
   const { bot, shared } = makeBot({ dataDir, archiveDir, cfg: { accumulateMinNewMsgs: 1 }, runner })
   plugin.setup(bot)
