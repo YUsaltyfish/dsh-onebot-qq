@@ -1243,8 +1243,8 @@ window.__ModuleLoader__.load({
 
 		// ═══════════ 标签页⑤：群记忆（每群一篇 Markdown，可预览可编辑） ═══════════
 		// 数据来自 RPC 端点 memory 的 list / read / save / refresh。
-		// 自动积累由插件自带的定时器负责；每日时间/时区在主面板，预算与旧间隔参数折叠。
-		// 这个页面用来「看」「人工干预」和「立刻积累一轮」—— 保存/积累都会先备份旧版到 .revisions/。
+		// 自动处理由插件自带定时器负责；每日时间/时区在主面板，预算与保留参数折叠。
+		// 这个页面用来「看」「人工干预」和「立即处理待办」—— 保存/处理都会先备份旧版到 .revisions/。
 		const SM = {
 			layout: { display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' },
 			list: { flex: '1 1 100%', minWidth: 0, maxHeight: 440, overflow: 'auto' },
@@ -1553,13 +1553,9 @@ window.__ModuleLoader__.load({
 			const groups = data.groups || []
 			const kb = (n) => n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB'
 			const acc = data.accumulate || {}
-			const schedule = (cfg || []).find((c) => c.key === 'group-memory.accumulateSchedule')
-			const daily = (schedule ? schedule.value : acc.schedule) === 'daily'
 			const modelKeys = ['accumulateModelProvider', 'accumulateModel']
-			const basicKeys = ['enabled', 'accumulateEnabled', 'accumulateSchedule', 'accumulateDailyTime', 'accumulateTimezone']
-			const intervalKeys = ['accumulateIntervalHours', 'accumulateMode', 'accumulateLookbackHours', 'accumulateMinNewMsgs', 'accumulateSectionMaxItems', 'accumulateKeepDays', 'accumulateKeepRows']
+			const basicKeys = ['enabled', 'accumulateEnabled', 'accumulateDailyTime', 'accumulateTimezone']
 			const keyOf = (c) => c.key.replace(/^group-memory\./, '')
-			const visibleControl = (c) => daily ? !intervalKeys.includes(keyOf(c)) : !['accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays'].includes(keyOf(c))
 			const stamp = (n) => {
 				if (!n) return '—'
 				try { return new Date(n).toLocaleString('zh-CN', { timeZone: acc.timezone || 'Asia/Shanghai' }) }
@@ -1583,8 +1579,8 @@ window.__ModuleLoader__.load({
 							title: '⚠️ 立即处理记忆？',
 							lines: [
 								'会调用大模型，在独立后台会话执行，不向 QQ 发消息。',
-								daily ? '仅整理本机器人实际参与的待办互动，逐会话更新人物、关系、群规与近期事件；闲聊旁观记录不当成互动。' : '旧间隔模式：处理回看窗口内的新聊天，保留原有阈值与采样设置。',
-								daily ? '预算不足的部分保留待办，不采样丢弃；已关闭记忆的会话会跳过。关闭自动处理不影响本次手动执行。' : '已关闭记忆的会话会跳过；可在高级配置中调整旧参数。',
+								'仅整理本机器人实际参与的待办互动，逐会话更新人物、关系、群规与近期事件；闲聊旁观记录不当成互动。',
+								'预算不足的部分保留待办，不采样丢弃；已关闭记忆的会话会跳过。关闭自动处理不影响本次手动执行。',
 							],
 							okLabel: '开始积累',
 							onOk: async () => {
@@ -1604,18 +1600,16 @@ window.__ModuleLoader__.load({
 						title: data.accumulate
 							? `来源：${data.accumulate.source === 'builtin' ? '插件内置调度器' : '未启用'}`
 							: '',
-					}, '自动积累：' + (String(data.schedule || '') || '—')
-						+ (data.accumulate && data.accumulate.running ? '（正在积累…）' : '')),
-					!daily && data.estimate ? h('span', { key: 'est', style: SM.dim },
-						`一轮约 ${data.estimate.approxInputTokens} token（${data.estimate.groups} 群 × ${data.estimate.msgPerGroup} 条，按当前设置估）`) : null,
+					}, '自动处理：' + (String(data.schedule || '') || '—')
+						+ (data.accumulate && data.accumulate.running ? '（正在处理…）' : '')),
 				]),
 
 				h('div', { style: SM.dim, key: 'hint' },
-					'每群 / 每私聊一篇 Markdown。每日模式只整理本机器人实际参与的互动，不总结旁观闲聊；' +
+					'每群 / 每私聊一篇 Markdown。每天只整理本机器人实际参与的互动，不总结旁观闲聊；' +
 					'启动前的旧聊天不自动回灌。长期事实与近期事件分开维护，近期事件到期清理。' +
 					'模型通过 read_memory 读取本会话；这里仍可手改，保存前备份旧版到 .revisions/。'),
 
-				h('div', { key: 'schedule' }, (cfg || []).filter((c) => basicKeys.includes(keyOf(c)) && visibleControl(c)).map((c) => ctrlRow(c, cfgApi))),
+				h('div', { key: 'schedule' }, (cfg || []).filter((c) => basicKeys.includes(keyOf(c))).map((c) => ctrlRow(c, cfgApi))),
 				h(MemoryModelPicker, { key: 'model', call, busy, setBusy }),
 				h('div', { key: 'status', style: { fontSize: 12, lineHeight: 1.8 }, 'aria-live': 'polite' }, [
 					h('div', { key: 'next' }, `自动处理：${acc.enabled ? '开启' : '关闭（可手动处理）'}　下次：${stamp(acc.nextDueAt)}（${acc.timezone || 'Asia/Shanghai'}）`),
@@ -1638,7 +1632,7 @@ window.__ModuleLoader__.load({
 					h('button', { style: S.btn, disabled: busy, onClick: toggleCfg },
 						(cfgOpen ? '▾ 收起高级配置' : '▸ 高级配置（预算 / 保留 / 历史版本）')),
 					cfgOpen && cfg ? h('div', { key: 'body', style: { marginTop: 6 } }, (() => {
-						const advanced = cfg.filter((c) => !basicKeys.includes(keyOf(c)) && !modelKeys.includes(keyOf(c)) && visibleControl(c))
+						const advanced = cfg.filter((c) => !basicKeys.includes(keyOf(c)) && !modelKeys.includes(keyOf(c)))
 						const gs = []
 						for (const c of advanced) if (!gs.includes(c.group)) gs.push(c.group)
 						return gs.map((gname) => h('div', { key: 'g' + gname }, [
@@ -1650,7 +1644,7 @@ window.__ModuleLoader__.load({
 						'💡 换算口径：1 汉字 ≈ 3.2 字节，1 token ≈ 1.4 汉字（即 1000 字节 ≈ 310 字 ≈ 220 token）。　' +
 						'鼠标停在任意一行（或那个 ⓘ）上会显示用途和影响。　' +
 						'改完立刻落盘（写入前备份 config.json）并热重载：读取侧马上生效，积累器下一轮按新值跑。　' +
-						(daily ? '每日模式超出预算保留待办，不采样丢弃；会话超限需上调预算后重试，不会自动截短。近期事件保留天数与历史版本数量在此设置。' : '旧间隔模式保留原有采样、阈值与积累方式；每日模式不使用这些阈值。')) : null,
+						'超出预算保留待办，不采样丢弃；会话超限需上调预算后重试，不会自动截短。近期事件保留天数与历史版本数量在此设置。') : null,
 				]),
 
 				h('div', { style: SM.layout, key: 'body' }, [

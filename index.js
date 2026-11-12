@@ -34,6 +34,7 @@ import { OneBotAdapter } from './kernel/onebot-adapter.js'
 import { ChatState, Pipeline, createDeliver, turnStore } from './kernel/state-pipeline.js'
 import { createPacing } from './kernel/pacing.js'
 import { readLocalBytes, fetchBytes } from './kernel/media-bytes.js'
+import { loadSharp } from './platform/sharp.js'
 import { createDshDriver } from './kernel/dsh-driver.js'
 import { createMaintenance } from './ops/maintenance.js'
 import { startCompatServer } from './kernel/compat-server.js'
@@ -58,42 +59,32 @@ function isSessionGone(e) {
   return /session\/not-found|session[^\n]{0,20}not[-\s]?found|未知会话|会话不存在/i.test(text)
 }
 
-/** 借用 DSH 自带的 sharp 将超长截图（单边 > 8000px）缩到附件限额内；拿不到 sharp 时原样返回。 */
-let sharpMod
-function getSharp() {
-  if (sharpMod !== undefined) return sharpMod
-  const candidates = []
-  const configured = String(process.env.DSH_QQ_SHARP || '').trim()
-  if (configured) candidates.push(configured)
-  candidates.push('sharp')
-  // DSH 自己装了一份 sharp（dsh 安装目录/node_modules/sharp）：从 dsh 可执行文件路径反推，
-  // 避免硬编码安装路径（Linux / Windows / 自定义 prefix 都适用）。
-  try {
-    const argv1 = process.argv[1] ? path.resolve(process.argv[1]) : ''
-    const marker = `${path.sep}@deepseek-ai${path.sep}dsh${path.sep}`
-    const at = argv1.indexOf(marker)
-    if (at >= 0) candidates.push(path.join(argv1.slice(0, at + marker.length - 1), 'node_modules', 'sharp'))
-  } catch { /* 推不出来就只试包名 */ }
-  for (const cand of candidates) {
-    try { sharpMod = require(cand); break } catch { /* 试下一个 */ }
-  }
-  if (sharpMod === undefined) sharpMod = null
-  return sharpMod
-}
+/** 入站长图上限（超过的单边缩到 8000px，防附件限额）；群上文图另走小图档。 */
+const INBOUND_IMAGE_MAX_SIDE = 8000
+/**
+ * 群上文图的缩放上限：长边 ≤768px。
+ * 视觉 token 实测：544 方图 184、768 方图 382、1024 方图 652；768 是"还认得出梗图/截图大意"和成本的折中。
+ */
+const CONTEXT_IMAGE_MAX_SIDE = 768
 
-async function shrinkImageForModel(buf) {
-  const MAX_SIDE = 8000
-  const sharp = getSharp()
+/**
+ * 入站图缩放：只缩不放大；缩完反而更大（极少见）就保留原图。
+ * 拿不到 sharp 时原样返回（由 DSH 适配器自己压），绝不阻塞聊天。
+ */
+async function shrinkImageForModel(buf, { maxSide = INBOUND_IMAGE_MAX_SIDE, quality = 88 } = {}) {
+  const sharp = loadSharp()
   if (!sharp) return buf
   try {
     const meta = await sharp(buf, { limitInputPixels: false }).metadata()
-    const side = Math.max(Number(meta.width) || 0, Number(meta.height) || 0)
-    if (side <= MAX_SIDE) return buf
-    const wide = (Number(meta.width) || 0) >= (Number(meta.height) || 0)
+    const width = Number(meta.width) || 0
+    const height = Number(meta.height) || 0
+    const side = Math.max(width, height)
+    if (side <= maxSide) return buf
+    const wide = width >= height
     const out = await sharp(buf, { limitInputPixels: false })
-      .resize(wide ? { width: MAX_SIDE } : { height: MAX_SIDE })
+      .resize(wide ? { width: maxSide } : { height: maxSide })
       .flatten({ background: '#ffffff' })
-      .jpeg({ quality: 88 })
+      .jpeg({ quality })
       .toBuffer()
     return out.length && out.length < buf.length ? out : buf
   } catch {
@@ -855,6 +846,23 @@ export async function apply(ctx, bundleConfig = {}) {
     await def.handler(ev, rest)
   }, { order: 5, pluginId: 'kernel:commands' })
 
+  /**
+   * 拉群上文写进 `ev.historyBlock`；开启「上文图片入站」时顺带收集窗口里的图片
+   * （写进 `ev._scratch.contextImages`，由 runTurn 的 loadEventImages 统一下载缩放）。
+   * 图片数量在驱动层已按「入站条数上限」同步封顶，这里不再另设上限。
+   */
+  async function attachGroupContext(ev, ctxCount) {
+    const wantImages = runtime.outbound?.groupContextImages === true
+    if (wantImages && typeof dsh.fetchGroupContextDetailed === 'function') {
+      const detail = await dsh.fetchGroupContextDetailed(ev, ctxCount)
+      if (detail?.block) ev.historyBlock = String(detail.block).replace(/^\n+/, '')
+      if (Array.isArray(detail?.images) && detail.images.length) ev._scratch.contextImages = detail.images
+      return
+    }
+    const block = await dsh.fetchGroupContext(ev, ctxCount)
+    if (block) ev.historyBlock = String(block).replace(/^\n+/, '')
+  }
+
   // ── 内置管线钩子 2：before-turn 补齐群聊增量上文、引用消息与多模态识图缩放 ──────────
   pipeline.use('before-turn', async (ev) => {
     if (ev.stopped || !ev.wake) return
@@ -862,8 +870,7 @@ export async function apply(ctx, bundleConfig = {}) {
     const ctxCount = Number(runtime.outbound?.groupContextCount ?? runtime.groupContextCount ?? 5)
     if (ev.isGroup && !ev.historyBlock && ctxCount > 0 && typeof dsh.fetchGroupContext === 'function') {
       try {
-        const block = await dsh.fetchGroupContext(ev, ctxCount)
-        if (block) ev.historyBlock = block.replace(/^\n+/, '')
+        await attachGroupContext(ev, ctxCount)
       } catch (e) { log.warn(`拉取群上文失败: ${e.message}`) }
     }
     // 2. 引用消息正文与被引图反查（供 buildPromptText 的 quoteText 与识图使用）
@@ -919,14 +926,54 @@ export async function apply(ctx, bundleConfig = {}) {
     // 图片描述（含被引图）已齐；实际读图延后到合批完成后的 runTurn，避免下载未成轮/被排除的尾图。
   }, { order: 50, pluginId: 'kernel:context' })
 
+  /**
+   * 一张入站图（`{url,file}`）→ 原始字节。协议端溯源失败就试原始 URL；取不到返回 null。
+   * 事件图与群上文图共用这一份，避免两套下载逻辑。
+   */
+  async function readIncomingImageBytes(im, limits) {
+    const file = String(im?.file || '')
+    const url = String(im?.url || '')
+    if (!file && !url) return null
+    let buf = null
+    if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
+      buf = await readLocalBytes(file, limits)
+    } else if (file && typeof onebot.getFile === 'function') {
+      try {
+        const info = await onebot.getFile(file)
+        if (disposed) return null
+        if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) {
+          buf = await readLocalBytes(info.file, limits)
+        } else if (info?.url && /^https?:\/\//.test(info.url)) buf = await fetchBytes(info.url, limits)
+      } catch (e) { log.debug(`图片协议溯源失败，尝试原始URL: ${e.message}`) }
+    }
+    if (!buf && /^https?:\/\//.test(url)) buf = await fetchBytes(url, limits)
+    if (disposed) return null
+    return buf?.length ? buf : null
+  }
+
+  /** 图片字节 → DSH 图像块 + 落盘路径（缩放/压缩后写临时文件，供生图当参考图用）。 */
+  async function imagePartFromBytes(buf, opts) {
+    const shrunk = await shrinkImageForModel(buf, opts)
+    if (disposed) return null
+    const mediaType = detectImageMediaType(shrunk)
+    const ext = mediaType === 'image/png' ? 'png' : mediaType === 'image/gif' ? 'gif' : mediaType === 'image/webp' ? 'webp' : 'jpg'
+    const tmpPath = tmp.file('incoming', `.${ext}`)
+    fs.writeFileSync(tmpPath, shrunk)
+    return { part: { mediaType, data: shrunk.toString('base64'), name: 'qq-image' }, path: tmpPath, bytes: shrunk.length }
+  }
+
   /** 合批完成后唯一读图入口：每个消息快照独立处理，已加载消息不会挡住未加载尾图。 */
   async function loadEventImages(ev) {
     const sources = Array.isArray(ev._scratch?.mergedImageEvents) ? ev._scratch.mergedImageEvents : [ev]
+    const contextImages = Array.isArray(ev._scratch?.contextImages) ? ev._scratch.contextImages : []
     const parts = []
     const paths = []
     const seenPaths = new Set()
-    const attribution = []
-    const append = (part, imagePath, source) => {
+    // 同一张图（url/file 相同）只入站一次：引用图与上文图可能指向同一条消息。
+    const seenSources = new Set()
+    const eventAttribution = []
+    const contextAttribution = []
+    const append = (part, imagePath, source, ctx = false) => {
       if (!part?.data || !part?.mediaType) return
       const local = imagePath ? path.resolve(String(imagePath)) : ''
       if (local && seenPaths.has(local)) return
@@ -934,10 +981,13 @@ export async function apply(ctx, bundleConfig = {}) {
       parts.push(part)
       paths.push(imagePath ? String(imagePath) : null)
       const sender = source.sender || {}
-      attribution.push(`图片${parts.length} 对应消息发送者 ${senderNameOf(sender, sender.qq) || '未知发送者'}(QQ:${sender.qq ?? '?'})，消息ID:${source.messageId ?? '-'}（含引用图时不代表原作者）`)
+      const attrs = `图片${parts.length} 对应${ctx ? '上文消息' : '消息'}发送者 ${senderNameOf(sender, sender.qq) || '未知发送者'}(QQ:${sender.qq ?? '?'})，消息ID:${source.messageId ?? '-'}`
+      if (ctx) contextAttribution.push(attrs)
+      else eventAttribution.push(`${attrs}（含引用图时不代表原作者）`)
     }
     // 有界读图共用 media-bytes：单张最多20MiB，网络15秒；失败只跳过该图。
     const limits = { maxBytes: 20 * 1024 * 1024, timeoutMs: 15000 }
+    const sourceKey = (im) => String(im?.url || im?.file || '').trim()
     for (const source of sources) {
       if (disposed) return
       if (Array.isArray(source.imageParts) && source.imageParts.length) {
@@ -946,39 +996,40 @@ export async function apply(ctx, bundleConfig = {}) {
       }
       for (const im of Array.isArray(source.images) ? source.images : []) {
         if (disposed) return
-        const file = String(im?.file || '')
-        const url = String(im?.url || '')
-        if (!file && !url) continue
+        const key = sourceKey(im)
+        if (key && seenSources.has(key)) continue
+        if (key) seenSources.add(key)
         try {
-          let buf = null
-          if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
-            buf = await readLocalBytes(file, limits)
-          } else if (file && typeof onebot.getFile === 'function') {
-            try {
-              const info = await onebot.getFile(file)
-              if (disposed) return
-              if (info?.file && fs.existsSync(info.file) && fs.statSync(info.file).isFile()) {
-                buf = await readLocalBytes(info.file, limits)
-              } else if (info?.url && /^https?:\/\//.test(info.url)) buf = await fetchBytes(info.url, limits)
-            } catch (e) { log.debug(`图片协议溯源失败，尝试原始URL: ${e.message}`) }
-          }
-          if (!buf && /^https?:\/\//.test(url)) buf = await fetchBytes(url, limits)
-          if (disposed) return
-          if (!buf?.length) continue
-          buf = await shrinkImageForModel(buf)
-          if (disposed) return
-          const mediaType = detectImageMediaType(buf)
-          const ext = mediaType === 'image/png' ? 'png' : mediaType === 'image/gif' ? 'gif' : mediaType === 'image/webp' ? 'webp' : 'jpg'
-          const tmpPath = tmp.file('incoming', `.${ext}`)
-          fs.writeFileSync(tmpPath, buf)
-          append({ mediaType, data: buf.toString('base64'), name: 'qq-image' }, tmpPath, source)
+          const buf = await readIncomingImageBytes(im, limits)
+          if (!buf) continue
+          const made = await imagePartFromBytes(buf)
+          if (!made) return
+          append(made.part, made.path, source)
         } catch (e) { log.warn(`入站图片处理失败: ${e.message}`) }
       }
+    }
+    // 群聊上文图：只在配置开启时由 before-turn 写入 contextImages；小图档（长边≤768）省 token。
+    for (const im of contextImages) {
+      if (disposed) return
+      const key = sourceKey(im)
+      if (key && seenSources.has(key)) continue
+      if (key) seenSources.add(key)
+      try {
+        const buf = await readIncomingImageBytes(im, limits)
+        if (!buf) continue
+        const made = await imagePartFromBytes(buf, { maxSide: CONTEXT_IMAGE_MAX_SIDE, quality: 85 })
+        if (!made) return
+        append(made.part, made.path, im, true)
+      } catch (e) { log.warn(`上文图片处理失败: ${e.message}`) }
     }
     if (disposed) return
     ev.imageParts = parts
     ev.imagePaths = paths
-    if (sources.length > 1 && attribution.length) ev.hint.push(`[合批图片对应：${attribution.join('；')}]`)
+    if (sources.length > 1 && eventAttribution.length) ev.hint.push(`[合批图片对应：${eventAttribution.join('；')}]`)
+    if (contextAttribution.length) {
+      ev.hint.push(`[上文图片对应：${contextAttribution.join('；')}]`)
+      log.info(`[群聊上文] 图片入站 ${contextAttribution.length} 张（长边≤${CONTEXT_IMAGE_MAX_SIDE}px）`)
+    }
   }
 
   // ── 原生工具注册：必须 inject 后再注册（受限 ctx 的坑，见文件头纪律 3） ──
@@ -1233,8 +1284,7 @@ export async function apply(ctx, bundleConfig = {}) {
     const ctxCount = Number(runtime.outbound?.groupContextCount ?? runtime.groupContextCount ?? 5)
     if (ctxCount > 0 && typeof dsh.fetchGroupContext === 'function') {
       try {
-        const block = await dsh.fetchGroupContext(ev, ctxCount)
-        if (block) ev.historyBlock = block.replace(/^\n+/, '')
+        await attachGroupContext(ev, ctxCount)
       } catch (e) { log.warn(`[主动接话] 拉取群上文失败: ${e.message}`) }
     }
     ev.turnCtx = createTurnContext(ev)

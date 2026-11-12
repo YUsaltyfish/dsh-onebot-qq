@@ -63,6 +63,8 @@ export function defaultConfig() {
       longForwardChunkSize: 800,
       quoteAfterMsgs: 3,
       groupContextCount: 10,
+      // 群聊上文窗口里的真实图片是否随上文送模型（表情包不算）；默认关，按需开。
+      groupContextImages: false,
     },
     archive: { enabled: true, dir: 'logs/qq_chat' },
     toolPrefix: 'mcp__qq__',

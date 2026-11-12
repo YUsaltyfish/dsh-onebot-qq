@@ -18,9 +18,9 @@ function inspect(tree) {
   visit(tree)
   return { nodes, text: JSON.stringify(tree) }
 }
-const controls = ['accumulateModelProvider', 'accumulateModel', 'enabled', 'accumulateEnabled', 'accumulateSchedule', 'accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays', 'accumulateIntervalHours', 'accumulateMinNewMsgs', 'accumulateKeepDays', 'accumulateKeepRows', 'accumulateRetainRevisions'].map((key) => ({ key: 'group-memory.' + key, value: key === 'accumulateSchedule' ? 'daily' : '', group: 'memory' }))
+const controls = ['accumulateModelProvider', 'accumulateModel', 'enabled', 'accumulateEnabled', 'accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays', 'accumulateBatchMaxChars', 'accumulateMsgPerGroup', 'accumulateMaxChars', 'accumulateRetainRevisions', 'accumulateMaxGroupsPerRound'].map((key) => ({ key: 'group-memory.' + key, value: '', group: 'memory' }))
 function render(schedule = 'daily', overrides = {}, ctx = {}) {
-  const cfg = controls.map((c) => c.key.endsWith('.accumulateSchedule') ? { ...c, value: schedule } : c)
+  const cfg = controls.map((c) => ({ ...c }))
   const state = [{ groups: [], accumulate: { enabled: false, schedule, timezone: 'Asia/Shanghai', pendingCount: 1, pending: [{ gid: '10001', reason: '预算不足', rows: 3, chars: 42 }], lastResult: { updated: ['10001'], failed: [{ gid: '10002', detail: 'model failed' }], skipped: [], calls: 1 }, ...overrides } }, null, true, cfg, '', false, null]
   const { GroupMemory } = components({ useState: () => [state.shift(), () => {}], useEffect() {}, useCallback: (fn) => fn })
   return inspect(GroupMemory({ ctx }))
@@ -31,10 +31,9 @@ test('daily controls expose time/timezone and keep legacy thresholds out of view
   assert.ok(keys.includes('group-memory.accumulateDailyTime'))
   assert.ok(keys.includes('group-memory.accumulateTimezone'))
   assert.ok(keys.includes('group-memory.accumulateRetainRevisions'))
-  assert.ok(!keys.includes('group-memory.accumulateMinNewMsgs'))
-  assert.ok(!keys.includes('group-memory.accumulateIntervalHours'))
-  assert.ok(!keys.includes('group-memory.accumulateKeepDays'))
-  assert.ok(!keys.includes('group-memory.accumulateKeepRows'))
+  for (const gone of ['accumulateMinNewMsgs', 'accumulateIntervalHours', 'accumulateKeepDays', 'accumulateKeepRows', 'accumulateSchedule', 'accumulateMode', 'accumulateLookbackHours']) {
+    assert.ok(!text.includes(gone), `legacy control ${gone} must be gone`)
+  }
   for (const expected of ['待办：1', '预算不足', 'model failed', '最近更新会话', '关闭（可手动处理）']) assert.ok(text.includes(expected))
   assert.equal(nodes.find((n) => n.props?.key === 'acc').props.disabled, false)
 })
@@ -232,11 +231,11 @@ test('invalid configured timezone does not hide configuration or status', () => 
   assert.ok(text.includes('1970-01-01'))
   assert.ok(text.includes('Invalid time zone'))
 })
-test('interval mode retains legacy controls; a running round disables duplicate manual work', () => {
-  const { nodes } = render('interval', { running: true })
+test('legacy interval controls are gone; a running round disables duplicate manual work', () => {
+  const { nodes, text } = render('daily', { running: true })
   const keys = nodes.map((n) => n.props?.key).filter((key) => typeof key === 'string' && key.startsWith('group-memory.'))
-  assert.ok(keys.includes('group-memory.accumulateIntervalHours'))
-  assert.ok(keys.includes('group-memory.accumulateMinNewMsgs'))
-  assert.ok(!keys.includes('group-memory.accumulateDailyTime'))
+  for (const gone of ['accumulateIntervalHours', 'accumulateMinNewMsgs', 'accumulateMode', 'accumulateLookbackHours', 'accumulateKeepDays', 'accumulateKeepRows', 'accumulateSchedule']) {
+    assert.ok(!text.includes(gone), `legacy control ${gone} must be gone`)
+  }
   assert.equal(nodes.find((n) => n.props?.key === 'acc').props.disabled, true)
 })

@@ -49,3 +49,18 @@ test('memory reading strips maintenance metadata without changing the raw docume
   assert.doesNotMatch(result.memory, /qq-memory-v1|processed|id=m1/)
   assert.equal(fs.readFileSync(file, 'utf8'), raw)
 })
+
+test('read_memory hides entry IDs and timestamps but keeps them on disk, including text containing >', async (t) => {
+  const h = await bootKernel()
+  t.after(() => h.dispose())
+  const dir = path.join(h.dataDir, 'qq-memory')
+  fs.mkdirSync(dir, { recursive: true })
+  const raw = `# 对话记忆\n\n<!-- qq-memory-managed -->\n\n## 稳定记忆\n- [1] 他喜欢「<乱码>」这个梗。 （更新：2026-11-11T06:54:27.149Z）\n- [2] 别再叫旧外号。 （更新：2026-11-11T06:54:27.149Z；到期：2026-12-01T00:00:00.000Z）\n${'<!-- qq-memory-v1:{"entries":[],"processed":[],"nextId":3} -->'}\n`
+  const file = path.join(dir, `${GROUP_ID}.md`)
+  fs.writeFileSync(file, raw)
+  const result = await h.ctx._registeredTools.get('mcp__qq__read_memory').execute({ target: `group:${GROUP_ID}` })
+  assert.match(result.memory, /- 他喜欢「<乱码>」这个梗。/)
+  assert.match(result.memory, /- 别再叫旧外号。/)
+  assert.doesNotMatch(result.memory, /\[1\]|\[2\]|更新：|qq-memory-v1/)
+  assert.equal(fs.readFileSync(file, 'utf8'), raw)
+})

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createAccumulator } from '../plugins/group-memory/accumulate.js'
+import { createDailyAccumulator } from '../plugins/group-memory/daily.js'
 import { memoryModelSelection } from '../plugins/group-memory/model.js'
 import { nextDailyAt, selectInteractions, sourceId, applyOperations } from '../plugins/group-memory/daily.js'
 
@@ -45,7 +45,7 @@ function fixture(t, runner, cfg = {}) {
   fs.mkdirSync(archive)
   let acc
   const prompts = []
-  const build = () => createAccumulator({ bot: { core: { archive: { dir: archive } }, dsh: { async runIsolatedTask(req) { prompts.push(req.prompt); return runner(req, { submit: (args) => acc.submit({ batchId: /batchId="([^"]+)"/.exec(req.prompt)[1], ...args }) }) } } }, cfg, log: { warn() {} }, dataDirOf: () => dir, memoryDirOf: () => memory, invalidateMemoryOf() {} })
+  const build = () => createDailyAccumulator({ bot: { core: { archive: { dir: archive } }, dsh: { async runIsolatedTask(req) { prompts.push(req.prompt); return runner(req, { submit: (args) => acc.submit({ batchId: /batchId="([^"]+)"/.exec(req.prompt)[1], ...args }) }) } } }, cfg, log: { warn() {} }, dataDirOf: () => dir, memoryDirOf: () => memory, invalidateMemoryOf() {} })
   acc = build()
   return { dir, archive, memory, prompts, get acc() { return acc }, restart() { acc = build() }, run: () => acc.sync({ confirm: true }), append(rows, id = '123456') { fs.appendFileSync(path.join(archive, `group_${id}.jsonl`), rows.map(JSON.stringify).join('\n') + '\n') } }
 }
@@ -117,6 +117,17 @@ test('operations validate sources and IDs, update/remove stable entries, expire 
   assert.deepEqual(doc.entries.map((e) => e.id), ['stable1', 'promise1'])
   doc = applyOperations(doc, [{ op: 'remove', id: 'promise1', sourceIds: ['s'] }], sources, now)
   assert.deepEqual(doc.entries.map((e) => e.id), ['stable1'])
+})
+
+test('new entries get short numeric IDs that are never reused after removal', () => {
+  const now = Date.now(), sources = new Set(['s'])
+  let doc = { entries: [], processed: [], legacy: '' }
+  doc = applyOperations(doc, [{ op: 'add', text: 'first', section: 'stable', sourceIds: ['s'] }, { op: 'add', text: 'second', section: 'recent', sourceIds: ['s'] }], sources, now)
+  assert.deepEqual(doc.entries.map((e) => e.id), ['1', '2'])
+  doc = applyOperations(doc, [{ op: 'remove', id: '1', sourceIds: ['s'] }], sources, now)
+  doc = applyOperations(doc, [{ op: 'add', text: 'third', section: 'stable', sourceIds: ['s'] }], sources, now)
+  assert.deepEqual(doc.entries.map((e) => e.id), ['2', '3'], 'deleted IDs must not be reused')
+  assert.ok(Number(doc.nextId) >= 4)
 })
 
 test('crash-safe receipt in memory survives missing state checkpoint and no-new is successful', async (t) => {

@@ -500,19 +500,24 @@ export function createDshDriver(opts) {
    * （靠近唤醒的优先）。等待槽合并进来的后随消息已经在正文里，这里按 `mergedIds` 排除 + 不越过
    * 唤醒消息，避免同一句话出现两遍。锚点消息在窗口里找不到（被刷掉）时退化为"取到窗口末尾"。
    *
-   * 返回 `\n[群聊上文]\n[昵称(QQ:号)]: 内容…`（契约里 historyBlock 自带前缀），没新增就返回 ''。
+   * **注意返回结构**：`{ block, images }`。`block` 是 `\n[群聊上文]\n[昵称(QQ:号)]: 内容…`
+   * （契约里 historyBlock 自带前缀，没新增就 ''）；`images` 是窗口里**真实图片**（表情包不算）
+   * 的扁平列表，最多和"入站条数"同步（count 张，取最近），供内核按配置决定是否下载送模型。
+   * 兼容：旧调用方用 `fetchGroupContext()` 拿字符串（= detailed 的 block）。
+   *
    * @param {object} ev  BotMessageEvent（用 chatKey / groupId / messageId）
    * @param {number} count 最多给几条
    */
-  async function fetchGroupContext(ev, count) {
+  async function fetchGroupContextDetailed(ev, count) {
+    const empty = { block: '', images: [] }
     const onebot = onebotOf()
-    if (!ev?.groupId || !onebot || !(count > 0)) return ''
+    if (!ev?.groupId || !onebot || !(count > 0)) return empty
     try {
       const mergedIds = new Set((Array.isArray(ev._scratch?.mergedIds) ? ev._scratch.mergedIds : []).map(String))
       const anchorId = ev.messageId == null ? null : String(ev.messageId)
       // 多拉一点：窗口要同时包住"水位"和"唤醒消息"，合并进来的条数也算进去
       const list = await onebot.groupHistory(ev.groupId, count + mergedIds.size + 10)
-      if (!Array.isArray(list) || !list.length) return ''
+      if (!Array.isArray(list) || !list.length) return empty
       const state = opts.state?.get(ev.chatKey)
       let start = 0
       if (state?.lastContextId != null) {
@@ -528,7 +533,8 @@ export function createDshDriver(opts) {
       }
       const now = Date.now()
       const selfId = onebot.selfId
-      const lines = []
+      // entries 与最终注入的行一一对应：行、图片、发送者一起带着，避免"行截断了图还留着"。
+      const entries = []
       for (const m of list.slice(start, end)) {
         const mid = String(m.message_id)
         if (mergedIds.has(mid)) continue                                  // 已并进正文
@@ -538,8 +544,16 @@ export function createDshDriver(opts) {
         // 行格式与"当前消息"的前缀统一成 `[昵称(QQ:号)]: 内容`：不带号时同名/近名的人会串。
         // extractText 吃三种入参（段数组 / CQ 串 / 带 message 的对象）—— 历史条目两种形态都有。
         const raw = m.message ?? m.raw_message
-        const txt = clipChars(extractText(raw, selfId).text, 120).trim()
-        if (txt) lines.push(`[${who}(QQ:${uid})]: ${txt}`)
+        const parsed = extractText(raw, selfId)
+        const txt = clipChars(parsed.text, 120).trim()
+        if (!txt) continue
+        entries.push({
+          line: `[${who}(QQ:${uid})]: ${txt}`,
+          // 只要真实图片；表情包（[表情]）不送视觉，避免为表情水群烧 token。
+          images: (Array.isArray(parsed.images) ? parsed.images : []).filter((im) => !im.isSticker),
+          sender: { qq: Number(uid) || null, name: String(who || ''), card: m.sender?.card ?? null },
+          messageId: m.message_id ?? null,
+        })
       }
       // 水位推进到"本轮确实看过的最后一条"：合并进来的最后一条 > 唤醒消息 > 窗口末尾（无锚点时）。
       if (state) {
@@ -550,11 +564,24 @@ export function createDshDriver(opts) {
         const lastSeen = seenIdx >= 0 ? list[seenIdx] : list[list.length - 1]
         state.lastContextId = lastSeen?.message_id ?? state.lastContextId
       }
-      return lines.length ? `\n[群聊上文]\n${lines.slice(-count).join('\n')}` : ''
+      const win = entries.slice(-count)
+      // 图片与"入站条数"同步：最近 count 张（一张消息带多图时也受同一上限约束）。
+      const images = win
+        .flatMap((entry) => entry.images.map((im) => ({ ...im, sender: entry.sender, messageId: entry.messageId })))
+        .slice(-count)
+      return {
+        block: win.length ? `\n[群聊上文]\n${win.map((entry) => entry.line).join('\n')}` : '',
+        images,
+      }
     } catch (e) {
       log.debug(`取群聊上文失败 (${ev.groupId}): ${e.message}`)
-      return ''
+      return empty
     }
+  }
+
+  /** 兼容旧调用方：只要文本块（不要图片时用这个）。 */
+  async function fetchGroupContext(ev, count) {
+    return (await fetchGroupContextDetailed(ev, count)).block
   }
 
   // ── 健康探针 / 会话标题同步 ──────────────────────────────────
@@ -801,6 +828,7 @@ export function createDshDriver(opts) {
     onTurnStart,
     onTurnEnd,
     fetchGroupContext,
+    fetchGroupContextDetailed,
     syncSessionTitles,
     health,
     close,

@@ -150,6 +150,15 @@ export const CORE_CONTROLS = [
       + '0 = 完全不带上文；一般 10~20 够用；要一次性看很多条用 `/history N`，别靠这里顶。',
   },
 
+  {
+    key: 'outbound.groupContextImages', group: '群聊', type: 'bool', label: '上文图片入站',
+    default: false,
+    hint: '开：群聊「入站条数」窗口里的**真实图片**会随上文一起送进模型（表情包不算），'
+      + '数量与「入站条数上限」同步封顶（最多 N 张），长边缩到 768px 再送（实测约 180~380 token/张，均值约 270）。\n'
+      + '典型场景：群友先发图、再叫它，它不会再答"图没送到"。\n'
+      + '只在上下文窗口里出现过图时才产生费用；窗口里没图 = 零开销。默认关。',
+  },
+
   // ── 合批等待（私聊合批 / 群聊唤醒各自成轮）──────────────────
   {
     key: 'pacing.merge.enabled', group: '消息设置', type: 'bool', label: '合批等待（等对方说完再答）', default: true,

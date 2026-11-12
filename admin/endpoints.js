@@ -1009,23 +1009,16 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
   function memorySchedule(acc = memoryAccumulateStatus()) {
     if (acc.source === 'builtin') {
-      if (!acc.enabled) return { cron: '', text: '自动积累已关闭（可在本页打开「自动积累群记忆」）' }
+      if (!acc.enabled) return { cron: '', text: '自动处理已关闭（可在本页打开「自动处理记忆」）' }
       const fmt = (ts) => { try { return new Date(ts).toLocaleString('zh-CN', { hour12: false, ...(acc.timezone ? { timeZone: acc.timezone } : {}) }) } catch { return new Date(ts).toISOString() } }
-      const modeLabel = acc.mode === 'rewrite' ? '重写全文' : acc.mode === 'per-group' ? '逐群' : '增量要点'
-      const parts = acc.schedule === 'daily'
-        ? [`每日 ${acc.dailyTime}（${acc.timezone}）`, '逐会话整理互动']
-        : [`每 ${acc.intervalHours} 小时`, modeLabel]
-      const keep = []
-      if (acc.keepDays) keep.push(`${acc.keepDays} 天`)
-      if (acc.keepRows) keep.push(`${acc.keepRows} 行`)
-      if (keep.length) parts.push(`原始记录保留 ${keep.join(' / ')}`)
+      const parts = [`每日 ${acc.dailyTime}（${acc.timezone}）`, '逐会话整理互动']
       if (acc.running) parts.push('正在积累…')
       if (acc.lastRunAt) parts.push(`上次 ${fmt(acc.lastRunAt)}（${acc.lastResult?.message || '—'}）`)
       if (acc.lastError) parts.push(`⚠️ 上次失败：${String(acc.lastError).slice(0, 120)}`)
       if (acc.nextDueAt) parts.push(`下次约 ${fmt(acc.nextDueAt)}`)
       return { cron: '', text: parts.join(' · '), status: acc }
     }
-    return { cron: '', text: '（未启用自动积累；可打开「自动积累群记忆」或手动积累）', status: acc }
+    return { cron: '', text: '（未启用自动处理；可打开「自动处理记忆」或手动处理）', status: acc }
   }
 
   function memoryControls(raw) {
@@ -1126,7 +1119,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const { file } = line
       const content = String(payload.content == null ? '' : payload.content)
       if (!content.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
-      const bytes = Buffer.byteLength(content.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, ''), 'utf8')
+      const bytes = Buffer.byteLength(content.replace(/<!-- qq-memory-v1:[\s\S]*?-->\s*$/, '').replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, ''), 'utf8')
       const limit = memoryMaxBytes()
       if (bytes > limit) {
         throw new Error(`内容 ${bytes} 字节，超过单篇读取上限 ${limit} 字节（超过的部分模型读不到）。请精简，或先在「工具配置」调大 maxBytes。`)

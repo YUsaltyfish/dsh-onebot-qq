@@ -2,6 +2,16 @@
 
 所有值得用户知道的变更记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## 未发布 — 截至 2026-11-12
+
+### 新增
+- **群上文图片入站**（`outbound.groupContextImages`，默认关）：开启后，群聊「入站条数上限」窗口里的真实图片（表情包不算）随上文一起作为视觉附件送进模型，数量与入站条数同步封顶，长边缩到 768px（约 180~380 token/张）。解决「群友先发图、再叫它，它说图没送到」；窗口里没图时零开销。控制台在「群聊」页。
+
+### 移除
+
+- **旧版间隔积累（interval）整体删除**：移除 `accumulateSchedule` 选项、`accumulateIntervalHours`、`accumulateMode`（digest/rewrite/per-group）、`accumulateLookbackHours`、`accumulateKeepDays`、`accumulateKeepRows`、`accumulateMinNewMsgs`、`accumulateSectionMaxItems`，同时删除 `plugins/group-memory/accumulate.js`（约 1200 行）与其三个旧测试文件。群记忆此后只有每日整理一套实现；控制台不再显示调度方式与旧阈值。
+- 旧 `config.json` 里的上述键会被忽略，不需要手工清理；记忆文件格式、`memory_append` 工具、读取侧行为保持不变。
+
 ## 未发布 — 截至 2026-11-10
 
 以下是当前实现的合并摘要；替代本轮迭代中互相冲突的中间说明。

@@ -5,8 +5,8 @@
  *
  * 两部分职责：
  *   A. **读取侧**（每次回话前）：① before-turn 给一行"指针"；② 工具 read_memory 按群读那一篇；③ 按 mtime+size 缓存。
- *   B. **积累侧**（后台定时）：按配置的间隔，取各群最近的聊天留档 → 交给模型合并/更新这一篇 Markdown。
- *      实现拆在同目录 `accumulate.js`（同一子插件、同一组配置），由本文件 setup 时接线。
+ *   B. **积累侧**（每日定时）：逐会话整理本机器人参与的互动 → 由模型提交新增/修改/移除。
+ *      实现拆在同目录 `daily.js`（同一子插件、同一组配置），由本文件 setup 时接线。
  *
  * 三条纪律（踩出来的结论，别改）：
  *  ① **只给指针，绝不贴正文**。历史上曾把记忆正文拼进 prompt → 它拼在**用户消息**里，模型会误当成
@@ -20,7 +20,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { stripBom } from '../../platform/atomic.js'
-import { createAccumulator } from './accumulate.js'
+import { createDailyAccumulator } from './daily.js'
 
 export default {
   id: 'group-memory',
@@ -47,7 +47,7 @@ export default {
     // ── 自动积累（本插件自带定时器，不需要外部 cron）──────────────────
     accumulateEnabled: {
       type: 'bool', default: true, group: '群记忆', label: '自动处理记忆',
-      hint: '按所选调度整理本机器人参与的互动；关后仍可手动立即处理待办。',
+      hint: '每天按下面的时间整理本机器人参与的互动；关后仍可手动立即处理待办。',
     },
     accumulateModelProvider: {
       type: 'str', default: '', group: '群记忆', label: '记忆分析模型提供商',
@@ -56,11 +56,6 @@ export default {
     accumulateModel: {
       type: 'str', default: '', group: '群记忆', label: '记忆分析模型 ID',
       hint: '填写 DSH 模型目录中的内部 ID，不是显示名。指定模型不可用时保留待办并报错，不自动换模型。',
-    },
-    accumulateSchedule: {
-      type: 'enum', default: 'daily', group: '群记忆', label: '积累调度',
-      options: [{ value: 'daily', label: '每日整理互动（推荐）' }, { value: 'interval', label: '旧版间隔积累（兼容）' }],
-      hint: '每日模式逐会话整理与本机器人的互动，支持修正与移除条目；间隔模式保留旧版增量/重写行为。',
     },
     accumulateDailyTime: {
       type: 'str', default: '04:00', group: '群记忆', label: '每日执行时间',
@@ -74,50 +69,17 @@ export default {
       type: 'int', default: 14, min: 1, max: 90, group: '群记忆', label: '近期经历保留天数',
       hint: '仅近期经历自动到期；稳定记忆与未完成约定不按此时间自动删除。',
     },
-    accumulateIntervalHours: {
-      type: 'int', default: 8, min: 1, max: 24, step: 1, group: '群记忆', label: '积累间隔', unit: '小时',
-      hint: '多久跑一轮。每轮只处理「有新消息的群」；默认一批一次模型调用（群多时按下面的上限自动拆批）。',
-    },
-    accumulateMode: {
-      type: 'enum', default: 'digest', group: '群记忆', label: '积累方式',
-      options: [
-        { value: 'digest', label: '增量要点（推荐：一轮一次调用，只提炼新信息）' },
-        { value: 'rewrite', label: '重写全文（一轮一次，模型重写各群完整记忆）' },
-        { value: 'per-group', label: '逐群（每群一次调用，仅排障用）' },
-      ],
-      hint: '增量要点 = 把本轮所有群合成一次调用，模型只输出「新增要点」，本地合并进记忆文件（快、省、输出小）；重写全文 = 模型输出各群完整记忆再整篇替换（记忆更整，但输出大、慢）；逐群 = 每个群单独调用一次。',
-    },
     accumulateBatchMaxChars: {
       type: 'int', default: 200000, min: 20000, max: 600000, step: 10000, group: '群记忆', label: '单次提示词上限', unit: '字',
-      hint: '每日模式：单会话完整提示词预算，超出保留待办，不截断。旧间隔模式：控制批次输入预算。',
-    },
-    accumulateLookbackHours: {
-      type: 'int', default: 72, min: 1, max: 240, step: 1, group: '群记忆', label: '回看最近多少小时', unit: '小时',
-      hint: '首次积累/水位之前最多回看多久的聊天（已消化过的不会重复喂）；一般与「原始记录保留天数」对齐即可。',
-    },
-    accumulateKeepDays: {
-      type: 'int', default: 3, min: 0, max: 30, step: 1, group: '群记忆', label: '原始记录保留天数', unit: '天',
-      hint: '车轮式清理：每轮写完记忆后，删掉「已消化 且 超过 N 天」的聊天留档（保留今天+前 N-1 天）；0 = 永不删。未消化的记录不会删。',
-    },
-    accumulateKeepRows: {
-      type: 'int', default: 0, min: 0, max: 100000, step: 100, group: '群记忆', label: '每群最多保留多少行',
-      hint: '在「保留天数」之外的额外行数上限（只裁已消化的最旧行）；0 = 不限。',
-    },
-    accumulateSectionMaxItems: {
-      type: 'int', default: 80, min: 10, max: 500, step: 10, group: '群记忆', label: '每节条目上限',
-      hint: '增量合并时每个小节（群里的人/对话风格/其它）最多保留多少条，超出从最早的开始丢（防记忆文件无限膨胀）。',
+      hint: '单会话完整提示词预算；超出保留待办，不截断、不丢素材。',
     },
     accumulateMsgPerGroup: {
       type: 'int', default: 200, min: 20, max: 1000, step: 20, group: '群记忆', label: '每群最多取多少条',
-      hint: '每日模式：单会话互动消息预算，超出保留待办，不采样；旧间隔模式：从最近消息往前取。',
+      hint: '单会话互动消息条数预算；超出保留待办，不采样丢弃。',
     },
     accumulateMaxChars: {
       type: 'int', default: 8000, min: 1000, max: 30000, step: 500, group: '群记忆', label: '每群正文上限', unit: '字',
-      hint: '每日模式：单会话互动正文预算，超出保留待办；旧间隔模式：超出从最早消息开始丢。',
-    },
-    accumulateMinNewMsgs: {
-      type: 'int', default: 20, min: 0, max: 500, step: 5, group: '群记忆', label: '少于多少条就跳过',
-      hint: '某个群最近消息太少时跳过、不调模型（省 token）。0 = 只要有一条就积累。',
+      hint: '单会话互动正文预算；超出保留待办，不从最早消息丢弃。',
     },
     accumulateRetainRevisions: {
       type: 'int', default: 20, min: 0, max: 200, step: 5, group: '群记忆', label: '保留多少历史版本',
@@ -233,7 +195,12 @@ export default {
     function readMemory(key) {
       const r = loadRaw(key)
       if (!r) return null
-      const visible = r.text.replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
+      // 记账信息（条目 ID、更新/到期时间、文末元数据）只服务写盘与人工编辑，不喂给模型。
+      const visible = r.text
+        .replace(/<!-- qq-memory-v1:[\s\S]*?-->\s*$/, '')
+        .replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
+        .replace(/^- \[[a-zA-Z0-9_-]{1,80}\] /gm, '- ')
+        .replace(/ （更新：[^）\n]*）$/gm, '')
       const text = clip(visible).trim()
       return { text, stamp: r.stamp, clipped: text.length < visible.trim().length, bytes: r.bytes }
     }
@@ -307,13 +274,12 @@ export default {
     // 内核的工具守卫只允许「群记忆积累后台会话」调用它；普通 QQ 会话调会被拒。
     bot.registerTool('memory_append', {
       description:
-        '记忆积累后台任务专用，普通聊天不可调用。每日模式通过 operations JSON 数组提交本会话的新增、修改、移除；无变更为 []。'
-        + '旧版间隔模式通过 points 提交 Markdown 新增要点，无新增为（无新增）。只可提交当前任务允许的会话，成功后不要重复提交。',
+        '记忆整理后台任务专用，普通聊天不可调用。通过 operations JSON 数组提交本会话的新增、修改、移除；无变更为 []。'
+        + '只可提交当前任务允许的会话，成功后不要重复提交。',
       parameters: {
         target: { type: 'string', required: true, description: '会话目标：群写 group:群号，私聊写 private:QQ号（prompt 里【群 …】/【私聊 …】的号码，原样抄）' },
-        points: { type: 'string', description: '仅旧版间隔模式：新增要点 Markdown 列表行；没有新增写「（无新增）」' },
-        operations: { type: 'string', description: '每日模式：JSON 操作数组，op 为 add/update/remove；条目包含 id、section(stable/recent/promises)、text、sourceIds；无变更传 []。严格遵守当前后台任务提示。' },
-        batchId: { type: 'string', description: '每日模式必填：原样复制当前任务的 batchId，仅可提交该批次。' },
+        operations: { type: 'string', description: 'JSON 操作数组，op 为 add/update/remove；条目包含 id、section(stable/recent/promises)、text、sourceIds；无变更传 []。严格遵守当前后台任务提示。' },
+        batchId: { type: 'string', description: '必填：原样复制当前任务的 batchId，仅可提交该批次。' },
       },
       execute(args, exec) {
         const submit = bot.shared.memoryAccumulateSubmit
@@ -322,8 +288,8 @@ export default {
       },
     })
 
-    // ── 积累侧：实现拆在同目录 accumulate.js（同一子插件、同一组配置），这里只负责接线 ──
-    const accumulator = createAccumulator({
+    // ── 积累侧：实现在同目录 daily.js（同一子插件、同一组配置），这里只负责接线 ──
+    const accumulator = createDailyAccumulator({
       bot,
       cfg,
       log,
@@ -341,8 +307,7 @@ export default {
     bot.shared.memoryAccumulateSubmit = accumulator.submit
     bot.shared.memoryAccumulateStop = accumulator.stop
     accumulator.start()
-    // fiber 卸载时清掉 60s 定时器：旧版 start() 的 timer 直接丢弃，内核 dispose 也不清，
-    // 插件重载会叠出第二个定时器。onDispose 是内核的新能力，老内核没有 → 可选调用。
+    // fiber 卸载时清掉 60s 定时器，避免插件重载叠出第二个实例（onDispose 老内核可缺席）。
     try { bot.onDispose?.(() => { try { accumulator.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
   },
 }
