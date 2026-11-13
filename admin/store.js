@@ -10,7 +10,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { loadConfig, saveConfig, validateConfig } from '../kernel/config-store.js'
+import { loadConfig, saveConfig, validateConfig, migrateStyleIntoPluginConfig } from '../kernel/config-store.js'
 import { readJsonFile } from '../platform/atomic.js'
 import { canonicalPath, normForCompare } from '../platform/paths.js'
 
@@ -46,21 +46,30 @@ export function createConfigStore({ kernel = null, configPath = '', dataDir = ''
   const fileOf = () => String(configPath || kernel?.configPath || '')
   const fallbackLoad = () => loadConfig({ dataDir: dataDir || kernel?.dataDir || '', configPath: fileOf(), createIfMissing: false })
 
-  /** 读**磁盘上的原样配置**（v2 raw）；文件还没建时退回 kernel.raw / loadConfig 的默认结构。 */
+  /**
+   * 读**磁盘上的原样配置**（v2 raw）；文件还没建时退回 kernel.raw / loadConfig 的默认结构。
+   * 读出来先做与启动同一笔迁移（旧 `pacing.reply.style` → 插件配置）：
+   * 这样即使运行中有人恢复了旧备份/手改了旧键，控制台写入也不会被保存时的迁移覆盖。
+   */
   function read() {
     const file = fileOf()
     if (file) {
       try {
         const raw = readJsonFile(file)
-        if (isPlainObject(raw)) return raw
+        if (isPlainObject(raw)) {
+          migrateStyleIntoPluginConfig(raw)
+          return raw
+        }
         throw new Error(`配置文件不是 JSON 对象：${file}`)
       } catch (e) {
         if (e.code !== 'ENOENT') throw new Error(`配置文件读不了（${file}）：${e.message}`)
       }
     }
-    if (isPlainObject(kernel?.raw)) return clone(kernel.raw)
+    if (isPlainObject(kernel?.raw)) { const raw = clone(kernel.raw); migrateStyleIntoPluginConfig(raw); return raw }
     try {
-      return fallbackLoad().raw
+      const raw = fallbackLoad().raw
+      migrateStyleIntoPluginConfig(raw)
+      return raw
     } catch (e) {
       throw new Error(`读不到实例配置：${e.message}`)
     }

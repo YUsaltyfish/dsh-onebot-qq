@@ -1070,8 +1070,7 @@ function makeStickerLib(dataDir, items) {
 
 test('表情提示不吃脚手架标签：上下文里的「[群聊上文]」不能点名库里的「群聊」标签', async (t) => {
   const h = await boot(t, {
-    // 掷骰概率的权威值在 pacing.reply.style（内核启动时同步覆盖插件 offerPercent）→ 测试里要设 1 才确定命中
-    pacing: { reply: { style: { stickerProbability: 1 } } },
+    // 掷骰概率现在归 stickers.offerPercent 自己（100 = 每轮必掷、必提醒）
     config: {
       pluginConfig: {
         'gate-wake': { adminQq: ADMIN_QQ },

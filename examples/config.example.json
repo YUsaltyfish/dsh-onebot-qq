@@ -54,14 +54,6 @@
             "sensitivity": 0.45,
             "maxChars": 140,
             "groups": [],
-            "style": {
-                "splitEnabled": true,
-                "splitProbability": 0.5,
-                "splitMinLen": 12,
-                "splitDelayMs": 1000,
-                "stickerEnabled": true,
-                "stickerProbability": 0.8
-            },
             "weights": {
                 "intercept": -1.2005,
                 "mentionBot": 1.5852,

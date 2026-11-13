@@ -86,8 +86,9 @@ export default {
     skipGif: { type: 'bool', default: true, group: '表情包', label: '跳过 GIF（只收静态图）',
       hint: '按内容魔数判（GIF87a/GIF89a），扩展名改成 .jpg 也拦得住；只挡新收的图' },
     collectGroupsOnly: { type: 'bool', default: true, group: '表情包', label: '只在群里收', hint: '开：只收群聊里的表情；关：私聊里的也收。' },
+    stickerEnabled: { type: 'bool', default: true, group: '表情包', label: '回话时允许提醒发表情', hint: '关掉后回话不掷骰提醒发图（上面的「表情包库」是总开关）。' },
     offerPercent: { type: 'int', default: 80, min: 0, max: 100, step: 1, unit: '%', group: '表情包', label: '主动想起概率',
-      hint: '每轮"提醒它可以发一张"的概率（0=关）；它仍可拒绝 → 实际发出率会低于这个数' },
+      hint: '每轮回话有多大机会被提醒“可以配一张表情”（0=关）；它仍可拒绝 → 实际发出率会低于这个数' },
     offerCooldownMs: { type: 'int', default: 20, min: 0, max: 3600, step: 1, unit: '秒', scale: 1000, group: '表情包', label: '想起冷却',
       hint: '同一会话两次"提醒发表情"的最小间隔' },
     maxPerTurn: { type: 'int', default: 1, min: 1, max: 5, step: 1, group: '表情包', label: '每轮最多几张', hint: '一轮回话最多发几张表情（1 张最自然）。' },
@@ -374,6 +375,7 @@ export default {
     // 群聊与私聊同样掷骰（2026-11-04 主人定；旧实现私聊不提醒，导致私聊几乎不发）
     bot.on('before-turn', (ev) => {
       if (cfg.enabled === false || !ev.wake) return // 没唤醒的消息不该掷骰（也别白推进冷却）
+      if (cfg.stickerEnabled === false) return // 回话时允许提醒发表情（控制台「表情包」页）
       if (ev.wake.kind === 'welcome') return // 入群欢迎轮只发欢迎语，别塞"发表情包"提醒分心
       const pct = Number(cfg.offerPercent) || 0
       if (!(pct > 0)) return
@@ -428,10 +430,9 @@ export default {
 
     bot.registerTool('send_sticker', {
       description: '从群里攒下来的表情包库里挑一张发出去（库里的图都是群里真实发过的，带标签）。'
-        + '表情包多数时候只是语气（敷衍/赞同/无语/看热闹）或图一乐 —— 想发就发，不必给它找理由。'
+        + '**只有本轮提示里出现 `[表情:…]` 才发**（历史旧标记不算；本轮没提示 = 不发；对方明确要表情包时例外）。'
         + 'query 给心情/关键词（「无语」「夸人」「震惊」）或 `#12` 点名；什么都不给 = 真随机挑一张；同一张反复用没问题。'
         + '关键词没命中会随便给你一张；只有点名没找到才返回 ok:false —— 那时别改发别的图，也别在正文里解释。'
-        + '提示里出现 `[表情:…]` 就发，不必贴合当下语境。'
         + '**最快的方式是不单独调本工具**：发正文时给 send_message 加 sticker:"关键词" 即可一并带出。一轮最多一张。',
       // DSH `defineTool` 的 parameters 是**扁平**的「属性名 → 值 schema」映射（不是 JSON Schema 的
       // `{type:'object',properties}`）；required 写在属性上 `required: true`。

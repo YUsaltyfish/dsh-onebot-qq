@@ -12,11 +12,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { createConfigStore } from '../admin/store.js'
 import {
   CONFIG_VERSION,
   defaultConfig,
   deepMerge,
   migrateLegacyConfig,
+  migrateStyleIntoPluginConfig,
   isLegacyShape,
   validateConfig,
   validateReplyInterval,
@@ -123,12 +125,14 @@ test('migrateLegacyConfig：旧 bridge 段 → v2（字段名与单位换算）'
   assert.equal(pv.splitReplyEnabled, false)
   assert.equal(pv.splitReplyProbability, 30, '0.3 → 30%')
   assert.equal(pv.splitReplyMinLen, 20)
+  assert.equal(pv.splitReplyDelayMs, 2, '毫秒 → 秒（1500ms → 2s）')
 
   const st = cfg.pluginConfig.stickers
   assert.equal(st.dir, 'qq-stickers')
   assert.equal(st.max, 100, 'maxItems → max')
   assert.equal(st.offerCooldownMs, 30, '毫秒 → 秒')
   assert.equal(st.offerPercent, 80, 'style.stickerProbability 默认 0.8 → 80%')
+  assert.equal(cfg.pacing.reply.style, undefined, '旧 style 块已清掉')
 
   assert.equal(cfg.pluginConfig['group-memory'].dir, 'qq-memory')
   assert.equal(cfg.pluginConfig.imagegen.avatarDir, 'qq_avatars')
@@ -150,6 +154,58 @@ test('migrateLegacyConfig：旧 bridge 段 → v2（字段名与单位换算）'
 
   // 未知键丢弃
   assert.equal(cfg.unknownKey, undefined)
+})
+
+test('migrateStyleIntoPluginConfig：旧版 pacing.reply.style → 插件自有配置（单位换算、以 style 为准覆盖）', () => {
+  const cfg = deepMerge(defaultConfig(), {
+    adminQq: 10001,
+    pacing: { reply: { style: { splitEnabled: false, splitProbability: 0.3, splitMinLen: 20, splitDelayMs: 1500, splitMaxParts: 2, stickerEnabled: false, stickerProbability: 0.8 } } },
+    pluginConfig: { stickers: { offerPercent: 55 } }, // 旧 fallback 陈旧值：以 style 为准覆盖
+  })
+  assert.equal(migrateStyleIntoPluginConfig(cfg), true)
+  const pv = cfg.pluginConfig['persona-voice']
+  assert.equal(pv.splitReplyEnabled, false)
+  assert.equal(pv.splitReplyProbability, 30, '0.3 → 30%')
+  assert.equal(pv.splitReplyMinLen, 20)
+  assert.equal(pv.splitReplyDelayMs, 2, '1500ms → 2s')
+  assert.equal(pv.splitReplyMaxParts, 2)
+  assert.equal(cfg.pluginConfig.stickers.offerPercent, 80, '以 style 为准覆盖旧 fallback 值')
+  assert.equal(cfg.pluginConfig.stickers.stickerEnabled, false)
+  assert.equal(cfg.pacing.reply.style, undefined, '旧块已删除')
+  assert.equal(migrateStyleIntoPluginConfig(cfg), false, '没有 style 时不迁移')
+})
+
+test('loadConfig：磁盘上的旧 style 自动迁移并写回（无需手工改文件）', () => {
+  const dir = tmpDir('migrate-style')
+  const raw = deepMerge(defaultConfig(), {
+    adminQq: 10001,
+    onebot: { wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000' },
+    pacing: { reply: { style: { splitEnabled: true, splitProbability: 0.2, splitDelayMs: 3000, stickerProbability: 0.9 } } },
+  })
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(raw, null, 4))
+  const loaded = loadConfig({ dataDir: dir })
+  assert.equal(loaded.runtime.pacing.reply.style, undefined, 'runtime 里没有旧 style')
+  assert.equal(loaded.runtime.pluginConfig['persona-voice'].splitReplyProbability, 20)
+  assert.equal(loaded.runtime.pluginConfig['persona-voice'].splitReplyDelayMs, 3, '3000ms → 3s')
+  assert.equal(loaded.runtime.pluginConfig.stickers.offerPercent, 90)
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'))
+  assert.equal(onDisk.pacing.reply.style, undefined, '磁盘上的旧块也清掉了')
+  assert.equal(onDisk.pluginConfig['persona-voice'].splitReplyDelayMs, 3, '磁盘上已换算成面板单位')
+})
+
+test('控制台读配置：运行中恢复的旧 style 也会先在读取边界迁移（避免保存时覆盖用户改动）', () => {
+  const dir = tmpDir('store-read')
+  const file = path.join(dir, 'config.json')
+  const raw = deepMerge(defaultConfig(), {
+    adminQq: 10001,
+    pacing: { reply: { style: { splitProbability: 0.4, stickerProbability: 0.9 } } },
+  })
+  fs.writeFileSync(file, JSON.stringify(raw, null, 4))
+  const store = createConfigStore({ configPath: file, dataDir: dir })
+  const got = store.read()
+  assert.equal(got.pacing.reply.style, undefined, '读取时已迁移')
+  assert.equal(got.pluginConfig['persona-voice'].splitReplyProbability, 40)
+  assert.equal(got.pluginConfig.stickers.offerPercent, 90)
 })
 
 test('isLegacyShape / validateConfig', () => {

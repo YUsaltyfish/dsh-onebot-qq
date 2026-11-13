@@ -2,7 +2,11 @@
 
 所有值得用户知道的变更记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
-## 未发布 — 截至 2026-11-12
+## 未发布 — 截至 2026-11-13
+
+### 调整
+
+- **拆条 / 表情概率改归各自插件**：权威配置从顶层 `pacing.reply.style` 迁到 `pluginConfig['persona-voice'].splitReply*` 与 `pluginConfig.stickers.{stickerEnabled,offerPercent}`；控制台控件从「主动接话」页挪到「句池」「表情包」页（一个插件 = 一个页面）。旧配置启动时自动迁移（概率 0–1 → %、间隔毫秒 → 秒）并清理旧块，不需要手改；内核不再做 style→插件字段的二次覆盖。
 
 ### 新增
 - **群上文图片入站**（`outbound.groupContextImages`，默认关）：开启后，群聊「入站条数上限」窗口里的真实图片（表情包不算）随上文一起作为视觉附件送进模型，数量与入站条数同步封顶，长边缩到 768px（约 180~380 token/张）。解决「群友先发图、再叫它，它说图没送到」；窗口里没图时零开销。控制台在「群聊」页。

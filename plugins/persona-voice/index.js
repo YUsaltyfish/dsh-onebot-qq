@@ -124,13 +124,14 @@ export default {
       type: 'str', default: '', group: '句池', label: '当前人设',
       hint: '留空 = 按 qq-lines 工作区的指针/软链自动解析（换人设不用改这里）',
     },
-    // 兼容旧配置与插件独立使用的 fallback；正式控制台隐藏这些字段，由 pacing.reply.style 接管。
-    splitReplyEnabled: { type: 'bool', default: true, group: '主动接话', label: '拆条' },
-    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 1, max: 100, group: '主动接话', label: '拆条概率' },
-    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '主动接话', label: '拆条最小长度' },
-    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '主动接话', label: '拆条间隔' },
+    // 拆条：本插件自有的权威配置（控制台在本插件页「句池」里显示；
+    // 旧版存在 pacing.reply.style，启动时已自动迁到这里，见 kernel/config-store.js）。
+    splitReplyEnabled: { type: 'bool', default: true, group: '句池', label: '拆条（先短反应再补正话）', hint: '小概率把一条回复拆成两条发（先丢个短反应、隔一会儿补正话），治“每条一个路子”的机器感。' },
+    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 0, max: 100, step: 5, group: '句池', label: '拆条概率', hint: '每次回话拆条的概率（0 = 不拆）；太短的话不拆（见下面的「拆条最小长度」）。' },
+    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '句池', label: '拆条最小长度', advanced: true, hint: '短于这个字数的回复不拆条（太短了拆成两条很怪）。' },
+    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '句池', label: '拆条间隔', advanced: true, hint: '拆出来的第一条之后，每条隔多久发（拆成 3 条时是 1×间隔、2×间隔）；调大更像“打完一句再想一句”。' },
     splitReplyMaxParts: {
-      type: 'int', default: 3, min: 2, max: 4, group: '主动接话', label: '最多拆几条',
+      type: 'int', default: 3, min: 2, max: 4, group: '句池', label: '最多拆几条', advanced: true,
       hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不拦腰砍句；\n'
         + '句子不够就按实际句数发（2 条就够时不会硬凑）。拆出来的每条之间隔「拆条间隔」秒。',
     },

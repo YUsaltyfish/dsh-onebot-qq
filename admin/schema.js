@@ -51,13 +51,11 @@ const round3 = (n) => Math.round(n * 1000) / 1000
 const round6 = (n) => Math.round(n * 1e6) / 1e6
 
 /**
- * 子插件里**由内核权威配置接管**的字段：不在控制台聚合里渲染（插件字段保留作 fallback）。
- * 拆条 / 表情概率的权威存储是顶层 `pacing.reply.style`（内核 reload 时同步进插件 cfg），
- * 两边都给控件会互相覆盖，所以子插件侧只保留配置、不暴露控件。
+ * 子插件里**不在控制台聚合里渲染**的字段（插件配置保留，由专属页面/编辑页管理）。
+ * 拆条 / 表情概率现在归各自插件所有（`pluginConfig['persona-voice']` / `.stickers`），
+ * 显示在插件自己的页面里，不再隐藏。
  */
 const HIDDEN_PLUGIN_FIELDS = {
-  'persona-voice': new Set(['splitReplyEnabled', 'splitReplyProbability', 'splitReplyMinLen', 'splitReplyDelayMs', 'splitReplyMaxParts']),
-  stickers: new Set(['offerPercent']),
   'message-monitor': new Set(['rules']), // 规则由专属编辑页管理，不渲染通用输入框
 }
 
@@ -295,20 +293,6 @@ export const CORE_CONTROLS = [
     default: [],
     hint: '群号列表（空 = 没有群允许主动接话）。推荐在「群聊」页每张群卡片勾「允许主动接话」；这里和群卡片改的是同一份配置。',
   },
-  {
-    key: 'pacing.reply.style.splitEnabled', group: '主动接话', type: 'bool', label: '拆条（先短反应再补正话）', default: true,
-    hint: '小概率把一条回复拆成两条发（先丢个短反应、隔一会儿补正话），治“每条一个路子”的机器感。',
-  },
-  {
-    key: 'pacing.reply.style.splitProbability', group: '主动接话', type: 'int', label: '拆条概率', unit: '%',
-    scale: 0.01, min: 0, max: 100, step: 5, default: 0.5,
-    hint: '每次回话拆条的概率；太短的话不拆（见「高级」里的最小长度）。',
-  },
-  {
-    key: 'pacing.reply.style.stickerProbability', group: '主动接话', type: 'int', label: '表情包概率', unit: '%',
-    scale: 0.01, min: 0, max: 100, step: 5, default: 0.8,
-    hint: '每轮回话有多大机会被提醒“可以配一张表情”；它也可以不发。',
-  },
 
   // ── 主动接话·高级（控制台折叠在「高级」按钮里，一般不用动）─────
   {
@@ -320,26 +304,6 @@ export const CORE_CONTROLS = [
     key: 'pacing.reply.topicMinMsgs', group: '主动接话', advanced: true, type: 'int', label: '窗口内至少几条消息才按话题接',
     min: 1, max: 20, step: 1, default: 3,
     hint: '窗口里消息太少就不按“话题”挑时机（防硬接）；冷场找话不受这条限制。',
-  },
-  {
-    key: 'pacing.reply.style.splitMinLen', group: '主动接话', advanced: true, type: 'int', label: '拆条最小长度', unit: '字',
-    min: 0, max: 200, step: 1, default: 12,
-    hint: '短于这个字数的回复不拆条（太短了拆成两条很怪）。',
-  },
-  {
-    key: 'pacing.reply.style.splitDelayMs', group: '主动接话', advanced: true, type: 'int', label: '拆条两条之间的间隔', unit: '秒',
-    scale: 1000, min: 0, max: 10, step: 1, default: 1000,
-    hint: '拆出来的第一条之后，每条隔多久发（拆成 3 条时是 1×间隔、2×间隔）；调大更像“打完一句再想一句”。',
-  },
-  {
-    key: 'pacing.reply.style.splitMaxParts', group: '主动接话', advanced: true, type: 'int', label: '最多拆几条',
-    min: 2, max: 4, step: 1, default: 3,
-    hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不把一句话拦腰砍；\n句数不够就按实际句数发。'
-      + '配「拆条概率」用：概率决定拆不拆、这里决定最多拆几条。',
-  },
-  {
-    key: 'pacing.reply.style.stickerEnabled', group: '主动接话', advanced: true, type: 'bool', label: '回话时允许提醒发表情', default: true,
-    hint: '关掉后主动回话不掷骰提醒发图（表情包子插件自己的总开关在「表情包」页）。',
   },
   // 9 项语境权重：只影响主动接话的“挑时机”，一般只调语境敏感度就够
   { key: 'pacing.reply.weights.intercept', group: '主动接话', advanced: true, type: 'float', label: '语境分：基础分（截距）', min: -5, max: 5, step: 0.05, default: -1.2005, hint: '所有加分项都从这一分开始；数越负整体越安静。' },
@@ -519,7 +483,7 @@ function pluginEntries(kernel) {
     const hidden = HIDDEN_PLUGIN_FIELDS[id] || null
     for (const [field, fdef] of Object.entries(schema)) {
       if (!isPlainObject(fdef)) continue
-      if (hidden && hidden.has(field)) continue // 权威配置在核心项里，见文件头
+      if (hidden && hidden.has(field)) continue // 由专属页面管理，不渲染通用输入框
       // 插件字段可以映射到别的配置路径（例：生图凭据仍存 credentials.gptImage.*，
       // 但面板归属算 imagegen —— 这样「生图」页 = 一个子插件，旧配置零迁移）
       const configPath = fdef.type === 'info'
@@ -547,6 +511,7 @@ function pluginEntries(kernel) {
         suggestions: Array.isArray(fdef.suggestions) ? fdef.suggestions : null,
         default: fdef.default,
         secret: fdef.secret === true,
+        advanced: fdef.advanced === true,
       })
     }
   }

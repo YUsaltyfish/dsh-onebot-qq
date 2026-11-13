@@ -60,7 +60,7 @@ test('quoteEnforce：模型引用「刚触发本轮」的消息且插话未达�
 
 test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 不拆', async (t) => {
   const h = await boot(t, {
-    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 6, splitDelayMs: 0 } } },
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 6, splitReplyDelayMs: 0 } } },
   })
   const send = h.ctx._registeredTools.get('mcp__qq__send_message')
   h.ctx.setPromptHandler(async (req) => {
@@ -74,7 +74,7 @@ test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 
 
   // 多句 → 按「最多拆几条」发 3 条（默认 3）
   const h3 = await boot(t, {
-    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 6, splitDelayMs: 0 } } },
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 6, splitReplyDelayMs: 0 } } },
   })
   const send3 = h3.ctx._registeredTools.get('mcp__qq__send_message')
   h3.ctx.setPromptHandler(async (req) => {
@@ -87,7 +87,7 @@ test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 
 
   // 上限 2：同样三句只拆两条
   const h4 = await boot(t, {
-    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 6, splitDelayMs: 0, splitMaxParts: 2 } } },
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 6, splitReplyDelayMs: 0, splitReplyMaxParts: 2 } } },
   })
   const send4 = h4.ctx._registeredTools.get('mcp__qq__send_message')
   h4.ctx.setPromptHandler(async (req) => {
@@ -100,7 +100,7 @@ test('拆条：长回复拆成两条、都走唯一出站口；短回复/带 CQ 
 
   // 短回复不拆
   const h2 = await boot(t, {
-    pacing: { merge: { enabled: false }, reply: { style: { splitEnabled: true, splitProbability: 1, splitMinLen: 50, splitDelayMs: 0 } } },
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 50, splitReplyDelayMs: 0 } } },
   })
   const send2 = h2.ctx._registeredTools.get('mcp__qq__send_message')
   h2.ctx.setPromptHandler(async (req) => {

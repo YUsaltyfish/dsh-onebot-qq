@@ -180,8 +180,7 @@ async function discoverPlugins({ runtime, dataDir, log }) {
 
 /**
  * 单个插件的生效配置：schema 默认值 → 实例配置覆盖 → 相对 dataDir 的路径解析成绝对路径。
- * 内核负责的跨插件约定也在这里落地（gate-wake.adminQq、file-transfer 白名单默认值、
- * pacing.reply.style → 拆条/表情概率同步）。
+ * 内核负责的跨插件约定也在这里落地（gate-wake.adminQq、file-transfer 白名单默认值）。
  */
 function buildPluginCfg(plugin, runtime, dataDir) {
   const id = String(plugin.id)
@@ -192,21 +191,6 @@ function buildPluginCfg(plugin, runtime, dataDir) {
   // file-transfer 图片白名单：缺省 = [dataDir, 系统临时目录]（内核注入，插件里不写死任何机器路径）
   if (id === 'file-transfer' && !(Array.isArray(cfg.imageWhitelist) && cfg.imageWhitelist.length)) {
     cfg.imageWhitelist = [dataDir, os.tmpdir()]
-  }
-  // 回复节奏的「风格」以顶层 pacing.reply.style 为权威（控制台「主动接话」页）；插件字段作 fallback。
-  const style = runtime.pacing?.reply?.style
-  if (style && typeof style === 'object') {
-    if (id === 'persona-voice') {
-      if (typeof style.splitEnabled === 'boolean') cfg.splitReplyEnabled = style.splitEnabled
-      if (Number(style.splitProbability) >= 0) cfg.splitReplyProbability = Math.round(Number(style.splitProbability) * 100)
-      if (Number(style.splitMinLen) > 0) cfg.splitReplyMinLen = Number(style.splitMinLen)
-      if (Number(style.splitDelayMs) >= 0) cfg.splitReplyDelayMs = Math.round(Number(style.splitDelayMs) / 1000)
-      if (Number(style.splitMaxParts) >= 2) cfg.splitReplyMaxParts = Math.min(4, Math.round(Number(style.splitMaxParts)))
-    } else if (id === 'stickers') {
-      if (Number(style.stickerProbability) >= 0) cfg.offerPercent = Math.round(Number(style.stickerProbability) * 100)
-      // 权威开关在顶层 pacing.reply.style.stickerEnabled：关掉 = 不再提醒模型发表情
-      if (style.stickerEnabled === false) cfg.offerPercent = 0
-    }
   }
   return cfg
 }
@@ -528,7 +512,7 @@ export async function apply(ctx, bundleConfig = {}) {
   // ── 内置出站钩子①：主动接话轮的硬约束（代码强制，不靠提示词）──
   //   · 不 @、不引用：主动接话不指人、不挂"我在回你"的语义
   //   · 不套长文卡片：群友随口接一句不该甩一张卡片（deliver 认 noForward 字段）
-  //   · 一轮发几条：拆条数目在控制台动态修改（`pacing.reply.style.splitMaxParts`），内核不再按固定条数拦
+  //   · 一轮发几条：拆条数目在控制台动态修改（`pluginConfig['persona-voice'].splitReplyMaxParts`），内核不再按固定条数拦
   deliver.onDecorate((out) => {
     const turnCtx = out.turnCtx ?? kernel.activeTurns.get(out.target) ?? null
     const kind = turnCtx?.wakeKind
@@ -644,12 +628,12 @@ export async function apply(ctx, bundleConfig = {}) {
       '把一条文本消息发到 QQ（群或私聊）。这是给 QQ 用户回话的唯一正确方式：不要在正文里写要发的内容，直接调用本工具。'
       + 'target 用会话开头提示里的 [QQ会话 <target>] 原样传入；引用默认不用你管（内核按回复期间群里插话数自动决定）；'
       + '只在想引用更早的另一条时才传 reply_to（传 0 = 明确不要挂）；内容会被网关强制脱敏并限长。'
-      + '提示里出现 `[表情:…]` 时，给本工具加 sticker 参数就能顺手带一张表情包（比单独调 send_sticker 省一步）。',
+      + '本轮提示里出现 `[表情:…]` 时，给本工具加 sticker 参数就能顺手带一张表情包（比单独调 send_sticker 省一步）。',
     parameters: {
       target: { type: 'string', required: true, description: '会话目标，形如 group:123456 或 private:123456' },
       text: { type: 'string', required: true, description: '要发送的纯文本内容' },
       reply_to: { type: 'integer', description: '要引用回复的消息 ID（可选，传 0 明确不挂）' },
-      sticker: { type: 'string', description: '顺手带一张表情包：心情/关键词（「无语」「夸人」）或 `#12` 点名；只有提示里出现 [表情:…] 时才传，不传 = 不发' },
+      sticker: { type: 'string', description: '顺手带一张表情包：心情/关键词（「无语」「夸人」）或 `#12` 点名；只有本轮提示里出现 [表情:…] 时才传（历史旧标记不算），不传 = 不发' },
     },
     async execute(args = {}, exec = null) {
       // 按本轮 DSH 会话认轮（工具包装会把 exec 传进来）；认不出才回退 target/ALS。

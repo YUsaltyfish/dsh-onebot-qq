@@ -21,20 +21,20 @@ test('分组命名：消息设置 / 主动接话；旧页名不再出现', async
   assert.ok(groups.includes('消息设置'), '应有「消息设置」页')
   assert.ok(groups.includes('主动接话'), '应有「主动接话」页')
   assert.ok(groups.includes('OneBot 连接'), '模型入口所在专用页必须真实存在')
-  assert.equal(schema.controls.some((c) => c.key.startsWith('persona-voice.splitReply')), false, '旧拆条字段不能再生成重复控件')
+  assert.ok(schema.controls.some((c) => c.key === 'persona-voice.splitReplyProbability'), '拆条字段应显示在 persona-voice 自己的页里')
   for (const old of ['回话', '回话细节', '回话模式', '回话模式·高级']) {
     assert.equal(groups.includes(old), false, `旧分组名不应再出现：${old}`)
   }
 })
 
-test('主动接话：基础项不带 advanced，14 个进阶项全部带 advanced', async (t) => {
+test('主动接话：基础项不带 advanced，11 个进阶项全部带 advanced', async (t) => {
   const schema = await schemaOf(t)
   const all = schema.controls.filter((c) => c.group === '主动接话')
   const basic = all.filter((c) => !c.advanced)
   const adv = all.filter((c) => c.advanced)
   assert.ok(basic.some((c) => c.key === 'pacing.reply.enabled'))
   assert.equal(basic.some((c) => c.key.startsWith('pacing.reply.weights.')), false, '语境权重必须折叠')
-  assert.equal(adv.length, 15)
+  assert.equal(adv.length, 11)
   assert.ok(adv.every((c) => c.key.startsWith('pacing.reply.')))
 })
 

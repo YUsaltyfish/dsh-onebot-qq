@@ -28,9 +28,8 @@ async function fixture(t, { qq = ADMIN_QQ, gate = {}, saved = true } = {}) {
     pacing: { merge: { enabled: false }, reply: {
       enabled: true, privateChats: [qq], quietHours: { enabled: false },
       interval: { minMs: 1000, maxMs: 1000, unansweredMinMs: 1000, unansweredMaxMs: 1000, maxBackoffMs: 1000 },
-      style: { splitEnabled: false, stickerProbability: 1 },
     } },
-    pluginConfig: { 'gate-wake': gate, 'group-memory': { accumulateEnabled: false }, stickers: { offerCooldownMs: 0 } },
+    pluginConfig: { 'gate-wake': gate, 'group-memory': { accumulateEnabled: false }, stickers: { offerCooldownMs: 0, offerPercent: 100 }, 'persona-voice': { splitReplyEnabled: false } },
   })
   const ctx = createMockCtx({ workspacePath: path.join(dataDir, 'workspace') })
   await apply(ctx, { dataDir, autoConnect: false })

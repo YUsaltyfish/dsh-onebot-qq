@@ -98,15 +98,6 @@ export function defaultConfig() {
           requireNewMessage: true,
           quoteLastHuman: false,
         },
-        style: {
-          splitEnabled: true,
-          splitProbability: 0.5,
-          splitMinLen: 12,
-          splitDelayMs: 1000,
-          splitMaxParts: 3,
-          stickerEnabled: true,
-          stickerProbability: 0.8,
-        },
         weights: {
           intercept: -1.2005,
           mentionBot: 1.5852,
@@ -191,21 +182,12 @@ export function migrateLegacyConfig(old = {}) {
   }
   if (Object.keys(gw).length) pluginConfig['gate-wake'] = gw
 
-  // 人设 / 句池 / 拆条
+  // 人设 / 句池 / 拆条（bridge.reply.style 的字段由结尾的 migrateStyleIntoPluginConfig 统一搬）
   const pv = {}
-  const style = isPlainObject(bridge.reply?.style) ? bridge.reply.style : {}
-  if (style.splitEnabled !== undefined) pv.splitReplyEnabled = style.splitEnabled
-  if (Number(style.splitProbability) >= 0) pv.splitReplyProbability = Math.round(Number(style.splitProbability) * 100)
-  if (Number(style.splitMinLen) > 0) pv.splitReplyMinLen = Number(style.splitMinLen)
-  if (Number(style.splitDelayMs) >= 0) pv.splitReplyDelayMs = Math.round(Number(style.splitDelayMs))
-  if (Number(style.splitMaxParts) >= 2) pv.splitReplyMaxParts = Math.min(4, Math.round(Number(style.splitMaxParts)))
   if (bridge.quoteEnforce !== undefined) pv.quoteEnforce = Boolean(bridge.quoteEnforce)
   if (Object.keys(pv).length) pluginConfig['persona-voice'] = pv
 
   // 表情包
-  if (Number(style.stickerProbability) >= 0) {
-    pluginConfig.stickers = { ...(pluginConfig.stickers || {}), offerPercent: Math.round(Number(style.stickerProbability) * 100) }
-  }
   if (isPlainObject(bridge.stickers)) {
     const st = {}
     for (const [from, to] of [
@@ -276,6 +258,7 @@ export function migrateLegacyConfig(old = {}) {
   }
 
   cfg.pluginConfig = pluginConfig
+  migrateStyleIntoPluginConfig(cfg)
   migrateReplyInterval(cfg)
   pruneObsoleteConfig(cfg)
   return cfg
@@ -384,8 +367,42 @@ const OBSOLETE_CONFIG_KEYS = [
   ['pacing', 'merge', 'activeGapMs'],
   ['pacing', 'merge', 'maxWaitMs'],
   ['pacing', 'merge', 'skipIfSlowMs'],
+  ['pacing', 'reply', 'style'], // 拆条/表情概率已迁到 pluginConfig（persona-voice / stickers）
   ['pluginConfig', 'gate-wake', 'groupFollowUpMs'],
 ]
+
+/**
+ * 旧版把「拆条 / 表情概率」存在顶层 `pacing.reply.style`（本文件 v2 早期结构）。
+ * 现在两项归各自插件所有：搬到 `pluginConfig['persona-voice'].splitReply*` 与
+ * `pluginConfig.stickers.{offerPercent,stickerEnabled}`，搬完删除旧块。
+ *
+ * 旧版的权威值在 style 里，插件字段只是历史 fallback（可能是陈旧值），所以**以 style 为准覆盖**；
+ * 单位按面板口径换算：概率 0~1 → %，间隔毫秒 → 秒。
+ * 纯内存迁移，写盘由调用方决定（loadConfig / saveConfig 都会调）。
+ *
+ * @returns {boolean} 是否发生了迁移（用于触发落盘清理）
+ */
+export function migrateStyleIntoPluginConfig(cfg) {
+  const reply = cfg?.pacing?.reply
+  if (!isPlainObject(reply) || !Object.hasOwn(reply, 'style')) return false
+  const style = isPlainObject(reply.style) ? reply.style : {}
+  cfg.pluginConfig = isPlainObject(cfg.pluginConfig) ? cfg.pluginConfig : {}
+  const pv = isPlainObject(cfg.pluginConfig['persona-voice']) ? cfg.pluginConfig['persona-voice'] : {}
+  const st = isPlainObject(cfg.pluginConfig.stickers) ? cfg.pluginConfig.stickers : {}
+  // style 是旧版的**权威值**（插件字段只是历史 fallback/陈旧值），所以直接覆盖。
+  const put = (obj, key, value) => { obj[key] = value }
+  if (typeof style.splitEnabled === 'boolean') put(pv, 'splitReplyEnabled', style.splitEnabled)
+  if (Number(style.splitProbability) >= 0) put(pv, 'splitReplyProbability', Math.round(Number(style.splitProbability) * 100))
+  if (Number(style.splitMinLen) > 0) put(pv, 'splitReplyMinLen', Number(style.splitMinLen))
+  if (Number(style.splitDelayMs) >= 0) put(pv, 'splitReplyDelayMs', Math.round(Number(style.splitDelayMs) / 1000))
+  if (Number(style.splitMaxParts) >= 2) put(pv, 'splitReplyMaxParts', Math.min(4, Math.round(Number(style.splitMaxParts))))
+  if (typeof style.stickerEnabled === 'boolean') put(st, 'stickerEnabled', style.stickerEnabled)
+  if (Number(style.stickerProbability) >= 0) put(st, 'offerPercent', Math.round(Number(style.stickerProbability) * 100))
+  if (Object.keys(pv).length) cfg.pluginConfig['persona-voice'] = pv
+  if (Object.keys(st).length) cfg.pluginConfig.stickers = st
+  delete reply.style
+  return true
+}
 
 /** 旧频率只有“0=关闭”保留语义；其它旧时间不再限制共享小时随机窗。 */
 function migrateReplyInterval(cfg) {
@@ -454,8 +471,10 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
   const merged = migrated ? migrateLegacyConfig(raw) : deepMerge(defaultConfig(), raw)
   merged.version = CONFIG_VERSION
   // 废弃键清理：内存里先剔掉，能写就顺手写回（备份 bak-prune），下次启动文件也干净
+  // 旧版 pacing.reply.style（拆条/表情概率）先搬进各自插件配置，再按废弃键清掉。
+  const styleMigrated = migrateStyleIntoPluginConfig(merged)
   const intervalMigrated = migrateReplyInterval(merged)
-  const pruned = pruneObsoleteConfig(merged) || intervalMigrated
+  const pruned = pruneObsoleteConfig(merged) || intervalMigrated || styleMigrated
   // 迁移态 / 清理态落盘：否则控制台读的是旧结构、写回后又被迁移逻辑覆盖（用户会误以为"改了不生效"）
   if ((migrated || pruned) && createIfMissing) {
     try {
@@ -472,6 +491,7 @@ export function saveConfig(configPath, raw, { backup = true } = {}) {
   const file = path.resolve(String(configPath))
   const backupFile = backup ? backupFileSync(file, 'bak-console') : ''
   const next = structuredClone(raw)
+  migrateStyleIntoPluginConfig(next)
   migrateReplyInterval(next)
   pruneObsoleteConfig(next)
   atomicWriteFileSync(file, `${JSON.stringify(next, null, 4)}\n`, { mode: 0o600 })

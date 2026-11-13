@@ -51,15 +51,6 @@ export const REPLY_DEFAULTS = {
     requireNewMessage: true, // 它回完之后必须有人类新消息才检查（关掉容易变成自问自答）
     quoteLastHuman: false,   // 续聊是否引用最后一条人类消息（默认不引用）
   },
-  style: {
-    splitEnabled: true,
-    splitProbability: 0.5,   // 拆条概率（0~1）
-    splitMinLen: 12,
-    splitDelayMs: 1000,
-    splitMaxParts: 3,        // 一段回复最多拆几条（2~4）
-    stickerEnabled: true,
-    stickerProbability: 0.8, // 表情包概率（0~1）
-  },
   weights: {                 // 语境权重（MaiBot 日志拟合值；一般不用动，改「语境敏感度」就够了）
     intercept: -1.2005,
     mentionBot: 1.5852,
@@ -178,7 +169,6 @@ export function quietHoursStatus(config = {}, now = Date.now()) {
 function normalize(rawPacing) {
   const p = rawPacing && typeof rawPacing === 'object' ? rawPacing : {}
   const r = p.reply && typeof p.reply === 'object' ? p.reply : {}
-  const style = r.style && typeof r.style === 'object' ? r.style : {}
   const weights = r.weights && typeof r.weights === 'object' ? r.weights : {}
   const groups = {}
   if (Array.isArray(r.groups)) {
@@ -190,8 +180,7 @@ function normalize(rawPacing) {
   return {
     reply: {
       ...REPLY_DEFAULTS,
-      ...Object.fromEntries(Object.entries(r).filter(([k]) => !['style', 'weights', 'groups', 'privatePolicy', 'hourlyMax', 'minGapMs', 'coldSilenceMs'].includes(k))),
-      style: { ...REPLY_DEFAULTS.style, ...style },
+      ...Object.fromEntries(Object.entries(r).filter(([k]) => !['weights', 'groups', 'privatePolicy', 'hourlyMax', 'minGapMs', 'coldSilenceMs'].includes(k))),
       weights: { ...REPLY_DEFAULTS.weights, ...weights },
       continuation: { ...REPLY_DEFAULTS.continuation, ...(r.continuation && typeof r.continuation === 'object' ? r.continuation : {}) },
       groups,
