@@ -18,7 +18,7 @@ function inspect(tree) {
   visit(tree)
   return { nodes, text: JSON.stringify(tree) }
 }
-const controls = ['accumulateModelProvider', 'accumulateModel', 'enabled', 'accumulateEnabled', 'accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays', 'accumulateBatchMaxChars', 'accumulateMsgPerGroup', 'accumulateMaxChars', 'accumulateRetainRevisions', 'accumulateMaxGroupsPerRound'].map((key) => ({ key: 'group-memory.' + key, value: '', group: 'memory' }))
+const controls = ['accumulateModelProvider', 'accumulateModel', 'enabled', 'accumulateEnabled', 'accumulateDailyTime', 'accumulateTimezone', 'accumulateRecentDays', 'accumulateRetainRevisions', 'accumulateMaxGroupsPerRound'].map((key) => ({ key: 'group-memory.' + key, value: '', group: 'memory' }))
 function render(schedule = 'daily', overrides = {}, ctx = {}) {
   const cfg = controls.map((c) => ({ ...c }))
   const state = [{ groups: [], accumulate: { enabled: false, schedule, timezone: 'Asia/Shanghai', pendingCount: 1, pending: [{ gid: '10001', reason: '预算不足', rows: 3, chars: 42 }], lastResult: { updated: ['10001'], failed: [{ gid: '10002', detail: 'model failed' }], skipped: [], calls: 1 }, ...overrides } }, null, true, cfg, '', false, null]

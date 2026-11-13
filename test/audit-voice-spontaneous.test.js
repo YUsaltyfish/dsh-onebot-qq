@@ -233,3 +233,35 @@ test('插件热关：persona-voice.enabled=false → pick() 返回空，调用�
   await waitFor(() => h.sent.length >= 1, { label: 'poke 兜底句' })
   assert.ok(String(h.sent[0].wire).trim().length > 0, '句池关闭不哑火（gate-wake 内置兜底）')
 })
+
+test('拆条字数上限：默认 200（120~200 字可拆）、可配置上限生效', async (t) => {
+  // 构造 120~200 字、含两个自然句的回复：旧默认 120 会挡掉，新默认 200 应能拆。
+  const a = '今天天气不错适合出去玩要不要一起走远一点去山里看看然后回来路上顺便吃点东西'.repeat(2)
+  const b = '好吧其实也行反正也没别的安排就这样定了到时候你叫我一声咱就出发别磨蹭'.repeat(2)
+  const mid = `${a}。${b}。`
+  assert.ok(mid.length > 120 && mid.length < 200, `测试文本长度应在 120~200：${mid.length}`)
+
+  const h = await boot(t, {
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 6, splitReplyDelayMs: 0 } } },
+  })
+  const send = h.ctx._registeredTools.get('mcp__qq__send_message')
+  h.ctx.setPromptHandler(async (req) => {
+    await send.execute({ target: `group:${GROUP_ID}`, text: mid }, { agent: { session: { id: req.sessionId } } })
+  })
+  await emitRaw(h.kernel, groupAtEvent({ text: '在吗', messageId: 201 }))
+  await waitFor(() => h.sent.length >= 2, { label: '默认上限 200 下应拆条' })
+  assert.ok(h.sent[0].wire.length < mid.length, '第一条应是拆出来的短段')
+
+  // 配置上限 100：同样的 150 字应保持单条
+  const h2 = await boot(t, {
+    config: { pluginConfig: { 'persona-voice': { splitReplyEnabled: true, splitReplyProbability: 100, splitReplyMinLen: 6, splitReplyDelayMs: 0, splitReplyMaxChars: 100 } } },
+  })
+  const send2 = h2.ctx._registeredTools.get('mcp__qq__send_message')
+  h2.ctx.setPromptHandler(async (req) => {
+    await send2.execute({ target: `group:${GROUP_ID}`, text: mid }, { agent: { session: { id: req.sessionId } } })
+  })
+  await emitRaw(h2.kernel, groupAtEvent({ text: '在吗', messageId: 202 }))
+  await waitFor(() => h2.sent.length >= 1, { label: '配置上限 100 下照常发送' })
+  await sleep(80)
+  assert.equal(h2.sent.length, 1, '超过配置上限应保持单条')
+})

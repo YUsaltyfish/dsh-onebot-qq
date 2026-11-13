@@ -77,18 +77,59 @@ test('first run baseline avoids old history; singleton task per chat, source IDs
   assert.equal((await h.run()).calls, 0)
 })
 
-test('oversize remains pending without any progress or sampling; can retry with increased budget', async (t) => {
-  const cfg = { accumulateMaxChars: 20 }
-  const h = fixture(t, async ({ prompt }, acc) => { acc.submit({ target: 'group:123456', operations: '[]' }); return {} }, cfg)
-  const ts = h.acc.status().baselineAt + 1
-  h.append([row(ts, 1, 'long'.repeat(100)), row(ts + 1, 2, 'reply', { dir: 'out', triggerMsgId: 1 })])
-  const first = await h.run()
-  assert.equal(first.calls, 0)
-  assert.equal(first.pending.length, 1)
-  assert.equal(first.sampledOut, 0)
-  assert.equal(fs.existsSync(path.join(h.memory, '123456.md')), false)
-  cfg.accumulateMaxChars = 5000
-  assert.equal((await h.run()).calls, 1)
+test('large chat volume is split into sequential chunks that each advance progress', async (t) => {
+  let n = 0
+  const h = fixture(t, async ({ prompt }, acc) => {
+    assert.match(prompt, /【本会话互动来源】/)
+    n++
+    acc.submit({ target: 'group:123456', operations: JSON.stringify([{ op: 'add', section: 'stable', text: `第${n}块记忆`, sourceIds: [sourceFromPrompt(prompt)[0]] }]) })
+    return {}
+  })
+  const base = h.acc.status().baselineAt
+  const rows = []
+  for (let i = 0; i < 400; i++) {
+    rows.push(row(base + i * 2, 1000 + i, '长消息'.repeat(60), { dir: 'in' }))
+    rows.push(row(base + i * 2 + 1, 5000 + i, '回复', { dir: 'out', triggerMsgId: 1000 + i }))
+  }
+  h.append(rows)
+  const r = await h.run()
+  assert.ok(r.calls > 1, `应分块处理，实际 ${r.calls} 次`)
+  assert.equal(r.pending.length, 0)
+  assert.deepEqual(r.updated, ['123456'])
+  // 所有块都推进了进度：再跑不应有新的调用
+  assert.equal((await h.run()).calls, 0)
+})
+
+test('memory file cap gates the saved document: over-cap result retries once with a compaction hint', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-cap-'))
+  t.after(() => { assert.ok(dir.startsWith(os.tmpdir())); fs.rmSync(dir, { recursive: true, force: true }) })
+  const archive = path.join(dir, 'archive'), memory = path.join(dir, 'memory')
+  fs.mkdirSync(archive)
+  fs.mkdirSync(memory)
+  fs.writeFileSync(path.join(memory, '123456.md'), '# 对话记忆\n\n<!-- qq-memory-managed -->\n\n## 稳定记忆\n\n## 近期记忆\n\n## 约定与承诺\n\n<!-- qq-memory-v1:{"entries":[],"processed":[],"nextId":1} -->\n')
+  const prompts = []
+  let attempt = 0
+  const acc = createDailyAccumulator({
+    bot: { core: { archive: { dir: archive } }, dsh: { async runIsolatedTask(req) {
+      prompts.push(req.prompt)
+      attempt++
+      const batch = /batchId="([^"]+)"/.exec(req.prompt)[1]
+      const digestSource = /"sourceId":"([a-f0-9]+)"/.exec(req.prompt)[1]
+      const text = attempt === 1 ? '很长的记忆内容'.repeat(2000) : '精简记忆'
+      acc.submit({ batchId: batch, target: 'group:123456', operations: JSON.stringify([{ op: 'add', section: 'stable', text, sourceIds: [digestSource] }]) })
+      return {}
+    } } },
+    cfg: {}, log: { warn() {} }, dataDirOf: () => dir, memoryDirOf: () => memory, invalidateMemoryOf() {}, maxBytesOf: () => 2000,
+  })
+  const base = acc.status().baselineAt
+  fs.appendFileSync(path.join(archive, 'group_123456.jsonl'), [row(base + 1, 1, 'hi'), row(base + 2, 2, 'reply', { dir: 'out', triggerMsgId: 1 })].map(JSON.stringify).join('\n') + '\n')
+  const r = await acc.sync({ confirm: true })
+  assert.equal(r.calls, 2, 'one compaction retry')
+  assert.equal(r.updated.length, 1)
+  assert.equal(r.pending.length, 0)
+  assert.match(prompts[1], /【上一轮超限】/)
+  const saved = fs.readFileSync(path.join(memory, '123456.md'), 'utf8')
+  assert.match(saved, /精简记忆/)
 })
 
 test('manual write during model run is retained and does not acknowledge sources', async (t) => {
@@ -130,18 +171,42 @@ test('new entries get short numeric IDs that are never reused after removal', ()
   assert.ok(Number(doc.nextId) >= 4)
 })
 
-test('crash-safe receipt in memory survives missing state checkpoint and no-new is successful', async (t) => {
+test('progress is idempotent per state and no-new run succeeds without replay', async (t) => {
   const h = fixture(t, async ({ prompt }, acc) => {
     acc.submit({ target: 'group:123456', operations: JSON.stringify([{ op: 'add', id: 'm1', section: 'stable', text: 'prefers concise', sourceIds: [sourceFromPrompt(prompt)[0]] }]) }); return {}
   })
   const ts = h.acc.status().baselineAt + 1
   h.append([row(ts, 1, 'wake'), row(ts + 1, 2, 'answer', { dir: 'out', triggerMsgId: 1 })])
   assert.equal((await h.run()).updated.length, 1)
-  const stateFile = path.join(h.dir, 'state', 'group-memory-daily.json')
-  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); state.groups = {}; state.nextDueAt = Date.now() - 3600000
-  fs.writeFileSync(stateFile, JSON.stringify(state))
-  h.restart()
-  assert.ok(h.acc.status().nextDueAt < Date.now(), 'missed persisted schedule remains due')
+  // 正文文件不再带来源回执（回执只在 state），避免文件被撑大
+  const saved = fs.readFileSync(path.join(h.memory, '123456.md'), 'utf8')
+  assert.doesNotMatch(saved, /"processed":\[[^\]]*[a-f0-9]{64}/, 'footer must not embed source receipts')
+  // 同一批素材不会重复处理
   assert.equal((await h.run()).calls, 0)
   assert.equal(sourceId(row(ts, 1, 'wake')).length, 64)
+})
+
+test('old entries are randomly forgotten after 3 days; promises are never forgotten', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-forget-'))
+  t.after(() => { assert.ok(dir.startsWith(os.tmpdir())); fs.rmSync(dir, { recursive: true, force: true }) })
+  const archive = path.join(dir, 'archive'), memory = path.join(dir, 'memory')
+  fs.mkdirSync(archive); fs.mkdirSync(memory)
+  const old = new Date(Date.now() - 10 * 86400000).toISOString()
+  const entries = [
+    { id: '1', section: 'stable', text: '旧印象', sourceIds: [], updatedAt: old, expiresAt: null },
+    { id: '2', section: 'promises', text: '答应过的事', sourceIds: [], updatedAt: old, expiresAt: null },
+  ]
+  fs.writeFileSync(path.join(memory, '123456.md'), [
+    '# 对话记忆', '', '<!-- qq-memory-managed -->', '', '## 稳定记忆', '- [1] 旧印象', '', '## 近期记忆', '', '## 约定与承诺', '- [2] 答应过的事', '',
+    `<!-- qq-memory-v1:${JSON.stringify({ entries, nextId: 3 })} -->`, '',
+  ].join('\n'))
+  const acc = createDailyAccumulator({
+    bot: { core: { archive: { dir: archive } }, dsh: { async runIsolatedTask() { return {} } } },
+    cfg: {}, log: { warn() {}, info() {} }, dataDirOf: () => dir, memoryDirOf: () => memory, invalidateMemoryOf() {}, random: () => 0,
+  })
+  const r = await acc.sync({ confirm: true })
+  assert.equal(r.forgotten, 1)
+  const saved = fs.readFileSync(path.join(memory, '123456.md'), 'utf8')
+  assert.doesNotMatch(saved, /旧印象/)
+  assert.match(saved, /答应过的事/, 'promises 不能被随机遗忘')
 })

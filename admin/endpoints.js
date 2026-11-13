@@ -30,6 +30,7 @@ import { atomicWriteFileSync } from '../platform/atomic.js'
 import { ensureDir, isInsidePath, resolveDataPath } from '../platform/paths.js'
 import { activePersona, listPersonas, personaSources, beginPersonaSwitch } from '../platform/persona-ref.js'
 import { createConfigStore } from './store.js'
+import { normalizeManagedDocument, visibleMemoryText } from '../plugins/group-memory/daily.js'
 import { runDiagnostics } from './diagnostics.js'
 import {
   ACTIONS, GROUP_PATHS, SECRET_MASK, allControls, collectModules, collectSchema, findControl,
@@ -863,10 +864,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   // ── memory（群记忆）──────────────────────────────────────────
-  const MEMORY_SECTIONS = ['## 唤醒与对话风格', '## 群里的人', '## 其它']
-  /** 私聊记忆沿用同三个小节，但人物节叫「对方与提到的人」（与积累器一致）。 */
-  const PRIVATE_SECTIONS = ['## 唤醒与对话风格', '## 对方与提到的人', '## 其它']
-  const sectionsOf = (kind) => (kind === 'private' ? PRIVATE_SECTIONS : MEMORY_SECTIONS)
+  /** 记忆文件固定三个分节（群与私聊相同）；控制台保存后检查是否缺失，只提示不改写。 */
+  const MEMORY_SECTIONS = ['## 稳定记忆', '## 近期记忆', '## 约定与承诺']
   const gmCfg = () => pluginCfgRuntime('group-memory')
   /** 单篇读取上限（字节）：控制台保存也按它限制，避免“保存成功但模型读不到尾巴”。 */
   const memoryMaxBytes = () => Math.max(1000, Number(gmCfg().maxBytes) || 24000)
@@ -1109,17 +1108,32 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
     if (op === 'read') {
       const line = memChatOf(payload)
-      let content = ''
-      try { content = fs.readFileSync(line.file, 'utf8') } catch { content = '' }
+      let raw = ''
+      try { raw = fs.readFileSync(line.file, 'utf8') } catch { raw = '' }
+      // 控制台只显示可读正文（分节 + 条目），隐藏页脚、管理标记和记账时间；保存时按旧页脚重新生成。
+      const content = raw.includes('qq-memory-managed')
+        ? raw
+          .replace(/\n<!-- qq-memory-v1:[\s\S]*?-->\s*$/, '')
+          .replace(/^\s*<!-- qq-memory-managed -->\s*$/m, '')
+          .replace(/ （更新：[^）\n]*）/g, '')
+          .trimEnd()
+        : raw
       return { ok: true, op, ...memInfo(line), content }
     }
 
     if (op === 'save') {
       const line = memChatOf(payload)
       const { file } = line
-      const content = String(payload.content == null ? '' : payload.content)
-      if (!content.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
-      const bytes = Buffer.byteLength(content.replace(/<!-- qq-memory-v1:[\s\S]*?-->\s*$/, '').replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, ''), 'utf8')
+      const incoming = String(payload.content == null ? '' : payload.content)
+      if (!incoming.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
+      let previousRaw = ''
+      try { previousRaw = fs.readFileSync(file, 'utf8') } catch { previousRaw = '' }
+      let content = incoming
+      if (incoming.includes('qq-memory-managed') || previousRaw.includes('qq-memory-managed')) {
+        // 与每日整理共用同一份归一化：按可见正文重建条目与页脚，避免正文/页脚不一致。
+        content = normalizeManagedDocument(incoming, previousRaw)
+      }
+      const bytes = Buffer.byteLength(visibleMemoryText(content), 'utf8')
       const limit = memoryMaxBytes()
       if (bytes > limit) {
         throw new Error(`内容 ${bytes} 字节，超过单篇读取上限 ${limit} 字节（超过的部分模型读不到）。请精简，或先在「工具配置」调大 maxBytes。`)
@@ -1149,7 +1163,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         } catch (e) { warn(`记忆旧版留档失败 ${line.chat}: ${e.message}`) }
       }
       atomicWriteFileSync(file, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o600 })
-      const missing = sectionsOf(line.kind).filter((s) => !content.includes(s))
+      const missing = MEMORY_SECTIONS.filter((s) => !content.includes(s))
       return {
         ok: true, op, ...memInfo(line),
         message: `已保存 ${bytes} 字节${missing.length ? `　⚠️ 缺少小节：${missing.join('、')}` : ''}`,

@@ -416,6 +416,13 @@ export default {
       const turn = turnCtx || bot.currentTurn(target)
       const cap = maxPerTurn()
       if ((turn?.stickersSent || 0) >= cap) return { ok: false, reason: `这轮已经发过 ${turn.stickersSent} 张了（每轮上限 ${cap}）` }
+      // 本轮正文若刚被拆条（尾巴还在定时发），等尾巴发完再发图：顺序才像"说完话补一张"
+      if (turn?.splitTail) {
+        await Promise.race([
+          Promise.resolve(turn.splitTail).catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 12000)),
+        ])
+      }
       const hit = await pick(query)
       if (!hit.ok) return hit
       // 说明文字原样交给内核（脱敏 / CQ 转义是 sendMedia → deliver 的事，插件不写第二份）

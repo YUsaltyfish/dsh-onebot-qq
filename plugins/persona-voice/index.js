@@ -57,10 +57,10 @@ const LINES_FALLBACK = {
 const LINES_SECTIONS = Object.keys(LINES_FALLBACK)
 
 /**
- * 拆条只针对**聊天短回复**：超过这个字数就交给内核按长文处理（套合并转发卡片 / 单条长消息）。
- * 不加这道闸的话，几百字的长回复会被拆成两三条平铺，逃掉"长文卡片"这条既有行为（测试踩到）。
+ * 拆条只针对**聊天回复**：超过这个字数就交给内核按长文处理（套合并转发卡片 / 单条长消息）。
+ * 默认 200，控制台可用 `splitReplyMaxChars` 覆盖（120 太紧，私聊正常的两三段话就被挡了）。
  */
-const SPLIT_MAX_CHARS = 120
+const SPLIT_MAX_CHARS_DEFAULT = 200
 
 /** 解析句池文本 → { 节名: [句子] }（纯函数）。
  *  · `## <节名>` 分节、`#` 注释、未知分节/节外内容忽略（别把说明当句子吃进去）
@@ -115,28 +115,29 @@ export default {
   title: '人设句池 / 拆条',
   order: 40,
   configSchema: {
-    enabled: { type: 'bool', default: true, group: '句池', label: '人设句池 / 唤醒词 / 拆条', hint: '开：启用人设文件的句池（随机句）、唤醒词、拆条回话；关：只用 AGENTS 指令，不加载这些花样。' },
+    enabled: { type: 'bool', default: true, group: '人设与拆条', label: '人设句池 / 唤醒词 / 拆条', hint: '开：启用人设文件的句池（随机句）、唤醒词、拆条回话；关：只用 AGENTS 指令，不加载这些花样。' },
     personaDir: {
-      type: 'str', default: DEFAULT_PERSONA_DIR, group: '句池', label: '人设目录',
+      type: 'str', default: DEFAULT_PERSONA_DIR, group: '人设与拆条', label: '人设目录',
       hint: '相对路径由内核按数据目录解析；人设文件命名 `<名字>.md` / `.lines.txt` / `.wake.txt`',
     },
     activePersona: {
-      type: 'str', default: '', group: '句池', label: '当前人设',
+      type: 'str', default: '', group: '人设与拆条', label: '当前人设',
       hint: '留空 = 按 qq-lines 工作区的指针/软链自动解析（换人设不用改这里）',
     },
-    // 拆条：本插件自有的权威配置（控制台在本插件页「句池」里显示；
+    // 拆条：本插件自有的权威配置（控制台在本插件页「人设与拆条」里显示；
     // 旧版存在 pacing.reply.style，启动时已自动迁到这里，见 kernel/config-store.js）。
-    splitReplyEnabled: { type: 'bool', default: true, group: '句池', label: '拆条（先短反应再补正话）', hint: '小概率把一条回复拆成两条发（先丢个短反应、隔一会儿补正话），治“每条一个路子”的机器感。' },
-    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 0, max: 100, step: 5, group: '句池', label: '拆条概率', hint: '每次回话拆条的概率（0 = 不拆）；太短的话不拆（见下面的「拆条最小长度」）。' },
-    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '句池', label: '拆条最小长度', advanced: true, hint: '短于这个字数的回复不拆条（太短了拆成两条很怪）。' },
-    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '句池', label: '拆条间隔', advanced: true, hint: '拆出来的第一条之后，每条隔多久发（拆成 3 条时是 1×间隔、2×间隔）；调大更像“打完一句再想一句”。' },
+    splitReplyEnabled: { type: 'bool', default: true, group: '人设与拆条', label: '拆条（先短反应再补正话）', hint: '小概率把一条回复拆成两条发（先丢个短反应、隔一会儿补正话），治“每条一个路子”的机器感。' },
+    splitReplyProbability: { type: 'int', unit: '%', scale: 0.01, default: 50, min: 0, max: 100, step: 5, group: '人设与拆条', label: '拆条概率', hint: '每次回话拆条的概率（0 = 不拆）；太短的话不拆（见下面的「拆条最小长度」）。' },
+    splitReplyMinLen: { type: 'int', default: 12, min: 0, max: 200, group: '人设与拆条', label: '拆条最小长度', advanced: true, hint: '短于这个字数的回复不拆条（太短了拆成两条很怪）。' },
+    splitReplyMaxChars: { type: 'int', default: 200, min: 20, max: 600, step: 10, group: '人设与拆条', label: '拆条字数上限', advanced: true, hint: '整条回复超过这个字数就不拆（交给长文处理）；私聊正常长回复建议 200 左右。' },
+    splitReplyDelayMs: { type: 'int', unit: '秒', scale: 1000, default: 1, min: 0, max: 10, group: '人设与拆条', label: '拆条间隔', advanced: true, hint: '拆出来的第一条之后，每条隔多久发（拆成 3 条时是 1×间隔、2×间隔）；调大更像“打完一句再想一句”。' },
     splitReplyMaxParts: {
-      type: 'int', default: 3, min: 2, max: 4, group: '句池', label: '最多拆几条', advanced: true,
+      type: 'int', default: 3, min: 2, max: 4, group: '人设与拆条', label: '最多拆几条', advanced: true,
       hint: '一段回复最多拆成几条发（2~4）。只在句末标点/换行处拆，绝不拦腰砍句；\n'
         + '句子不够就按实际句数发（2 条就够时不会硬凑）。拆出来的每条之间隔「拆条间隔」秒。',
     },
     quoteEnforce: {
-      type: 'bool', default: true, group: '句池', label: '不引用刚触发回复的那条消息',
+      type: 'bool', default: true, group: '人设与拆条', label: '不引用刚触发回复的那条消息',
       hint: '人话：它回你时不会「引用」你刚说的那句（真人聊天不会这样）。\n开：模型引用刚触发回复的那条消息时自动去掉引用；例外：唤醒后群里又插了 ≥「引用门槛」条消息时，引用才有意义、会保留。\n关：模型想引用就引用，不拦。',
     },
   },
@@ -299,8 +300,9 @@ export default {
     log.info(`[网感] 句池: 人设 ${activePersona() || '(未解析, 只用底池)'} → ${personaLinesFile() || '—'}`
       + `｜底池 ${baseLinesFile()}｜唤醒词来源 ${wakeSource().from}`)
 
-    // 正在等第二条的"正话"：deliver 会再跑一遍本钩子，靠它认出"这是我自己拆出去的"，别二次拆
-    const pendingTails = new Map()
+    // 正在等第二条的"正话"：deliver 会再跑一遍本钩子，靠它认出"这是我自己拆出去的"，别二次拆。
+    // 用 Set 而不是单文本：同一会话两轮拆条的尾巴可能时间重叠，单键会互相覆盖导致误拆。
+    const pendingTails = new Map() // chatKey -> Set<text>
 
     bot.onOutbound((out) => {
       if (!enabledNow()) return
@@ -328,9 +330,17 @@ export default {
       const minLen = Number(cfg.splitReplyMinLen) > 0 ? Number(cfg.splitReplyMinLen) : 12
       const delayMs = toMs(cfg.splitReplyDelayMs)
       const maxParts = Math.max(2, Math.min(4, Math.floor(Number(cfg.splitReplyMaxParts) || 3)))
+      const maxChars = Number(cfg.splitReplyMaxChars) > 0 ? Math.round(Number(cfg.splitReplyMaxChars)) : SPLIT_MAX_CHARS_DEFAULT
       const text = String(out.text || '')
       // 先认自己拆出去的后几条（放在 mode 判断前：内核可能已按 turnCtx 给它们补了引用）
-      if (pendingTails.get(out.target) === text) { pendingTails.delete(out.target); return }
+      {
+        const tails = pendingTails.get(out.target)
+        if (tails && tails.has(text)) {
+          tails.delete(text)
+          if (!tails.size) pendingTails.delete(out.target)
+          return
+        }
+      }
       if (out.mode !== 'plain') return
       // 只拆模型经 send_message 写的话（fromTool）：命令回执 / 答应声 / 系统提示 / 生图说明
       // 这些"非对话正文"不该被拆 —— 拆了命令输出会变成两条，用户看不出哪条是结果（测试踩过）。
@@ -339,7 +349,7 @@ export default {
       // CQ 码（图 / 表情 / 合并转发）挂在**单条**上，拆成几条就是坏消息（sendMedia 也走 deliver）
       if (text.includes('[CQ:')) return
       if (text.length < minLen) return
-      if (text.length > SPLIT_MAX_CHARS) return // 长文不拆：留给内核走卡片/长消息
+      if (text.length > maxChars) return // 超上限不拆：留给内核走卡片/长消息
       if (Math.random() >= prob) return
       // ⚠️ 拆条失败必须降级成单条发（**话不能吞**）：拆条只是"像真人"的锦上添花，
       //    找不到自然断点（绝不把一句话拦腰砍）或算断点抛错 → 原样单条发，不许把正话弄丢。
@@ -350,15 +360,25 @@ export default {
       out.text = parts[0]
       // 后面每一条依次隔 delayMs 发**同一个 target**；走 bot.deliver = 唯一出站口
       // （脱敏 / 留档 / 长文卡片都由内核兜，这里绝不自己发裸消息）
-      parts.slice(1).forEach((part, i) => {
+      const tailSends = parts.slice(1).map((part, i) => new Promise((resolve) => {
         const nth = i + 2
         setTimeout(async () => {
-          pendingTails.set(out.target, part)
-          try { await bot.deliver(out.target, part, { turnCtx: out.turnCtx || null }) }
+          const set = pendingTails.get(out.target) || new Set()
+          set.add(part)
+          pendingTails.set(out.target, set)
+          try { await bot.deliver(out.target, part, { turnCtx: tc || null }) }
           catch (e) { log.warn(`[拆条] 第 ${nth} 条发送失败 (${out.target}): ${e.message}`) }
-          finally { pendingTails.delete(out.target) }
+          finally {
+            set.delete(part)
+            if (!set.size) pendingTails.delete(out.target)
+            resolve()
+          }
         }, delayMs * nth)
-      })
+      }))
+      // 尾巴串成 Promise 挂到本轮 turnCtx：send_message 发表情前会等它，表情就不会卡在第一、二条中间。
+      if (tc) {
+        tc.splitTail = Promise.resolve(tc.splitTail).catch(() => {}).then(() => Promise.all(tailSends))
+      }
       log.info(`[拆条] ${out.target} → ${parts.map((x) => `「${x.slice(0, 20)}」`).join(' + ')}`)
     })
   },

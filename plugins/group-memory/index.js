@@ -20,7 +20,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { stripBom } from '../../platform/atomic.js'
-import { createDailyAccumulator } from './daily.js'
+import { createDailyAccumulator, visibleMemoryText } from './daily.js'
 
 export default {
   id: 'group-memory',
@@ -68,18 +68,6 @@ export default {
     accumulateRecentDays: {
       type: 'int', default: 14, min: 1, max: 90, group: '群记忆', label: '近期经历保留天数',
       hint: '仅近期经历自动到期；稳定记忆与未完成约定不按此时间自动删除。',
-    },
-    accumulateBatchMaxChars: {
-      type: 'int', default: 200000, min: 20000, max: 600000, step: 10000, group: '群记忆', label: '单次提示词上限', unit: '字',
-      hint: '单会话完整提示词预算；超出保留待办，不截断、不丢素材。',
-    },
-    accumulateMsgPerGroup: {
-      type: 'int', default: 200, min: 20, max: 1000, step: 20, group: '群记忆', label: '每群最多取多少条',
-      hint: '单会话互动消息条数预算；超出保留待办，不采样丢弃。',
-    },
-    accumulateMaxChars: {
-      type: 'int', default: 8000, min: 1000, max: 30000, step: 500, group: '群记忆', label: '每群正文上限', unit: '字',
-      hint: '单会话互动正文预算；超出保留待办，不从最早消息丢弃。',
     },
     accumulateRetainRevisions: {
       type: 'int', default: 20, min: 0, max: 200, step: 5, group: '群记忆', label: '保留多少历史版本',
@@ -164,11 +152,11 @@ export default {
       : path.join(dirOf(), `${lineIdOf(key)}.md`))
 
     /**
-     * 读原文（只剥 BOM 与行尾记账注释，**不按 maxBytes 截断**）。
-     * `stamp = mtimeMs:size`：文件没改就不重复读盘；改了（积累器/控制台写回）就自然换新版。
+     * 读原文（只剥 BOM，**不按 maxBytes 截断**）。记账信息（条目 ID、时间、元数据页脚）
+     * 在这层保留，给写盘和人工对账用；只有 readMemory() 给模型时才隐藏。
+     * `stamp = mtimeMs:size`：文件没改就不重复读盘；改了（每日整理/控制台写回）就自然换新版。
      *
-     * ⚠️ 积累器必须用原文：它的「合并 → 整篇写回」如果拿截断后的文本当基准，
-     *    超过 maxBytes 的尾部每轮都会丢（旧版的 bug，见读写口径分离）。
+     * ⚠️ 写盘必须用原文：拿截断后的文本当基准，超过 maxBytes 的尾部会被丢掉。
      */
     function loadRaw(key) {
       const file = fileOf(key) // key 已过 group:/private: + 4–12 位纯数字校验 → 不会有路径穿越
@@ -196,11 +184,7 @@ export default {
       const r = loadRaw(key)
       if (!r) return null
       // 记账信息（条目 ID、更新/到期时间、文末元数据）只服务写盘与人工编辑，不喂给模型。
-      const visible = r.text
-        .replace(/<!-- qq-memory-v1:[\s\S]*?-->\s*$/, '')
-        .replace(/[ \t]*<!--[^>]*-->[ \t]*$/gm, '')
-        .replace(/^- \[[a-zA-Z0-9_-]{1,80}\] /gm, '- ')
-        .replace(/ （更新：[^）\n]*）$/gm, '')
+      const visible = visibleMemoryText(r.text)
       const text = clip(visible).trim()
       return { text, stamp: r.stamp, clipped: text.length < visible.trim().length, bytes: r.bytes }
     }

@@ -649,6 +649,13 @@ export async function apply(ctx, bundleConfig = {}) {
       // 表情包：正文发完后顺手带一张（插件通过 bot.shared.stickerSend 注册；没装/没开就如实说）
       const wantSticker = String(args.sticker ?? '').trim()
       if (wantSticker) {
+        // 本轮正文若被拆条，后几条是定时发的：等尾巴发完再发表情，避免表情固定卡在第一、二条中间。
+        if (turnCtx?.splitTail) {
+          await Promise.race([
+            Promise.resolve(turnCtx.splitTail).catch(() => {}),
+            new Promise((resolve) => setTimeout(resolve, 12000)),
+          ])
+        }
         const sendSticker = kernel.shared?.stickerSend
         if (typeof sendSticker !== 'function') out.sticker = { ok: false, reason: '表情包插件未启用（sticker 参数被忽略）' }
         else {

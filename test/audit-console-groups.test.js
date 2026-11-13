@@ -20,6 +20,7 @@ test('分组命名：消息设置 / 主动接话；旧页名不再出现', async
   const groups = schema.groups.map((g) => g.name)
   assert.ok(groups.includes('消息设置'), '应有「消息设置」页')
   assert.ok(groups.includes('主动接话'), '应有「主动接话」页')
+  assert.ok(groups.includes('人设与拆条'), '拆条/句池页应叫「人设与拆条」')
   assert.ok(groups.includes('OneBot 连接'), '模型入口所在专用页必须真实存在')
   assert.ok(schema.controls.some((c) => c.key === 'persona-voice.splitReplyProbability'), '拆条字段应显示在 persona-voice 自己的页里')
   for (const old of ['回话', '回话细节', '回话模式', '回话模式·高级']) {
@@ -110,9 +111,9 @@ test('句池 / 唤醒：各自成页（persona-voice / gate-wake 一对一）', 
   const schema = await schemaOf(t)
   assert.deepEqual(schema.personaGroups, [], '不再折叠进总览：两者各自成页')
   const names = schema.groups.map((g) => g.name)
-  assert.ok(names.includes('句池') && names.includes('唤醒'), '应有「句池」「唤醒」两页')
+  assert.ok(names.includes('人设与拆条') && names.includes('唤醒'), '应有「人设与拆条」「唤醒」两页')
   const want = {
-    '句池': ['persona-voice.enabled', 'persona-voice.personaDir', 'persona-voice.activePersona', 'persona-voice.quoteEnforce'],
+    '人设与拆条': ['persona-voice.enabled', 'persona-voice.personaDir', 'persona-voice.activePersona', 'persona-voice.quoteEnforce'],
     '唤醒': ['gate-wake.enabled', 'gate-wake.pokeBack', 'gate-wake.keywords', 'gate-wake.callAck'],
   }
   for (const g of Object.keys(want)) {
@@ -123,7 +124,7 @@ test('句池 / 唤醒：各自成页（persona-voice / gate-wake 一对一）', 
     }
   }
   const pv = schema.controls.filter((c) => c.plugin === 'persona-voice')
-  assert.ok(pv.every((c) => c.group === '句池'), pv.map((c) => c.key + ':' + c.group).join(','))
+  assert.ok(pv.every((c) => c.group === '人设与拆条'), pv.map((c) => c.key + ':' + c.group).join(','))
   const gw = schema.controls.filter((c) => c.plugin === 'gate-wake')
   assert.ok(gw.every((c) => c.group === '唤醒' || c.group === '其他'), gw.map((c) => c.key + ':' + c.group).join(','))
 })
@@ -136,11 +137,11 @@ test('所有可见开关都带鼠标悬停解释（hint 非空）', async (t) =>
   assert.deepEqual(missing, [], `这些开关缺少悬停解释：${missing.join(', ')}`)
 })
 
-test('引用拦截开关在「句池」页（persona-voice 一对一），标签/解释写明作用', async (t) => {
+test('引用拦截开关在「人设与拆条」页（persona-voice 一对一），标签/解释写明作用', async (t) => {
   const schema = await schemaOf(t)
   const q = schema.controls.find((c) => c.key === 'persona-voice.quoteEnforce')
   assert.ok(q, 'quoteEnforce 应仍可见')
-  assert.equal(q.group, '句池', '应归到句池页（persona-voice 一对一）')
+  assert.equal(q.group, '人设与拆条', '应归到「人设与拆条」页（persona-voice 一对一）')
   assert.match(String(q.label), /不引用/, '标签应说明「不引用刚触发回复的那条消息」')
   assert.ok(String(q.hint).includes('引用门槛'), '解释里应带「引用门槛」这个上下游关系')
 })

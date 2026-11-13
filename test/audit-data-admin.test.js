@@ -892,6 +892,31 @@ test('群记忆控制台：save 带 ifMtime 时拒绝陈旧覆盖（积累器刚
   }
 })
 
+test('群记忆控制台保存：按可见正文归一化，缺的节自动补齐，旧小节名不再出现', async (t) => {
+  const { endpoints, memDir } = await memoryHarness(t)
+  const file = path.join(memDir, `${GROUP_ID}.md`)
+  fs.mkdirSync(memDir, { recursive: true })
+  const body = ['# 对话记忆', '', '<!-- qq-memory-managed -->', '', '## 稳定记忆', '- [1] 一条', '', '## 近期记忆', '', '## 约定与承诺', ''].join('\n')
+  const ok = await endpoints.handle('memory', { op: 'save', group_id: GROUP_ID, content: body })
+  assert.equal(ok.ok, true)
+  const saved = fs.readFileSync(file, 'utf8')
+  assert.ok(saved.includes('## 稳定记忆') && saved.includes('## 近期记忆') && saved.includes('## 约定与承诺'))
+  assert.ok(saved.includes('qq-memory-v1'), '保存后应重建页脚')
+
+  // 只给一节（模拟控制台读回来的可读正文）：自动补齐缺节，不报错、不留旧小节名
+  const partial = await endpoints.handle('memory', { op: 'save', group_id: GROUP_ID, content: '# 对话记忆\n## 稳定记忆\n- [2] 一条\n' })
+  assert.equal(partial.ok, true)
+  const after = fs.readFileSync(file, 'utf8')
+  assert.ok(after.includes('## 近期记忆') && after.includes('## 约定与承诺'))
+  assert.doesNotMatch(after, /唤醒与对话风格|群里的人|对方与提到的人/)
+  assert.match(after, /\[2\] 一条/)
+
+  // 控制台读取：只返回可读正文，不把页脚元数据甩给用户
+  const read = await endpoints.handle('memory', { op: 'read', group_id: GROUP_ID })
+  assert.doesNotMatch(read.content, /qq-memory-v1|qq-memory-managed|（更新：/)
+  assert.match(read.content, /\[2\] 一条/)
+})
+
 test('私聊记忆：指针 / read_memory / 控制台列表·读取·删除都复用同一套', async (t) => {
   const { h, endpoints, memDir } = await memoryHarness(t)
   const privDir = path.join(memDir, 'private')
