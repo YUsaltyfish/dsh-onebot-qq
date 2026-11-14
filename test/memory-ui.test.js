@@ -239,3 +239,22 @@ test('legacy interval controls are gone; a running round disables duplicate manu
   }
   assert.equal(nodes.find((n) => n.props?.key === 'acc').props.disabled, true)
 })
+
+test('配置损坏：控制台仍渲染红色提示条与标签页（A6，别把人锁在门外）', () => {
+  const schema = {
+    controls: [], groups: [], actions: [], modules: [],
+    configError: '配置文件读不了（/tmp/x/config.json）：Expected double-quoted property name',
+  }
+  const status = {
+    ok: true, configError: schema.configError,
+    meta: { configPath: '/tmp/x/config.json', configReady: false },
+    health: {}, onboarding: [], lines: { mapped: 0 }, persona: { personas: [] },
+  }
+  const state = [schema, status, '', false, null, null, 'overview', {}]
+  const { ConsoleShell } = components({ useState: () => [state.shift(), () => {}], useEffect() {}, useCallback: (fn) => fn })
+  const tree = inspect(ConsoleShell({ ctx: {} }))
+  assert.ok(tree.text.includes('配置文件读取/解析失败'), '要有明确提示，而不是一行“读取失败”')
+  assert.ok(tree.text.includes('/tmp/x/config.json'), '要给出配置文件路径，方便用户手修')
+  assert.ok(tree.text.includes('不要重启'), '要提醒修好前别重启（坏配置下插件起不来）')
+  assert.ok(tree.text.includes('总览') && tree.text.includes('群记忆'), 'tabs 仍要渲染，诊断入口不能消失')
+})

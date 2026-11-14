@@ -96,7 +96,7 @@ test('「其他」页：权限 / 门禁 / 文件 / 发图 / 头像 五组的控�
   assert.ok(names.includes('其他'), '应有「其他」页')
   const other = schema.controls.filter((c) => c.group === '其他')
   for (const key of [
-    'gate-wake.adminQq', 'gate-wake.ignoreGroups', 'gate-wake.groupUserBlocklist',
+    'gate-wake.ignoreGroups', 'gate-wake.groupUserBlocklist',
     'gate-wake.groupUserAllowlist', 'gate-wake.allowedUsers',
     'file-transfer.uploadDir', 'file-transfer.imageWhitelist',
     'imagegen.avatarDir', 'imagegen.avatarCacheHours',

@@ -53,7 +53,7 @@ export function defaultConfig() {
       // 纯聊天 + 联网，裁掉 shell / 文件 / 任务 / 技能 / 插件管理类工具。
       agentPreset: 'qq-chat',
       qqWorkspacePath: 'workspace',
-      // 控制台「DSH 连接」页可改；插件启动时按它创建（或复用）QQ 聊天工作区。
+      // 实例配置可改（控制台没有该字段）；插件启动时按它创建（或复用）QQ 聊天工作区。
       workspaceTitle: 'QQ 聊天',
       sessionsFile: 'state/sessions.json',
     },
@@ -474,7 +474,8 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
   // 旧版 pacing.reply.style（拆条/表情概率）先搬进各自插件配置，再按废弃键清掉。
   const styleMigrated = migrateStyleIntoPluginConfig(merged)
   const intervalMigrated = migrateReplyInterval(merged)
-  const pruned = pruneObsoleteConfig(merged) || intervalMigrated || styleMigrated
+  const mapMigrated = migrateGroupMapsToText(merged)
+  const pruned = pruneObsoleteConfig(merged) || intervalMigrated || styleMigrated || mapMigrated
   // 迁移态 / 清理态落盘：否则控制台读的是旧结构、写回后又被迁移逻辑覆盖（用户会误以为"改了不生效"）
   if ((migrated || pruned) && createIfMissing) {
     try {
@@ -483,7 +484,29 @@ export function loadConfig({ dataDir: configuredDataDir = '', configPath = '', e
     } catch { /* 只读目录等：保持内存迁移，不阻塞启动 */ }
   }
   const runtime = applyCredentialEnv(resolveRuntimePaths(merged, dataDir), env)
-  return { dataDir, configPath: file, raw: merged, runtime, migrated, created }
+  return { dataDir, configPath: file, raw: merged, runtime, migrated, created, mapMigrated }
+}
+
+/**
+ * gate-wake 的两个「群内名单」：对象存法 `{群号:[QQ]}` → 文本存法 `群号:QQ,QQ;…`。
+ *
+ * 为什么要转：控制台把这两个键当 str 控件渲染，对象会被 `String()` 成 `[object Object]`，
+ * 用户一编辑就把整份名单写成那个字面量（名单全丢）。gate-wake 两种存法都认，转换只改存法。
+ * 空名单保留成 `群号:`（= 已纳入管理但名单为空，语义同「不限制」）。
+ */
+export function migrateGroupMapsToText(cfg) {
+  const gw = cfg && cfg.pluginConfig && cfg.pluginConfig['gate-wake']
+  if (!gw || typeof gw !== 'object' || Array.isArray(gw)) return false
+  let changed = false
+  for (const key of ['groupUserAllowlist', 'groupUserBlocklist']) {
+    const value = gw[key]
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    gw[key] = Object.entries(value)
+      .map(([gid, qqs]) => `${gid}:${(Array.isArray(qqs) ? qqs : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).join(',')}`)
+      .join(';')
+    changed = true
+  }
+  return changed
 }
 
 /** 写实例配置：备份（ASCII 后缀）→ 原子写 → 返回备份文件名。 */

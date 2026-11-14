@@ -201,7 +201,7 @@ async function checkAgentPreset(kernel, runtime) {
   }
   const r = await safeAsync(() => kernel.checkAgentPreset(), null)
   if (!r || typeof r !== 'object') {
-    return makeCheck('agentPreset', 'Agent 预设', true, false, 'preset 校验调用失败（内核异常）', '重启 dsh-web；或在控制台把 QQ 线 Agent 预设清空用 DSH 默认')
+    return makeCheck('agentPreset', 'Agent 预设', true, false, 'preset 校验调用失败（内核异常）', '重启 dsh-web；或把 config.json 的 dsh.agentPreset 清空，用 DSH 默认')
   }
   if (r.mode === 'default' || !toStr(r.name)) {
     // 空 preset ≠ 安全默认：QQ 线会继承 DSH profile 默认工具面（可能含 bash/文件写入）
@@ -209,7 +209,7 @@ async function checkAgentPreset(kernel, runtime) {
       'agentPreset', 'Agent 预设', true, false,
       '未指定 preset：QQ 线将继承 DSH profile 的默认工具面（可能包含 bash/文件写入等）',
       '建议在 profile 里安装 qq-chat 示例 preset（examples/presets/qq-chat.patch.yml），'
-        + '然后在控制台「DSH 连接」页把 QQ 线 Agent 预设填成它；只自用且信任群成员时可忽略',
+        + '然后把 config.json 的 dsh.agentPreset 填成它（控制台没有这个字段，改完重启 dsh-web）；只自用且信任群成员时可忽略',
     )
   }
   const name = toStr(r.name)
@@ -223,7 +223,7 @@ async function checkAgentPreset(kernel, runtime) {
   return makeCheck(
     'agentPreset', 'Agent 预设', true, false,
     `preset "${name}" 不存在${presets.length ? `（可用：${presets.join('、')}）` : ''}`,
-    '在控制台「DSH 连接」页把 QQ 线 Agent 预设改成存在的 preset（或清空用 DSH 默认）',
+    '把 config.json 的 dsh.agentPreset 改成存在的 preset（或清空用 DSH 默认），改完重启 dsh-web',
   )
 }
 
@@ -235,13 +235,6 @@ function checkTools(kernel, runtime, offline = false) {
   else if (kernel?.toolDefs instanceof Map) names = [...kernel.toolDefs.keys()].map((k) => `${prefix}${k}`)
   else if (Array.isArray(kernel?.tools)) names = kernel.tools.map(String)
   const missing = REQUIRED_TOOLS.filter((t) => !names.includes(`${prefix}${t}`))
-  if (names.length < 4) {
-    return makeCheck(
-      'tools', '原生工具注册', true, false,
-      `只注册了 ${names.length} 个工具${missing.length ? `，缺：${missing.join('、')}` : ''}`,
-      '重启 dsh-web 并查看日志「已注册 N 个原生工具」；确认插件加载成功（工具注册在 apply 阶段）',
-    )
-  }
   return makeCheck(
     'tools', '原生工具注册', true, missing.length === 0,
     `已注册 ${names.length} 个工具${missing.length ? `；缺：${missing.join('、')}` : `（${prefix}send_message / recall 等）`}`,
@@ -250,7 +243,11 @@ function checkTools(kernel, runtime, offline = false) {
 }
 
 async function checkOneBot(kernel, runtime, offline = false) {
-  if (offline) return makeCheck('onebot', 'OneBot 连接', false, true, '离线自检：跳过网络探测（不代表连接已验证）')
+  if (offline) {
+    return makeCheck('onebot', 'OneBot 连接', false, false,
+      '离线自检：跳过网络探测（不能据此认为连接正常）',
+      '要看真实连接状态请点「🔌 测试 OneBot 连接」或运行完整诊断')
+  }
   const wsUrl = sanitizeUrl(runtime?.onebot?.wsUrl)
   const httpUrl = sanitizeUrl(runtime?.onebot?.httpUrl)
   const where = [wsUrl ? `WS ${wsUrl}` : '', httpUrl ? `HTTP ${httpUrl}` : ''].filter(Boolean).join('；')
@@ -500,7 +497,7 @@ export async function runDiagnostics({ kernel = {}, store = null, log = console,
     checks.push(checkRuntime(kernel, runtime))
   } catch (e) {
     // 任何单项意外都不影响整体诊断：兜底成一条 ❌
-    checks.push(makeCheck('runtime', '运行信息', false, false, `诊断过程异常：${toStr(e?.message)}`, '重启 dsh-web 后重试；若持续失败把本条贴给 DSH'))
+    checks.push(makeCheck('diagnose', '诊断过程', true, false, `诊断过程异常：${toStr(e?.message)}`, '重启 dsh-web 后重试；若持续失败把本条贴给 DSH'))
   }
 
   const fails = checks.filter((c) => !c.ok && c.required)

@@ -122,7 +122,7 @@ export default {
     },
     activePersona: {
       type: 'str', default: '', group: '人设与拆条', label: '当前人设',
-      hint: '留空 = 按 qq-lines 工作区的指针/软链自动解析（换人设不用改这里）',
+      hint: '留空 = 按 QQ 工作区的指针/软链自动解析；填写名字 = 钉死该人设，并同时切换投递文件（与总览页人设标签同一条事务，下一条消息生效）',
     },
     // 拆条：本插件自有的权威配置（控制台在本插件页「人设与拆条」里显示；
     // 旧版存在 pacing.reply.style，启动时已自动迁到这里，见 kernel/config-store.js）。

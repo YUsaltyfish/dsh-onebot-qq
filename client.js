@@ -223,7 +223,10 @@ window.__ModuleLoader__.load({
 							if (isSecret && raw === '') return // 秘密字段留空 = 不改
 							if (!isSecret && raw === initStr.trim()) return
 							const nextVal = c.type === 'group' ? raw.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean) : raw
-							run(isSecret ? `${c.label} 已更新` : `${c.label} = ${raw || '(空)'}`, () => call('set', { key: c.key, value: nextVal }))
+							const input = e.target
+							const pending = run(isSecret ? `${c.label} 已更新` : `${c.label} = ${raw || '(空)'}`, () => call('set', { key: c.key, value: nextVal }))
+							// 保存失败（校验不过/被拒）时把输入框还原成当前生效值，别让框里挂着一个"看起来已保存"的错值
+							pending.then((ok) => { if (!ok) input.value = isSecret ? '' : initStr })
 						},
 					})
 				}
@@ -290,9 +293,10 @@ window.__ModuleLoader__.load({
 		// 各功能页顶部的「跨页指路」：只有会让人找不到开关的地方才写一行，别堆说明。
 		const GROUP_NOTES = {
 			'主动接话': '群聊、私聊共用小时级随机间隔；群逐群允许，私聊明确名单。最近状态显示各会话下次机会与连续未回复次数。',
-			'其他': '这里是低频 / 高级配置，按来源分组：权限（主人 QQ）、门禁（屏蔽群 / 群内黑名单 / 白名单 / 全局允许用户）、\n'
+			'其他': '这里是低频 / 高级配置，按来源分组：门禁（屏蔽群 / 群内黑名单 / 白名单 / 全局允许用户）、\n'
 				+ '文件（入站落盘目录）、发图（可发图片目录白名单）、头像（缓存目录与时长）。\n'
-				+ '平时不用动；每一项都有详细悬停解释。门禁类在「群聊」页每张群卡片上也有同样的开关，改哪边都一样。',
+				+ '平时不用动；每一项都有详细悬停解释。门禁类在「群聊」页每张群卡片上也有同样的开关，改哪边都一样。\n'
+				+ '主人 QQ 在「群聊」页顶部，是唯一入口。',
 		}
 
 		/** 单个功能分组页（消息设置 / 生图 / 表情包 / 链接解析…） */
@@ -1115,7 +1119,9 @@ window.__ModuleLoader__.load({
 				fallbackSelect()
 			}
 
+			// 返回 true/false：个别控件（如人设名）失败时要把输入框还原，靠这个判断。
 			const run = async (label, fn) => {
+				let ok = true
 				setBusy(true); setMsg('')
 				try {
 					const r = await fn()
@@ -1127,11 +1133,16 @@ window.__ModuleLoader__.load({
 						: `${label} ✓`
 					setMsg(detail)
 					await refresh()
-				} catch (e) { setMsg(`${label} ✗ ${e.message}`) } finally { setBusy(false) }
+				} catch (e) { ok = false; setMsg(`${label} ✗ ${e.message}`) } finally { setBusy(false) }
+				return ok
 			}
 
 			const TABS = tabDefs(schema)
 			const curTab = TABS.find((t) => t.id === tab) || TABS[0]
+			// 配置读不了时（JSON 损坏 / 权限）后端会用内存兜底值渲染，这里明确告知：
+			// 显示的是最后一次成功加载的配置，保存会被拒绝；修好文件后轮询会自动恢复，别重启（坏配置下插件起不来）。
+			const configError = (schema && schema.configError) || (status && status.configError) || ''
+			const configPath = (status && status.meta && status.meta.configPath) || ''
 			const api = { ctx, call, refresh, run, busy, setBusy, schema, status, msg, setMsg, setConfirmBox, setReportBox, monitorDraft, setMonitorDraft }
 
 			const body = (!schema || !status)
@@ -1151,6 +1162,12 @@ window.__ModuleLoader__.load({
 				h('div', { style: S.tabs, key: 'tabs' }, TABS.map((t) => h('button', {
 					key: t.id, style: tab === t.id ? S.tabOn : S.tab, onClick: () => setTab(t.id),
 				}, t.label))),
+				configError ? h('div', {
+					key: 'config-error',
+					style: Object.assign({}, S.msg, { color: '#c0392b', whiteSpace: 'pre-wrap' }),
+				}, `⚠️ 配置文件读取/解析失败：${configError}\n`
+					+ `路径：${configPath || '（未知）'}。当前显示的是最后一次成功加载的配置；保存会被拒绝。\n`
+					+ '修好文件后 5 秒内自动恢复（不要重启 dsh-web：坏配置下插件起不来）。') : null,
 				body,
 
 				h('div', { style: S.msg, key: 'msg' }, msg || (busy ? '处理中…' : '')),
@@ -1496,17 +1513,12 @@ window.__ModuleLoader__.load({
 			// 切换某群的「记忆开关」：写 config 的 group-memory.mutedChats（插件读侧/积累侧都按它拦截）
 			const toggleMute = async (g) => {
 				if (!data) return
-				const key = g.chat
-				const curSet = new Set((data.groups || []).filter((x) => x.muted).map((x) => x.chat))
-				const turnOn = curSet.has(key) // 现在关着 → 这次要打开
-				if (turnOn) curSet.delete(key)
-				else curSet.add(key)
-				const value = [...curSet].sort().join(', ')
+				const muted = !g.muted // 只传「这个会话要开还是关」，整串名单由后端在事务里重读+增删
 				setBusy(true); setMsg('')
 				try {
-					const r = await call('setcfg', { key: 'group-memory.mutedChats', value })
+					const r = await call('mute', { chat: g.chat, muted })
 					if (r && r.ok === false) throw new Error(r.error)
-					setMsg(`${g.name || g.chat}：记忆已${turnOn ? '打开' : '关闭'} ✓（${turnOn ? '恢复读取与积累' : '不再读取和积累，已有内容仍可编辑'}）`)
+					setMsg(r && r.message ? r.message : `${g.name || g.chat}：记忆已${muted ? '关闭' : '打开'} ✓`)
 					const d = await call('list')
 					if (d && d.ok !== false) setData(d)
 				} catch (e) { setMsg(`切换记忆开关 ✗ ${e.message}`) } finally { setBusy(false) }

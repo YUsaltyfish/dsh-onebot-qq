@@ -41,11 +41,6 @@ const POKE_COOLDOWN_MS = 3000
 /** 本插件开关表（控制台据此渲染；值每轮现读 bot.cfg） */
 const configSchema = {
   enabled: { type: 'bool', default: true, group: '唤醒', label: '门禁与唤醒', hint: '总开关：关掉后群里不再响应 @ / 唤醒词 / 戳一戳（等于机器人闭嘴）。' },
-  adminQq: {
-    type: 'int', default: 0, group: '权限', label: '主人 QQ（一般不用改）',
-    hint: '插件侧的主人 QQ（内核会用实例配置的 adminQq 自动填，两边保持一致）。用途：① 主人私聊豁免出站脱敏；② 群里「主人指令」按它判定；③ 改配置类命令只认它。'
-      + '一般不用动；在「群聊」页顶部改主人 QQ 后，内核会自动同步到这里。',
-  },
   keywords: {
     type: 'text', default: '', group: '唤醒', label: '群唤醒词（免 @ 唤醒）',
     hint: '控制台用「填空 + 添加」维护（加/删写 config，底层存储仍是 `*: 词1,词2` / `<群号>: 词1,词2` 文本行）；人设 `.wake.txt` 里的词**合并生效**（去重）。',
@@ -415,8 +410,8 @@ export default {
 
     // ── pre-gate：硬门禁（fail-closed 阶段；异常会被内核当"拦住"，所以只做纯判断） ──
     bot.on('pre-gate', (ev) => {
-      // 内核 normalizeEvent 已按 adminQq 填 sender.isMaster；本插件 adminQq 配了就以它为准
-      // （配置迁移时 admins 可能不止一个，靠这一手兜底）。
+      // 内核 normalizeEvent 已按实例配置的 adminQq 填 sender.isMaster；这里的 bot.cfg.adminQq
+      // 由内核统一镜像同一个值（插件级配置项已废弃），保留这一行只是历史兜底，恒等不产生分歧。
       if (ev.sender && bot.cfg.adminQq) ev.sender.isMaster = String(ev.sender.qq) === String(bot.cfg.adminQq)
 
       // ⚠️ 下面的 effective() 每次判定都现读 `bot.cfg`（控制台热同步就地改这个对象 → 热改立即生效）

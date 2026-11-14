@@ -106,3 +106,57 @@ test('concurrent console switches cannot install the second persona before first
   assert.match(fs.readFileSync(path.join(h.workspaceDir, 'AGENTS.local.md'), 'utf8'), /Gamma/)
   assert.equal(fs.readdirSync(h.workspaceDir).some((name) => name.startsWith('.persona-')), false)
 })
+
+// ── A2：控制台「当前人设」文本框 = 钉死并切换（与总览芯片同一条事务）──────────
+const deliveredMd = (h) => fs.readFileSync(path.join(h.workspaceDir, 'AGENTS.local.md'), 'utf8')
+const pinned = (h) => h.kernel.raw.pluginConfig['persona-voice']?.activePersona
+
+test('set 写人设 = 钉死 + 投递文件（不再只写 config 的半切换）', async (t) => {
+  const h = await setup(t)
+  const r = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: 'Beta' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(pinned(h), 'Beta', '配置要钉死新人设')
+  assert.match(deliveredMd(h), /Beta/, 'DSH 读的人设正文要一起换（不是只换句池）')
+})
+
+test('set 写不存在的人设：报错且配置、投递文件都不动', async (t) => {
+  const h = await setup(t)
+  const before = snapshot(h.workspaceDir)
+  const configBefore = fs.readFileSync(h.configPath, 'utf8')
+  const r = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: '不存在的人设' })
+  assert.equal(r.ok, false, JSON.stringify(r))
+  assert.deepEqual(snapshot(h.workspaceDir), before)
+  assert.equal(fs.readFileSync(h.configPath, 'utf8'), configBefore)
+})
+
+test('set 写空串 = 解除钉死（只写配置，不重投递）', async (t) => {
+  const h = await setup(t)
+  const before = snapshot(h.workspaceDir)
+  const r = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: '' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(pinned(h), '', '空串应清掉钉死')
+  assert.deepEqual(snapshot(h.workspaceDir), before, '解除钉死不需要动投递文件')
+})
+
+test('已是当前人设：不重投（copy 模式下重投会因用户手改而报冲突）', async (t) => {
+  const h = await setup(t)
+  assert.equal(pinned(h), 'Alpha')
+  // 用户手改过投递文件（很常见：临时调人设）
+  fs.appendFileSync(path.join(h.workspaceDir, 'AGENTS.local.md'), '\n用户临时补充\n')
+  const before = snapshot(h.workspaceDir)
+  const r = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: 'Alpha' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.match(String(r.message || ''), /无需切换|钉死/)
+  assert.deepEqual(snapshot(h.workspaceDir), before, '同人设不得重新投递（不能覆盖用户改动）')
+})
+
+test('人设未钉死时填写当前人设名：只钉死、不重投', async (t) => {
+  const h = await setup(t)
+  const off = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: '' })
+  assert.equal(off.ok, true, JSON.stringify(off))
+  const before = snapshot(h.workspaceDir)
+  const r = await h.admin.handle('set', { key: 'persona-voice.activePersona', value: 'Alpha' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(pinned(h), 'Alpha', '应钉死当前人设')
+  assert.deepEqual(snapshot(h.workspaceDir), before, '文件已经是对的，不需要重投')
+})

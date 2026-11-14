@@ -6,7 +6,8 @@ const revisionBase = (key) => String(key).replace(':', '_')
 export function pruneMemoryRevisions(dir, key, keep) {
   if (!/^(?:private:)?\d{4,12}$/.test(String(key))) throw new Error('Invalid memory revision key')
   const root = path.resolve(dir, '.revisions')
-  const re = new RegExp(`^${revisionBase(key)}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+  // 兼容四种版本文件名：<stamp> / <stamp>-N / <stamp>-manual / <stamp>-N-manual
+  const re = new RegExp(`^${revisionBase(key)}-\\d{8}-\\d{6}(?:-\\d+)?(?:-manual)?\\.md$`)
   let names
   try { names = fs.readdirSync(root) } catch (e) { if (e.code === 'ENOENT') return 0; throw e }
   const entries = names.filter((name) => re.test(name)).map((name) => ({ name, at: fs.statSync(path.join(root, name)).mtimeMs }))

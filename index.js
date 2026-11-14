@@ -168,7 +168,7 @@ async function discoverPlugins({ runtime, dataDir, log }) {
       if (!plugin || typeof plugin !== 'object') throw new Error('没有默认导出的插件对象')
       if (String(plugin.id) !== id) throw new Error(`插件 id=${plugin.id} 与目录名 ${id} 不一致`)
       if (typeof plugin.setup !== 'function') throw new Error('缺少 setup(bot)')
-      const cfg = buildPluginCfg(plugin, runtime, dataDir)
+      const cfg = buildPluginCfg(plugin, runtime, dataDir, log)
       found.push({ id, plugin, cfg, disabled: runtime.plugins?.[id] === false, lastError: null })
     } catch (e) {
       log.error(`插件 ${id} 导入失败（跳过，内核继续运行）: ${e.stack || e.message}`)
@@ -180,14 +180,23 @@ async function discoverPlugins({ runtime, dataDir, log }) {
 
 /**
  * 单个插件的生效配置：schema 默认值 → 实例配置覆盖 → 相对 dataDir 的路径解析成绝对路径。
- * 内核负责的跨插件约定也在这里落地（gate-wake.adminQq、file-transfer 白名单默认值）。
+ * 内核负责的跨插件约定也在这里落地（gate-wake 的主人号统一、file-transfer 白名单默认值）。
  */
-function buildPluginCfg(plugin, runtime, dataDir) {
+function buildPluginCfg(plugin, runtime, dataDir, log = null) {
   const id = String(plugin.id)
   const merged = withDefaults(plugin.configSchema, runtime.pluginConfig?.[id])
   const cfg = resolveRuntimePaths(merged, dataDir)
-  // gate-wake 的 adminQq：实例配置里只有一个权威值（runtime.adminQq）
-  if (id === 'gate-wake' && !(Number(cfg.adminQq) > 0)) cfg.adminQq = Number(runtime.adminQq) || 0
+  // gate-wake 的 adminQq：**实例配置的 adminQq 是唯一权威值**。
+  // 插件级同名键是历史遗留（schema 已不含它 → withDefaults 会丢弃）；旧配置里若还留着不同的值，
+  // 只提示一次、不写盘，一律按实例配置统一，避免「门禁按旧号判主人」。
+  if (id === 'gate-wake') {
+    const legacy = Number(runtime.pluginConfig?.[id]?.adminQq) > 0 ? Number(runtime.pluginConfig[id].adminQq) : 0
+    const effective = Number(runtime.adminQq) || 0
+    if (legacy > 0 && legacy !== effective) {
+      log?.warn?.(`gate-wake 的插件级 adminQq 与实例配置不一致；已按实例配置统一（该插件级配置项已废弃，可从 config.json 手动删除）`)
+    }
+    cfg.adminQq = effective
+  }
   // file-transfer 图片白名单：缺省 = [dataDir, 系统临时目录]（内核注入，插件里不写死任何机器路径）
   if (id === 'file-transfer' && !(Array.isArray(cfg.imageWhitelist) && cfg.imageWhitelist.length)) {
     cfg.imageWhitelist = [dataDir, os.tmpdir()]
@@ -239,6 +248,7 @@ export async function apply(ctx, bundleConfig = {}) {
   }
   if (loaded.created) log.info(`已创建默认实例配置：${configPath}（请到控制台填写 adminQq / OneBot 地址）`)
   if (loaded.migrated) log.warn('检测到旧版配置格式：已按 v2 在内存中迁移；建议用 CLI 的 import-legacy 落盘')
+  if (loaded.mapMigrated) log.info('配置格式升级：gate-wake 群名单已从对象存法改为文本存法（控制台不再显示 [object Object]；旧文件备份为 bak-prune-*）')
 
   // ── 2. 子插件发现（import + 配置解析；单个插件坏不拖垮内核）──────
   const discovered = await discoverPlugins({ runtime, dataDir, log })
@@ -322,7 +332,7 @@ export async function apply(ctx, bundleConfig = {}) {
   // 安全提示：既没配 preset、内置 qq-chat 又不可用 → 会继承 profile 默认工具面（可能含 bash/文件写入）
   if (configReady && !String(runtime.dsh?.agentPreset || '').trim()) {
     log.warn('未配置 dsh.agentPreset 且内置「qq-chat」不可用：QQ 线将使用 DSH profile 的默认 preset'
-      + '（工具面可能包含 bash/文件写入等）。请在控制台「DSH 连接」页填一个已存在的 preset。')
+      + '（工具面可能包含 bash/文件写入等）。请在 config.json 的 dsh.agentPreset 填一个已存在的 preset（控制台没有这个字段）。')
   }
 
   // ── 3. 临时目录（入站图 / 生图快照；用后 best-effort 清理）────────
@@ -1157,7 +1167,7 @@ export async function apply(ctx, bundleConfig = {}) {
     if (!privateCandidateCurrent(ev)) return false
     ev.sender.isMaster = String(ev.sender.qq) === String(kernel.adminQq)
     if (!await pipeline.checkGate(ev)) return false
-    // pre-gate 插件可有独立主人配置；主动身份只信实例配置的目标，不借合成发言提权。
+    // pre-gate 插件可能改写 isMaster；主动身份只信实例配置的目标，不借合成发言提权。
     ev.sender.isMaster = String(ev.sender.qq) === String(kernel.adminQq)
     if (ev.turnCtx) ev.turnCtx.isMaster = ev.sender.isMaster
     return privateCandidateCurrent(ev)
@@ -1444,7 +1454,7 @@ export async function apply(ctx, bundleConfig = {}) {
     kernel.adminQq = Number(runtime.adminQq) || 0
     // 子插件配置原地同步（保持对象身份 → 插件 setup 时捕获的 bot.cfg 引用继续有效）
     for (const entry of discovered) {
-      const nextCfg = buildPluginCfg(entry.plugin, runtime, dataDir)
+      const nextCfg = buildPluginCfg(entry.plugin, runtime, dataDir, log)
       replaceInPlace(entry.cfg, nextCfg)
     }
     refreshKeywordTable()

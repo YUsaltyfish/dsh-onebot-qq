@@ -1,7 +1,7 @@
 /**
  * test/audit-workspace-bootstrap.test.js — 「单开 QQ 工作区」自举 + 内置 qq-chat preset。
  *
- * 目标行为（对应控制台「DSH 连接」页）：
+ * 目标行为（对应实例配置 dsh.* 引导项）：
  *   1. 插件启动（= 安装后第一次加载）就按 dsh.qqWorkspacePath 创建「QQ 聊天」工作区；
  *   2. 已有同路径工作区时复用，绝不重复创建；
  *   3. 之后每条 QQ 线建会话都挂在这个工作区里（GUI 侧栏分组，不再落「未分组」）；

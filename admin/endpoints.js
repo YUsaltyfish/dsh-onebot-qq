@@ -115,15 +115,21 @@ export function parseGroupMap(raw) {
   return map
 }
 
-/** 名单 Map → 配置里的存法：原本是对象就继续用对象，否则用控制台的文本格式。 */
+/**
+ * 名单 Map → 配置里的存法：原本是对象就继续用对象，否则用控制台的文本格式。
+ *
+ * ⚠️ 空数组要保留：`{群号: []}` / 文本 `群号:` 表示「这个群已纳入管理、名单留空（= 不限制）」，
+ * 是「纳入管理」按钮让群卡片出现的**唯一**依据（status 的群清单来自 map.keys()）。
+ * 以前按 length 过滤会把它抹掉 → 点按钮没反应、下次编辑别群时还会把已纳入的群清掉。
+ * 删除条目请用 `map.delete(gid)` 表达，别指望序列化顺手过滤。
+ */
 function serializeGroupMap(map, preferObject) {
   if (preferObject) {
     const out = {}
-    for (const [gid, qqs] of map) if (qqs.length) out[gid] = qqs.map(Number)
+    for (const [gid, qqs] of map) out[gid] = qqs.map(Number)
     return out
   }
   return [...map]
-    .filter(([, qqs]) => qqs.length)
     .map(([gid, qqs]) => `${gid}:${qqs.join(',')}`)
     .join(';')
 }
@@ -482,14 +488,32 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   }
 
   // ── schema ─────────────────────────────────────────────────
+  /**
+   * 读磁盘配置；坏了（JSON 损坏 / 读不了）就退回内核内存里最后一份成功配置，并带上 `configError`。
+   * 只给 schema / status 用：配置坏掉时控制台必须还能渲染（否则连「一键诊断」都点不到）。
+   * ⚠️ 其它端点照旧直接 `store.read()` 报错 —— 写盘一律拒绝，绝不覆盖坏文件。
+   */
+  let lastConfigError = ''
+  function readRawSafe() {
+    try {
+      const raw = store.read()
+      if (lastConfigError) { lastConfigError = ''; warn('配置文件已恢复可读，schema/status 回到磁盘值') }
+      return { raw, configError: '' }
+    } catch (e) {
+      const message = String(e?.message || e)
+      if (message !== lastConfigError) { lastConfigError = message; warn(`配置文件读取失败，控制台改用内存兜底：${message}`) }
+      return { raw: safe(() => kernel?.raw, {}) || {}, configError: message }
+    }
+  }
+
   function schema() {
-    const raw = store.read()
-    return { ok: true, ...collectSchema(kernel, raw) }
+    const { raw, configError } = readRawSafe()
+    return { ok: true, configError, ...collectSchema(kernel, raw) }
   }
 
   // ── status ─────────────────────────────────────────────────
   async function status() {
-    const raw = store.read()
+    const { raw, configError } = readRawSafe()
     const rt = runtimeOf()
     const onebotHealth = safe(() => kernel?.onebot?.health?.(), {}) || {}
     const dshHealth = safe(() => kernel?.dsh?.health?.(), {}) || {}
@@ -560,11 +584,16 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       version: toStr(kernel?.version) || PKG_VERSION,
       dataDir: paths.dataDir,
       configPath: toStr(store.configPath || configPath || kernel?.configPath),
-      configReady: configReadyOf(raw),
+      // 配置坏着的时候不能报「已就绪」：显示的是内存兜底值，保存会被拒绝。
+      configReady: configError ? false : configReadyOf(raw),
       platform: toStr(safe(() => process.platform, '')),
       node: toStr(safe(() => process.version, '')),
     }
-    const onboarding = onboardingOf(raw, persona, onebotHealth, imagegen)
+    const onboarding = (configError
+      ? onboardingOf(raw, persona, onebotHealth, imagegen).map((item) => (item.id === 'config'
+        ? { ...item, ok: false, hint: `配置文件读取/解析失败：${configError}` }
+        : item))
+      : onboardingOf(raw, persona, onebotHealth, imagegen))
 
     const modules = collectModules(kernel, raw)
     const longForward = (() => {
@@ -583,6 +612,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
 
     return {
       ok: true,
+      configError,
       health: {
         dshLinked: Boolean(dshHealth.linked ?? true),
         dshMode: toStr(dshHealth.mode) || 'in-process',
@@ -720,11 +750,23 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
   async function set(payload = {}) {
     const key = toStr(payload.key)
     if (!key) throw new Error('set 需要 key')
+    // 「当前人设」文本框 = 钉死并切换：必须走与人设芯片同一条事务（写配置 + 投递文件），
+    // 不能当普通配置写 —— 只写 config 会半切换（句池/唤醒词换了、DSH 读的人设正文没换）。
+    // 空串仍走普通写入：清除钉死，回落到人设指针。
+    if (key === 'persona-voice.activePersona') {
+      const personaName = toStr(payload.value).replace(/\.md$/i, '').trim()
+      if (personaName) return persona({ op: 'switch', name: personaName, pin: true })
+    }
     const control = findControl(kernel, key)
     const isSecret = control?.secret === true
     // 秘密字段（token / API Key）：日志、RPC 返回、控制台消息里都不得出现明文
     let written
     const saved = await store.update((next) => {
+      // 需要上下文校验的键不接受通用 set：group-memory.dir 必须走「群记忆 → 高级配置」的 setcfg
+      // （那里会校验不能逃出数据目录；放通用入口等于绕过校验）。
+      if (key === 'group-memory.dir') {
+        throw new Error('记忆目录请在「群记忆 → 高级配置」里修改（那里需要校验路径不能超出数据目录）')
+      }
       written = writeValue(kernel, key, payload.value, next)
       return { unchanged: written.unchanged === true }
     }, { what: `${key} = <已更新>`, allowPending: true })
@@ -793,8 +835,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     }
     let detail = ''
     const saved = await store.update((next) => {
-    if (kind === 'ignore' || kind === 'spont' || kind === 'welcome') {
-      // 群号数组：屏蔽 / 每群主动接话 / 每群入群欢迎
+    if (kind === 'ignore' || kind === 'spont') {
+      // 群号数组：屏蔽 / 每群主动接话（纯数字）
       const dotted = GROUP_PATHS[kind]
       const list = new Set(toNumList(getPath(next, dotted)))
       const gidNum = Number(gid)
@@ -805,9 +847,19 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const has = list.has(gidNum)
       detail = kind === 'ignore'
         ? (has ? `已屏蔽群 ${gid}` : `已放行群 ${gid}`)
-        : kind === 'spont'
-          ? (has ? `群 ${gid} 允许主动接话：开` : `群 ${gid} 允许主动接话：关`)
-          : (has ? `群 ${gid} 允许入群欢迎：开` : `群 ${gid} 允许入群欢迎：关`)
+        : (has ? `群 ${gid} 允许主动接话：开` : `群 ${gid} 允许主动接话：关`)
+    } else if (kind === 'welcome') {
+      // 入群欢迎群列表：**字符串**数组，允许 '*'（全群）。
+      // 不能用 toNumList —— 它会把 '*' 静默丢掉：只要在控制台逐群点一次，就把「全群欢迎」关掉了。
+      const dotted = GROUP_PATHS.welcome
+      const list = new Set(toStrList(getPath(next, dotted)))
+      const key = String(gid)
+      if (op === 'add' || op === 'ensure') list.add(key)
+      else if (op === 'remove') list.delete(key)
+      else if (op === 'toggle') (list.has(key) ? list.delete(key) : list.add(key))
+      const sorted = [...list].sort((a, b) => (a === '*' ? -1 : b === '*' ? 1 : Number(a) - Number(b)))
+      setPath(next, dotted, sorted)
+      detail = list.has(key) ? `群 ${gid} 允许入群欢迎：开` : `群 ${gid} 允许入群欢迎：关`
     } else if (kind === 'allowlist' || kind === 'blocklist') {
       // 群内名单：{群号:[QQ]}（存对象或文本，按原存法写回）
       const dotted = GROUP_PATHS[kind]
@@ -827,7 +879,9 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
         else map.delete(gid)
       }
       setPath(next, dotted, serializeGroupMap(map, preferObject))
-      detail = `${label} ${(map.get(gid) || []).length} 人`
+      detail = op === 'ensure'
+        ? `已纳入管理：${label}留空（空名单 = 不限制）`
+        : `${label} ${(map.get(gid) || []).length} 人`
     } else {
       // 唤醒词：兼容全局键 '*'；文本行 / 对象两种存法
       const dotted = keywordConfigPath()
@@ -835,9 +889,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const preferObject = isPlainObject(currentRaw)
       const map = parseKeywordMap(currentRaw)
       const words = new Set(map.get(gid) || [])
-      if (op === 'ensure') {
-        if (!map.has(gid)) map.set(gid, [])
-      } else {
+      if (op === 'ensure') throw new Error('唤醒词不支持 ensure（请用 add / remove）')
+      else {
         const word = toStr(payload.value)
         if (!word) throw new Error('唤醒词不能为空')
         if (/[\r\n]/.test(word)) throw new Error('唤醒词不能包含换行')
@@ -884,7 +937,8 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     const revDir = path.join(memoryDir(), '.revisions')
     let names = []
     try { names = fs.readdirSync(revDir) } catch { return 0 }
-    const re = new RegExp(`^${revBaseOf(line)}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+    // 兼容四种版本文件名：<stamp> / <stamp>-N / <stamp>-manual / <stamp>-N-manual
+    const re = new RegExp(`^${revBaseOf(line)}-\\d{8}-\\d{6}(?:-\\d+)?(?:-manual)?\\.md$`)
     const entries = names.filter((n) => re.test(n))
       .map((n) => ({ n, at: (() => { try { return fs.statSync(path.join(revDir, n)).mtimeMs } catch { return 0 } })() }))
       .sort((a, b) => a.at - b.at || a.n.localeCompare(b.n))
@@ -1124,6 +1178,10 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
     if (op === 'save') {
       const line = memChatOf(payload)
       const { file } = line
+      // 必须在读旧文件、写 -manual 备份之前拒：否则对象会被 String() 成 [object Object] 静默覆盖记忆。
+      if (payload.content != null && typeof payload.content !== 'string') {
+        throw new Error('内容格式不对：content 必须是字符串（对象/数组请先序列化成文本）')
+      }
       const incoming = String(payload.content == null ? '' : payload.content)
       if (!incoming.trim()) throw new Error('内容不能为空（真要清空请直接删文件）')
       let previousRaw = ''
@@ -1194,7 +1252,7 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       const revDir = path.join(dir, '.revisions')
       let revNames = []
       try { revNames = fs.readdirSync(revDir) } catch { revNames = [] }
-      const revRe = new RegExp(`^${revBaseOf(line)}-(?:\\d{8}-\\d{6}(?:-\\d+)?|\\d{8}-\\d{6}-manual)\\.md$`)
+      const revRe = new RegExp(`^${revBaseOf(line)}-\\d{8}-\\d{6}(?:-\\d+)?(?:-manual)?\\.md$`)
       for (const n of revNames.filter((f) => revRe.test(f))) {
         try { if (moveOne(path.join(revDir, n), path.join(trashDir, 'revisions', n))) moved.revisions += 1 } catch (e) {
           warn(`记忆历史版本移入回收站失败 ${n}: ${e.message}`)
@@ -1236,6 +1294,27 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       return { ok: true, op, key, value: written.value, backup: saved.backup, pending: Boolean(saved.pending), message: `${entry.label} ✓${pendingNote}` }
     }
 
+    if (op === 'mute') {
+      // 单个会话的记忆开关：在事务里重读 → 增删 → 回写，前端只传 {chat, muted}。
+      // 不让前端自己拼整串：两个标签页各改各的时，read-modify-write 会互相覆盖、把别人的静音抹掉。
+      const line = memChatOf(payload)
+      const muted = payload.muted !== false
+      let nextList = ''
+      const saved = await store.update((next) => {
+        const cur = String(getPath(next, ['pluginConfig', 'group-memory', 'mutedChats']) ?? '')
+        const set = new Set(cur.split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean))
+        if (muted) set.add(line.chat)
+        else set.delete(line.chat)
+        nextList = [...set].sort().join(', ')
+        setPath(next, ['pluginConfig', 'group-memory', 'mutedChats'], nextList)
+      }, { what: `${line.chat} 记忆${muted ? '关闭' : '打开'}`, allowPending: true })
+      return {
+        ok: true, op, chat: line.chat, muted, mutedChats: nextList,
+        backup: saved.backup, pending: Boolean(saved.pending),
+        message: `${line.chat}：记忆已${muted ? '关闭（不再读取与积累，已有内容仍可编辑）' : '打开（恢复读取与积累）'}`,
+      }
+    }
+
     if (op === 'refresh') {
       if (payload.confirm !== true) {
         return { ok: true, op, needsConfirm: true, message: '（未执行）「立刻积累一轮」会调用一次大模型，确定吗？' }
@@ -1270,34 +1349,51 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       throw new Error(`没有「${name}」这套人设。现有：${before.personas.map((p) => p.name).join(' / ') || '（人设库为空）'}`)
     }
 
+    // 钉死（写 activePersona）和投递文件分开判断：
+    //  · 已经是当前人设 → 不重投（copy 模式下重投会因「用户手改过投递文件」报投递冲突）；
+    //  · 只是把当前人设名字钉死 → 只写配置、不投递。
+    // 钉死状态以**磁盘配置**为准（personaList().configured 来自插件已解析 cfg，可能落后于刚写的配置）。
+    const pin = payload.pin === true
+    const needDeliver = toStr(before.current).trim() !== name
+    let pinChanged = false
     let switched
 
-    // 配置里钉死了 activePersona 的话要同步改；本地投递与保存共用路径事务。
+    // 配置（钉死）与本地投递共用同一个事务：要么一起成功，要么回滚。
     const saved = await store.update((next) => {
-      const pinned = toStr(getPath(next, ['pluginConfig', 'persona-voice', 'activePersona']))
-      if (!pinned || pinned === name) return { unchanged: true }
+      const pinnedNow = toStr(getPath(next, ['pluginConfig', 'persona-voice', 'activePersona'])).trim()
+      // 旧行为要保留：配置里已经钉死了别人时，切换也要把钉子挪过去（否则配置与人设正文会分叉）。
+      if (pinnedNow === name || !(pin || pinnedNow !== '')) return { unchanged: true }
       setPath(next, ['pluginConfig', 'persona-voice', 'activePersona'], name)
+      pinChanged = true
+      return { unchanged: false }
     }, {
       what: `切人设 → ${name}`, allowPending: true,
-      effect: () => {
-        const transaction = beginPersonaSwitch({ workspaceDir: before.workspaceDir || '', personaDir: before.dir || '', name, mode: 'auto' })
-        switched = transaction.result
-        return transaction
-      },
+      effect: needDeliver
+        ? () => {
+          const transaction = beginPersonaSwitch({ workspaceDir: before.workspaceDir || '', personaDir: before.dir || '', name, mode: 'auto' })
+          switched = transaction.result
+          return transaction
+        }
+        : null,
     })
     const backup = saved.backup
 
+    if (!pinChanged && !needDeliver) {
+      return { ok: true, op, name, ...before, unchanged: true, message: `当前已是「${name}」，无需切换` }
+    }
+
     const after = personaList()
-    const fallbackMessage = `已切到「${name}」：人设 + 句池一起换 —— 下一条消息生效（不用重置、不丢上下文）`
+    const fallbackMessage = needDeliver
+      ? `已切到「${name}」：人设 + 句池一起换 —— 下一条消息生效（不用重置、不丢上下文）`
+      : `已钉死「${name}」：投递文件不需要更新，下一条消息生效`
     return {
       ok: true,
       op,
       name,
-      ...switched,
+      ...(switched || {}),
       ...after,
       backup,
-      // 平台事务的结果与统一提示。
-      message: toStr(switched.message) || fallbackMessage,
+      message: toStr(switched?.message) || fallbackMessage,
     }
   }
 
@@ -1556,12 +1652,11 @@ export function createAdminEndpoints({ kernel = {}, configPath = '', dataDir = '
       }
       const r = await kernel.checkHostDeps()
       const bad = r.items.filter((it) => it.required && it.ok !== true)
-      return {
-        ok: r.ok, id, ...r,
-        message: r.ok
-          ? `✅ 运行环境就绪（${r.items.filter((it) => it.ok === true).length}/${r.items.length} 项通过）`
-          : `❌ 缺少必需依赖：${bad.map((it) => it.id).join(', ')} —— 把这份结果交给 DSH，让它按 hint 安装`,
-      }
+      const message = r.ok
+        ? `✅ 运行环境就绪（${r.items.filter((it) => it.ok === true).length}/${r.items.length} 项通过）`
+        : `❌ 缺少必需依赖：${bad.map((it) => it.id).join(', ')} —— 把这份结果交给 DSH，让它按 hint 安装`
+      // 前端 run() 失败时只显示 error.message；失败必须带 error，否则界面只剩一个“✗ ”。
+      return { ok: r.ok, id, ...r, ...(r.ok ? {} : { error: message }), message }
     }
 
     // ── 运维诊断：检查 + 脱敏报告（永不 throw，落盘失败也给正文）──

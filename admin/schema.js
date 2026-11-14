@@ -320,7 +320,6 @@ export const CORE_CONTROLS = [
   {
     key: 'info.other', group: '其他', type: 'info',
     text: '这里是低频 / 高级配置，按来源分组说明（每一项都有详细悬停解释）：\n'
-      + '· 权限：主人 QQ —— 一般由内核按实例配置自动填，不用改。\n'
       + '· 门禁：屏蔽群 / 群内黑名单 / 群内白名单 / 全局允许用户 —— 「群聊」页每张群卡片也有同样的开关，改哪边都一样。\n'
       + '· 文件 / 发图：入站文件落盘目录、可发图片目录白名单。\n'
       + '· 头像：QQ 头像缓存目录与过期时长。\n'
@@ -365,7 +364,7 @@ export const ACTIONS = [
   },
   {
     id: 'ensure-workspace', group: '运维', label: '📁 检查 / 创建 QQ 工作区',
-    hint: '按「QQ 线工作区」路径在 DSH 侧栏注册工作区（已存在则复用，不重复创建）；「QQ 线工作区名称」是显示名。',
+    hint: '按实例配置的 dsh.qqWorkspacePath / dsh.workspaceTitle 在 DSH 侧栏注册工作区（已存在则复用，不重复创建）。控制台没有这两个字段，需要改就改 config.json（改完重启 dsh-web）。',
   },
   {
     id: 'check-host-deps', group: '运维', label: '🧪 检查运行环境',

@@ -41,7 +41,7 @@ DSH插件式的QQ机器人，经 OneBot v11 协议收发消息 —— 协议端�
 dsh plugin --profile web add github:YUsaltyfish/dsh-onebot-qq
 
 # 本地 tgz（npm pack 产物）
-dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.1.tgz
+dsh plugin --profile web add /abs/path/dsh-onebot-qq-0.1.2.tgz
 
 # 本地目录（link 不复制源码；改代码后仍需插件重载或重启 DSH）
 dsh plugin --profile web add link:/abs/path/dsh-onebot-qq
